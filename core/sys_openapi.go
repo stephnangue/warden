@@ -245,4 +245,3 @@ func walkSchemaRefs(s *framework.OASSchema, from, to map[string]*framework.OASSc
 		walkSchemaRefs(s.Items, from, to)
 	}
 }
-

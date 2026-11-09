@@ -41,18 +41,9 @@ func (t *AlicloudKeysCredType) ConfigSchema() []*credential.FieldValidator {
 			Example(""),
 
 		credential.StringField("mint_method").
-			OneOf("static_alicloud", "assume_role").
-			Describe("Mint method for credential minting. Use static_alicloud with a hvault source, or assume_role with an alicloud source.").
+			OneOf("assume_role").
+			Describe("Mint method for credential minting. Use assume_role with an alicloud source.").
 			Example("assume_role"),
-
-		// Vault source fields
-		credential.StringField("kv2_mount").
-			Describe("Vault KV2 mount path (required for static_alicloud)").
-			Example("secret"),
-
-		credential.StringField("secret_path").
-			Describe("Path to secret in KV2 (required for static_alicloud)").
-			Example("alicloud/prod/keys"),
 
 		// STS assume_role fields
 		credential.StringField("role_arn").
@@ -74,12 +65,12 @@ func (t *AlicloudKeysCredType) ConfigSchema() []*credential.FieldValidator {
 }
 
 // ValidateConfig validates the Config for an Alicloud credential spec
-func (t *AlicloudKeysCredType) ValidateConfig(config map[string]string, sourceType string) error {
-	switch sourceType {
-	case credential.SourceTypeVault, credential.SourceTypeAlicloud:
-		// Supported
-	default:
-		return fmt.Errorf("alicloud_keys credentials require a vault or alicloud source, got: %s", sourceType)
+func (t *AlicloudKeysCredType) ValidateConfig(config credential.Config, sourceType string) error {
+	// A vault source is not supported: it would need a static_alicloud mint method,
+	// which the Vault driver has never implemented. It used to be accepted here and
+	// then failed at the first mint.
+	if sourceType != credential.SourceTypeAlicloud {
+		return fmt.Errorf("alicloud_keys credentials require an alicloud source, got: %s", sourceType)
 	}
 
 	schema := t.ConfigSchema()
@@ -87,25 +78,11 @@ func (t *AlicloudKeysCredType) ValidateConfig(config map[string]string, sourceTy
 		return err
 	}
 
-	switch sourceType {
-	case credential.SourceTypeVault:
-		if config["mint_method"] != "static_alicloud" {
-			return fmt.Errorf("'mint_method' must be 'static_alicloud' for vault source, got: %s", config["mint_method"])
-		}
-		if config["kv2_mount"] == "" {
-			return fmt.Errorf("'kv2_mount' is required when mint_method is static_alicloud")
-		}
-		if config["secret_path"] == "" {
-			return fmt.Errorf("'secret_path' is required when mint_method is static_alicloud")
-		}
-	case credential.SourceTypeAlicloud:
-		mintMethod := config["mint_method"]
-		if mintMethod != "assume_role" {
-			return fmt.Errorf("'mint_method' must be 'assume_role' for alicloud source, got: %s", mintMethod)
-		}
-		if config["role_arn"] == "" {
-			return fmt.Errorf("'role_arn' is required for assume_role")
-		}
+	if mintMethod := config.Get("mint_method"); mintMethod != "assume_role" {
+		return fmt.Errorf("'mint_method' must be 'assume_role' for alicloud source, got: %s", mintMethod)
+	}
+	if config.Get("role_arn") == "" {
+		return fmt.Errorf("'role_arn' is required for assume_role")
 	}
 
 	return nil
@@ -138,12 +115,15 @@ func (t *AlicloudKeysCredType) Parse(rawData, metadata map[string]interface{}, l
 	}
 
 	return &credential.Credential{
-		Type:      credential.TypeAlicloudKeys,
-		Category:  credential.CategoryCloudIAM,
-		LeaseTTL:  leaseTTL,
-		LeaseID:   leaseID,
-		IssuedAt:  time.Now(),
-		Revocable: leaseTTL > 0,
+		Type:     credential.TypeAlicloudKeys,
+		Category: credential.CategoryCloudIAM,
+		LeaseTTL: leaseTTL,
+		LeaseID:  leaseID,
+		IssuedAt: time.Now(),
+		// Revoking means releasing a lease at the source, which needs a handle to
+		// release. The alicloud driver's only mint path returns self-expiring STS
+		// session credentials and no leaseID, so this is always false here.
+		Revocable: leaseTTL > 0 && leaseID != "",
 		Data:      data,
 		Metadata:  meta,
 	}, nil
@@ -186,6 +166,12 @@ func (t *AlicloudKeysCredType) RequiresSpecRotation() bool {
 // SensitiveConfigFields returns spec config keys that should be masked in output
 func (t *AlicloudKeysCredType) SensitiveConfigFields() []string {
 	return []string{"access_key_secret", "security_token"}
+}
+
+// StoredSecrets reports the secret config keys this spec holds. Neither is
+// required by any mint method, but a stored value is still a secret held.
+func (t *AlicloudKeysCredType) StoredSecrets(config credential.Config) []string {
+	return config.Present("access_key_secret", "security_token")
 }
 
 // FieldSchemas returns metadata about the credential's data fields

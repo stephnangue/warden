@@ -8,6 +8,7 @@
 package dualgateway
 
 import (
+	"net/url"
 	"time"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
@@ -91,7 +92,18 @@ type ProviderSpec struct {
 	// OnConfigParsed is called after standard config parsing to extract
 	// provider-specific fields. Returns a state map stored on the backend.
 	// If nil, no extra state is maintained.
+	//
+	// Keys returned here are echoed back by a config read, so name them as the
+	// operator wrote them: a read that reports a key the write path would refuse
+	// leaves no way to round-trip a mount's configuration.
 	OnConfigParsed func(config map[string]any) map[string]any
+
+	// ValidateExtraConfig checks the values behind ExtraConfigKeys at write time.
+	// The standard validation covers only the keys every provider shares, so
+	// without this an extra key is accepted with any content at all and a typo
+	// surfaces as a per-request failure long afterwards. If nil, extra keys are
+	// accepted as written.
+	ValidateExtraConfig func(config map[string]any) error
 
 	// --- Optional Credential Extraction Overrides ---
 
@@ -110,7 +122,7 @@ type ProviderSpec struct {
 	// --- Optional API-mode URL override ---
 
 	// RewriteAPITarget, if non-nil, overrides API-mode target URL construction.
-	// Default behavior (nil): targetURL = providerURL + apiPath.
+	// Default behavior (nil): upstream.URL(providerURL, apiPath).
 	//
 	// Providers that route to multiple upstream hostnames based on the request
 	// path (e.g., IBM Cloud, where each service has a different host) use this
@@ -122,10 +134,13 @@ type ProviderSpec struct {
 	//   state       - the map produced by OnConfigParsed (may be nil)
 	//
 	// Returns:
-	//   full target URL (scheme + host + path + optional query) on success
+	//   the target URL (scheme + host + path) on success, built with
+	//     upstream.URL so apiPath — the decoded path the request was
+	//     authorized on — is never decoded a second time; the request's
+	//     query is set by the caller
 	//   non-nil error to reject the request with HTTP 400
 	//
 	// Only invoked for API-mode requests; SigV4 (S3/COS) requests continue to use
 	// S3Endpoint and are never routed through this hook.
-	RewriteAPITarget func(providerURL, apiPath string, state map[string]any) (string, error)
+	RewriteAPITarget func(providerURL, apiPath string, state map[string]any) (*url.URL, error)
 }

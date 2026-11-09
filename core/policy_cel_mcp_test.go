@@ -37,7 +37,7 @@ func TestMCPCond_BatchSharesOneNow(t *testing.T) {
 		}},
 	}
 
-	d := decideMCP(sets, req, nil, time.Unix(0, 0).UTC(), "")
+	d := decideMCP(sets, nil, req, nil, time.Unix(0, 0).UTC(), "")
 	require.NotNil(t, d)
 	assert.Equal(t, "allow", d.Decision, "both batch calls must see the same now snapshot")
 }
@@ -45,15 +45,23 @@ func TestMCPCond_BatchSharesOneNow(t *testing.T) {
 // TestMCPCond_MultiSetConditionOR confirms cross-set OR at the condition level:
 // a call denied by one set's condition but allowed by another's is allowed.
 func TestMCPCond_MultiSetConditionOR(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp { allowed_methods = ["tools/call"] allowed_tools = ["pay"] condition = "call.args.amount <= 100" }
 }
+`, `
 path "mcp/gateway/*" {
-  capabilities = ["update"]
-  mcp { allowed_methods = ["tools/call"] allowed_tools = ["pay"] condition = "call.args.amount <= 5000" }
-}`)
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["pay"] }
+  condition = "call.args.amount <= 100"
+}
+
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["pay"] }
+  condition = "call.args.amount <= 5000"
+}
+`)
 	req := mcpReq(t, `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"pay","arguments":{"amount":1000}},"id":1}`)
 	res := cbp.AllowOperation(testContext(), req, nil, false)
 	assert.True(t, res.Allowed, "set A denies (>100) but set B allows (<=5000) → cross-set OR allows")
@@ -70,15 +78,16 @@ func mcpReq(t *testing.T, body string) *logical.Request {
 
 func mcpAmountCapPolicy(t *testing.T) *CBP {
 	t.Helper()
-	return mustCBP(t, `
+	return mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["create_payment"]
-    condition       = "call.args.amount <= 1500"
-  }
-}`)
+}`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["create_payment"] }
+  condition = "call.args.amount <= 1500"
+}
+`)
 }
 
 func TestMCPCond_NumericAllowDeny(t *testing.T) {
@@ -115,18 +124,20 @@ func TestMCPCond_RecordsInputs(t *testing.T) {
 	assert.Equal(t, "2000", res.MCPDecision.Condition.Inputs["call.args.amount"])
 }
 
-// TestMCPCond_TokenNamespace confirms an mcp{} condition can read the token
+// TestMCPCond_AgentNamespace confirms an MCP condition can read the agent
 // namespace (threaded via the TokenEntry), not just call.*.
-func TestMCPCond_TokenNamespace(t *testing.T) {
-	cbp := mustCBP(t, `
+func TestMCPCond_AgentNamespace(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["create_payment"]
-    condition       = "token.metadata.env == 'prod'"
-  }
-}`)
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["create_payment"] }
+  condition = "agent.metadata.env == 'prod'"
+}
+`)
 	body := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_payment","arguments":{"amount":1}},"id":1}`
 
 	prod := cbp.AllowOperation(testContext(), mcpReq(t, body), &logical.TokenEntry{Metadata: map[string]string{"env": "prod"}}, false)
@@ -180,15 +191,16 @@ func TestMCPCond_MissingArgFailsClosed(t *testing.T) {
 // method (e.g. tools/list) the same set allows. Authors must scope with
 // call.method (e.g. `call.method != "tools/call" || call.args.amount <= 1500`).
 func TestMCPCond_AppliesToEveryMethodInSet(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["create_payment"]
-    condition       = "call.args.amount <= 1500"
-  }
-}`)
+}`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["create_payment"] }
+  condition = "call.args.amount <= 1500"
+}
+`)
 	// tools/list carries no args -> the args-referencing condition errors ->
 	// fail-closed deny (NOT a silent allow).
 	list := mcpReq(t, `{"jsonrpc":"2.0","method":"tools/list","id":1}`)
@@ -197,15 +209,16 @@ path "mcp/gateway/*" {
 	assert.Equal(t, mcpRuleTypeConditionError, res.MCPDecision.RuleType)
 
 	// A properly scoped condition lets tools/list through.
-	scoped := mustCBP(t, `
+	scoped := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["create_payment"]
-    condition       = "call.method != 'tools/call' || call.args.amount <= 1500"
-  }
-}`)
+}`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["create_payment"] }
+  condition = "call.method != 'tools/call' || call.args.amount <= 1500"
+}
+`)
 	list2 := mcpReq(t, `{"jsonrpc":"2.0","method":"tools/list","id":1}`)
 	assert.True(t, scoped.AllowOperation(testContext(), list2, nil, false).Allowed, "scoped condition admits tools/list")
 }
@@ -213,9 +226,9 @@ path "mcp/gateway/*" {
 // Benchmarks reuse one extracted request across iterations (the descriptor is
 // read-only during evaluation), isolating the per-call decide cost.
 
-func benchMCP(b *testing.B, policy, body string, te *logical.TokenEntry) {
+func benchMCP(b *testing.B, mcpPolicy, body string, te *logical.TokenEntry) {
 	b.Helper()
-	cbp := mustCBP(b, policy)
+	cbp := mustCBPWithMCP(b, benchMCPGrant, mcpPolicy)
 	req := buildE2ERequest(b, body)
 	runExtract(req, &mcpMockBackend{enforce: true, cap: 1 << 20})
 	ctx := testContext()
@@ -225,23 +238,22 @@ func benchMCP(b *testing.B, policy, body string, te *logical.TokenEntry) {
 	}
 }
 
-const benchMCPNoCond = `
+const benchMCPGrant = `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp { 
-    allowed_methods = ["tools/call"] 
-	allowed_tools   = ["create_payment"] 
-  }
+}`
+
+const benchMCPNoCond = `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["create_payment"] }
 }`
 
 const benchMCPWithCond = `
 path "mcp/gateway/*" {
-  capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["create_payment"]
-    condition       = "call.args.amount <= 1500"
-  }
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["create_payment"] }
+  condition = "call.args.amount <= 1500"
 }`
 
 const benchMCPCall = `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_payment","arguments":{"amount":1200}},"id":1}`
@@ -259,4 +271,98 @@ func BenchmarkMCPDecide_Batch3_NoCondition(b *testing.B) {
 }
 func BenchmarkMCPDecide_Batch3_WithCondition(b *testing.B) {
 	benchMCP(b, benchMCPWithCond, benchMCPBatch, nil)
+}
+
+// TestMCPCond_UserNamespace confirms the user leg reaches MCP policy condition, and
+// that mcpConditionFields unions UsrFields across rule-sets.
+//
+// The union is the sharp edge here: it prunes the activation shared by every
+// call in a batch, so a set whose UsrFields is dropped evaluates against a
+// namespace missing the field it reads — a no-such-key deny with no compile
+// error.
+//
+// Set ordering is load-bearing. mcpConditionFields seeds its field-sets from
+// the first condition-carrying set and unions the rest, so the user-referencing
+// set must come SECOND: put it first and it is seeded rather than unioned, and
+// the test passes even with the union removed.
+func TestMCPCond_UserNamespace(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["pay"] }
+  condition = "call.args.amount <= 1"
+}
+
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["pay"] }
+  condition = "user.present && user.metadata.acting_agent == agent.principal"
+}
+`)
+	body := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"pay","arguments":{"amount":9000}},"id":1}`
+	agentTE := &logical.TokenEntry{PrincipalID: "agent-gateway"}
+
+	withUser := func(actingAgent string) *logical.Request {
+		req := mcpReq(t, body)
+		req.User = &logical.UserPrincipal{
+			TokenEntry: &logical.TokenEntry{
+				Metadata: map[string]string{"acting_agent": actingAgent},
+			},
+		}
+		return req
+	}
+
+	bound := cbp.AllowOperation(testContext(), withUser("agent-gateway"), agentTE, false)
+	assert.True(t, bound.Allowed, "user condition must resolve in an MCP policy condition")
+
+	other := cbp.AllowOperation(testContext(), withUser("agent-other"), agentTE, false)
+	assert.False(t, other.Allowed, "amount 9000 fails the amount set, mismatched agent fails the binding set")
+
+	// No user credential. Asserting !Allowed alone proves nothing here — the
+	// amount set already denies — so assert the binding set reached a clean
+	// guard denial rather than erroring on a missing key.
+	none := cbp.AllowOperation(testContext(), mcpReq(t, body), agentTE, false)
+	assert.False(t, none.Allowed)
+	require.NotNil(t, none.MCPDecision)
+	require.NotNil(t, none.MCPDecision.Condition)
+	assert.Empty(t, none.MCPDecision.Condition.ErrorKind,
+		"user.present false is a policy decision, not an eval error")
+}
+
+// TestMCPCond_UserNamespaceSeeded covers the other arm of mcpConditionFields.
+// TestMCPCond_UserNamespace puts the user-referencing set second so its
+// UsrFields arrive via the union; that leaves the seed arm — where the first
+// condition-carrying set is the one reading user.* — uncovered. A single
+// user-binding rule-set is also the shape an operator writes first, so a
+// seeding regression would deny every request.
+func TestMCPCond_UserNamespaceSeeded(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["pay"] }
+  condition = "user.present && user.metadata.acting_agent == agent.principal"
+}
+`)
+	body := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"pay","arguments":{"amount":1}},"id":1}`
+	agentTE := &logical.TokenEntry{PrincipalID: "agent-gateway"}
+
+	req := mcpReq(t, body)
+	req.User = &logical.UserPrincipal{
+		TokenEntry: &logical.TokenEntry{Metadata: map[string]string{"acting_agent": "agent-gateway"}},
+	}
+	assert.True(t, cbp.AllowOperation(testContext(), req, agentTE, false).Allowed)
+
+	bad := mcpReq(t, body)
+	bad.User = &logical.UserPrincipal{
+		TokenEntry: &logical.TokenEntry{Metadata: map[string]string{"acting_agent": "agent-other"}},
+	}
+	assert.False(t, cbp.AllowOperation(testContext(), bad, agentTE, false).Allowed)
 }

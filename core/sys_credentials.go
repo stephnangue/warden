@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
@@ -37,7 +38,7 @@ func (b *SystemBackend) pathCredentials() []*framework.Path {
 				},
 				"rotation_period": {
 					Type:        framework.TypeDurationSecond,
-					Description: "Rotation period in seconds for credential source rotation. Required by source types that rotate a long-lived secret (e.g. hvault); not applicable to keyless sources (e.g. AWS auth_method=oidc_federation). Enforced per type at create time.",
+					Description: "Rotation period in seconds for credential source rotation. Required by source types that rotate a long-lived secret (e.g. hvault). Rejected at create time for a source that holds no secret of its own: any auth_method=oidc_federation source, and any source whose secret comes from a referenced spec (secret_spec). Also rejected for an azure auth_method=certificate source, whose certificate is rolled over by hand.",
 					Default:     0,
 				},
 			},
@@ -180,6 +181,31 @@ func (b *SystemBackend) pathCredentials() []*framework.Path {
 			HelpSynopsis:    "Complete cred spec connect by exchanging the authorization code",
 			HelpDescription: "Exchanges the authorization code for tokens using the client secret the server holds, then seals the result into the spec.",
 		},
+		// Keyless plans: read-only, so they write nothing whatever the operation.
+		{
+			Pattern: "cred/sources/" + framework.GenericNameRegex("name") + "/keyless-plan",
+			Fields:  keylessPlanFields("The credential source to plan a keyless replacement for"),
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.CreateOperation: &framework.PathOperation{
+					Callback: b.handleCredentialSourceKeylessPlan,
+					Summary:  "Plan a keyless replacement for a credential source and its specs",
+				},
+			},
+			HelpSynopsis:    "Plan a keyless credential source",
+			HelpDescription: "Returns the keyless source and specs to create next to the keyed ones, the upstream trust they need, and the stored credentials to delete once roles use them. Writes nothing.",
+		},
+		{
+			Pattern: "cred/specs/" + framework.GenericNameRegex("name") + "/keyless-plan",
+			Fields:  keylessPlanFields("The credential spec to plan a keyless replacement for"),
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.CreateOperation: &framework.PathOperation{
+					Callback: b.handleCredentialSpecKeylessPlan,
+					Summary:  "Plan a keyless replacement for a credential spec",
+				},
+			},
+			HelpSynopsis:    "Plan a keyless credential spec",
+			HelpDescription: "Returns the spec to create next to the keyed one, fetching its secret through credential chaining, and the stored secret to revoke once roles use it. Writes nothing.",
+		},
 	}
 }
 
@@ -216,16 +242,25 @@ func (b *SystemBackend) maskSourceConfig(sourceType string, config map[string]st
 		}
 	}
 
-	// Build sensitive fields lookup
-	sensitive := make(map[string]bool)
-	for _, f := range sensitiveFields {
-		sensitive[f] = true
-	}
+	// A secret the driver says the server holds is masked whether or not its
+	// list names it.
+	return maskFields(config, sensitiveFields, b.core.sourceStoredSecrets(sourceType, credential.NewConfig(config)))
+}
 
-	// Mask sensitive values
+// maskFields replaces the value of each field named in any of the lists with
+// the mask. An empty value is left as is: it is a field an update cleared, and
+// masking it would read back as a secret still held. The lists are only read,
+// so a type or driver may hand back a slice it shares.
+func maskFields(config map[string]string, fieldLists ...[]string) map[string]string {
+	sensitive := make(map[string]bool)
+	for _, fields := range fieldLists {
+		for _, f := range fields {
+			sensitive[f] = true
+		}
+	}
 	masked := make(map[string]string, len(config))
 	for k, v := range config {
-		if sensitive[k] {
+		if sensitive[k] && v != "" {
 			masked[k] = maskValue
 		} else {
 			masked[k] = v
@@ -287,29 +322,17 @@ func (b *SystemBackend) maskSpecConfig(specType string, config map[string]string
 	if b.core.credentialTypeRegistry != nil {
 		if credType, err := b.core.credentialTypeRegistry.GetByName(specType); err == nil {
 			if dynamic, ok := credType.(credential.ConfigSensitivity); ok {
-				sensitiveFields = dynamic.SensitiveConfigFieldsFor(config)
+				sensitiveFields = dynamic.SensitiveConfigFieldsFor(credential.NewConfig(config))
 			} else {
 				sensitiveFields = credType.SensitiveConfigFields()
 			}
 		}
 	}
 
-	// Build sensitive fields lookup
-	sensitive := make(map[string]bool)
-	for _, f := range sensitiveFields {
-		sensitive[f] = true
-	}
-
-	// Mask sensitive values
-	masked := make(map[string]string, len(config))
-	for k, v := range config {
-		if sensitive[k] {
-			masked[k] = maskValue
-		} else {
-			masked[k] = v
-		}
-	}
-	return masked
+	// A secret the type says the spec holds is masked whether or not its list
+	// names it: the two are declared apart, and a list that misses one would
+	// hand the secret to every reader.
+	return maskFields(config, sensitiveFields, b.core.specStoredSecrets(specType, credential.NewConfig(config)))
 }
 
 // Credential Source Handlers
@@ -325,8 +348,15 @@ func (b *SystemBackend) handleCredentialSourceCreate(ctx context.Context, req *l
 	source := &credential.CredSource{
 		Name:           name,
 		Type:           sourceType,
-		Config:         convertToStringMap(configAny),
+		Config:         credential.NewConfig(convertToStringMap(configAny)),
 		RotationPeriod: time.Duration(rotationPeriodSec) * time.Second,
+	}
+
+	// Checked before the store call, so a refused write has no side effect.
+	keylessWarnings, err := b.core.checkKeyless(keylessKindSource, name,
+		b.core.sourceStoredSecrets(sourceType, source.Config))
+	if err != nil {
+		return logical.ErrorResponse(err), nil
 	}
 
 	// Store via credential config store
@@ -341,14 +371,17 @@ func (b *SystemBackend) handleCredentialSourceCreate(ctx context.Context, req *l
 	b.logger.Info("credential source created",
 		logger.String("name", name),
 		logger.String("type", sourceType))
+	b.core.logKeylessWarnings(keylessKindSource, name, keylessWarnings)
 
-	return b.respondCreated(map[string]any{
+	data := map[string]any{
 		"name":            source.Name,
 		"type":            source.Type,
-		"config":          source.Config,
+		"config":          b.maskSourceConfig(source.Type, source.Config.Map()),
 		"rotation_period": int64(source.RotationPeriod.Seconds()),
 		"message":         fmt.Sprintf("Successfully created credential source %s", name),
-	}), nil
+	}
+	appendWarnings(data, keylessWarnings...)
+	return b.respondCreated(data), nil
 }
 
 // handleCredentialSourceRead handles GET /sys/cred/sources/{name}
@@ -365,13 +398,20 @@ func (b *SystemBackend) handleCredentialSourceRead(ctx context.Context, req *log
 	}
 
 	// Mask sensitive config fields
-	maskedConfig := b.maskSourceConfig(source.Type, source.Config)
+	maskedConfig := b.maskSourceConfig(source.Type, source.Config.Map())
 
-	data := map[string]any{
+	data := withStoredSecrets(map[string]any{
 		"name":            source.Name,
 		"type":            source.Type,
 		"config":          maskedConfig,
 		"rotation_period": int64(source.RotationPeriod.Seconds()),
+	}, b.core.sourceStoredSecrets(source.Type, source.Config))
+
+	// A source that authenticates with a certificate shows when it expires and the
+	// thumbprints it is registered under, so it can be rolled over in time and
+	// matched against the server's list.
+	if info := drivers.DescribeCertificate(source.Config.Get("certificate"), time.Now()); info != nil {
+		data["certificate_info"] = info
 	}
 
 	// Include rotation schedule info if available
@@ -399,6 +439,15 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 
 	b.logger.Info("updating credential source", logger.String("name", name))
 
+	// Serialize with rotation of this source: without it a rotation completing
+	// between this read and the write below would be undone by the write, and
+	// the source left pointing at the key that rotation just deleted.
+	unlock, errResp := b.lockSource(ctx, name)
+	if errResp != nil {
+		return errResp, nil
+	}
+	defer unlock()
+
 	// Get existing source
 	existingSource, err := b.core.credConfigStore.GetSource(ctx, name)
 	if err != nil {
@@ -409,8 +458,8 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 	}
 
 	// Create a new source with merged config (don't modify the cached object)
-	mergedConfig := make(map[string]string, len(existingSource.Config))
-	for k, v := range existingSource.Config {
+	mergedConfig := make(map[string]string, existingSource.Config.Len())
+	for k, v := range existingSource.Config.All() {
 		mergedConfig[k] = v
 	}
 
@@ -427,27 +476,77 @@ func (b *SystemBackend) handleCredentialSourceUpdate(ctx context.Context, req *l
 		}
 	}
 
-	// Create updated source for validation and persistence. RotationPeriod
-	// is preserved from the existing entry — the typed UpdateCredentialSource
-	// API only carries Config, so dropping it here would (1) fail hvault
-	// validation (rotation_period required) on every update, and (2)
-	// silently strip rotation config from non-hvault sources too.
+	// RotationPeriod is preserved from the existing entry unless the caller names
+	// it. Preserving on absence is what keeps an ordinary config-only update from
+	// (1) failing hvault validation, which requires a rotation_period, and (2)
+	// silently stripping rotation config from every other source type.
+	//
+	// Honouring it when supplied is what makes a rotating source convertible. A
+	// source that holds no secret of its own is refused a rotation_period, so
+	// moving a keyed source onto a referenced spec means clearing the period in the
+	// same write — and with no way to express that, the conversion was impossible
+	// in place and delete-and-recreate is blocked while specs reference the source.
+	rotationPeriod := existingSource.RotationPeriod
+	if raw, ok := d.GetOk("rotation_period"); ok {
+		if seconds, isInt := raw.(int); isInt {
+			rotationPeriod = time.Duration(seconds) * time.Second
+		}
+	}
+
+	// Create updated source for validation and persistence.
 	updatedSource := &credential.CredSource{
 		Name:           existingSource.Name,
 		Type:           existingSource.Type,
-		Config:         mergedConfig,
-		RotationPeriod: existingSource.RotationPeriod,
+		Config:         credential.NewConfig(mergedConfig),
+		RotationPeriod: rotationPeriod,
 	}
 
-	// Update via credential config store (validates and tests connection before persisting)
-	if err := b.core.credConfigStore.UpdateSource(ctx, updatedSource); err != nil {
+	// The resulting config is judged, not the fields sent: a write that moves the
+	// source to a keyless mode and clears its secret passes, and an edit that
+	// leaves a stored secret in place does not. A mask sentinel was skipped in the
+	// merge above, so resending a read-back config keeps the secret and is judged
+	// as keeping it. Checked before the discard below, so a refused write costs
+	// nothing.
+	keylessWarnings, err := b.core.checkKeyless(keylessKindSource, name,
+		b.core.sourceStoredSecrets(updatedSource.Type, updatedSource.Config))
+	if err != nil {
 		return logical.ErrorResponse(err), nil
 	}
 
-	return b.respondSuccess(map[string]any{
+	// A staged rotation holds a snapshot of the config being replaced, and a
+	// credential created upstream to go with it. Discard it now, while the
+	// driver still authenticates with the current config: after the write it
+	// may not be able to, and the snapshot must never be written over this edit.
+	//
+	// This runs before validation, so an edit that is then rejected still
+	// costs the staged rotation. That is safe — the entry goes back to idle and
+	// prepares again — and cheaper than validating twice, since validation
+	// opens a connection to the provider.
+	if !existingSource.Config.Equal(updatedSource.Config) && b.core.rotationManager != nil {
+		if err := b.core.rotationManager.DiscardStagedSource(ctx, name); err != nil {
+			b.logger.Warn("failed to discard staged rotation before source update",
+				logger.String("name", name), logger.Err(err))
+		}
+	}
+
+	// Update via credential config store (validates and tests connection before persisting)
+	if err := b.core.credConfigStore.UpdateSource(ctx, updatedSource, UpdateSourceOptions{
+		ExpectedConfigHash: existingSource.Config.Hash(),
+	}); err != nil {
+		if errors.Is(err, ErrConfigChanged) {
+			return logical.ErrorResponse(logical.ErrConflictf(
+				"credential source %q changed while this update was in progress; read it again and retry", name)), nil
+		}
+		return logical.ErrorResponse(err), nil
+	}
+	b.core.logKeylessWarnings(keylessKindSource, name, keylessWarnings)
+
+	data := map[string]any{
 		"name":    updatedSource.Name,
 		"message": fmt.Sprintf("Successfully updated credential source %s", name),
-	}), nil
+	}
+	appendWarnings(data, keylessWarnings...)
+	return b.respondSuccess(data), nil
 }
 
 // handleCredentialSourceDelete handles DELETE /sys/cred/sources/{name}
@@ -455,6 +554,12 @@ func (b *SystemBackend) handleCredentialSourceDelete(ctx context.Context, req *l
 	name := d.Get("name").(string)
 
 	b.logger.Info("deleting credential source", logger.String("name", name))
+
+	unlock, errResp := b.lockSource(ctx, name)
+	if errResp != nil {
+		return errResp, nil
+	}
+	defer unlock()
 
 	// Check for references before deletion
 	references, err := b.core.credConfigStore.CheckSourceReferences(ctx, name)
@@ -472,6 +577,15 @@ func (b *SystemBackend) handleCredentialSourceDelete(ctx context.Context, req *l
 		return logical.ErrorResponse(logical.ErrConflictf(
 			"cannot delete credential source %s: still referenced by %d credential spec(s)",
 			name, len(references))), nil
+	}
+
+	// Discard a staged rotation while the source, and the driver that can
+	// delete its staged credential, still exist.
+	if b.core.rotationManager != nil {
+		if err := b.core.rotationManager.DiscardStagedSource(ctx, name); err != nil {
+			b.logger.Warn("failed to discard staged rotation before source delete",
+				logger.String("name", name), logger.Err(err))
+		}
 	}
 
 	// Delete via credential config store
@@ -498,13 +612,13 @@ func (b *SystemBackend) handleCredentialSourceList(ctx context.Context, req *log
 	// Convert to output format with masked sensitive fields
 	sourceInfos := make([]map[string]any, 0, len(sources))
 	for _, source := range sources {
-		maskedConfig := b.maskSourceConfig(source.Type, source.Config)
-		sourceInfos = append(sourceInfos, map[string]any{
+		maskedConfig := b.maskSourceConfig(source.Type, source.Config.Map())
+		sourceInfos = append(sourceInfos, withStoredSecrets(map[string]any{
 			"name":            source.Name,
 			"type":            source.Type,
 			"config":          maskedConfig,
 			"rotation_period": int64(source.RotationPeriod.Seconds()),
-		})
+		}, b.core.sourceStoredSecrets(source.Type, source.Config)))
 	}
 
 	return b.respondSuccess(map[string]any{
@@ -539,7 +653,7 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 		if err != nil {
 			return logical.ErrorResponse(logical.ErrBadRequestf("unknown source type: %s", src.Type)), nil
 		}
-		specType, err = factory.InferCredentialType(specConfig)
+		specType, err = factory.InferCredentialType(credential.NewConfig(specConfig))
 		if err != nil {
 			return logical.ErrorResponse(logical.ErrBadRequestf(
 				"cannot infer credential type for source type '%s': %s — please specify 'type' explicitly",
@@ -571,10 +685,17 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 		Name:           name,
 		Type:           specType,
 		Source:         source,
-		Config:         specConfig,
+		Config:         credential.NewConfig(specConfig),
 		MinTTL:         time.Duration(minTTL) * time.Second,
 		MaxTTL:         time.Duration(maxTTL) * time.Second,
 		RotationPeriod: time.Duration(rotationPeriod) * time.Second,
+	}
+
+	// Checked before the store call, so a refused write has no side effect. On
+	// create the source's own secrets count too: a new spec widens their use.
+	keylessWarnings, errResp := b.checkSpecKeyless(ctx, spec, true)
+	if errResp != nil {
+		return errResp, nil
 	}
 
 	// Store via credential config store
@@ -586,16 +707,49 @@ func (b *SystemBackend) handleCredentialSpecCreate(ctx context.Context, req *log
 		return logical.ErrorResponse(err), nil
 	}
 
-	return b.respondCreated(map[string]any{
+	data := map[string]any{
 		"name":            spec.Name,
 		"type":            spec.Type,
 		"source":          spec.Source,
-		"config":          spec.Config,
+		"config":          b.maskSpecConfig(spec.Type, spec.Config.Map()),
 		"min_ttl":         int64(spec.MinTTL.Seconds()),
 		"max_ttl":         int64(spec.MaxTTL.Seconds()),
 		"rotation_period": int64(spec.RotationPeriod.Seconds()),
 		"message":         fmt.Sprintf("Successfully created credential spec %s", name),
-	}), nil
+	}
+	appendWarnings(data, b.core.assertionTTLWarnings(spec.Config)...)
+	appendWarnings(data, keylessWarnings...)
+	b.core.logKeylessWarnings(keylessKindSpec, name, keylessWarnings)
+	return b.respondCreated(data), nil
+}
+
+// assertionTTLWarnings reports when a spec's requested assertion_ttl exceeds the
+// issuer's current assertion_ttl, and so will be capped at mint.
+//
+// A warning, not a rejection. The issuer's value can change after the spec is stored,
+// and spec validation re-runs on every spec write, so a rejection would go stale and
+// start failing unrelated edits (see credential.ConfigAssertionTTL). The warning keeps
+// the cap from being silent at the one moment an operator is looking.
+//
+// It rides in the response DATA under "warnings", not logical.Response.Warnings: the
+// HTTP layer serializes only the data, so the latter would never reach the operator.
+// Nil when nothing is requested, nothing would be capped, or no issuer is configured.
+func (c *Core) assertionTTLWarnings(config credential.Config) []string {
+	requested := credential.RequestedAssertionTTL(config)
+	if requested == 0 {
+		return nil
+	}
+	issuer := c.OIDCIssuer()
+	if issuer == nil {
+		return nil
+	}
+	ceiling := issuer.AssertionTTL()
+	if requested <= ceiling {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"%s %s exceeds the issuer's assertion_ttl %s: this spec's assertions will be minted with %s, since the issuer caps every assertion at its own lifetime",
+		credential.ConfigAssertionTTL, requested, ceiling, ceiling)}
 }
 
 // handleCredentialSpecRead handles GET /sys/cred/specs/{name}
@@ -612,9 +766,9 @@ func (b *SystemBackend) handleCredentialSpecRead(ctx context.Context, req *logic
 	}
 
 	// Mask sensitive config fields
-	maskedConfig := b.maskSpecConfig(spec.Type, spec.Config)
+	maskedConfig := b.maskSpecConfig(spec.Type, spec.Config.Map())
 
-	return b.respondSuccess(map[string]any{
+	return b.respondSuccess(withStoredSecrets(map[string]any{
 		"name":            spec.Name,
 		"type":            spec.Type,
 		"source":          spec.Source,
@@ -623,7 +777,7 @@ func (b *SystemBackend) handleCredentialSpecRead(ctx context.Context, req *logic
 		"max_ttl":         int64(spec.MaxTTL.Seconds()),
 		"rotation_period": int64(spec.RotationPeriod.Seconds()),
 		"connected":       b.specIsConnected(spec),
-	}), nil
+	}, b.core.specStoredSecrets(spec.Type, spec.Config))), nil
 }
 
 // handleCredentialSpecUpdate handles PUT /sys/cred/specs/{name}
@@ -651,8 +805,8 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 	}
 
 	// Create a new spec with merged config (don't modify the cached object)
-	mergedConfig := make(map[string]string, len(spec.Config))
-	for k, v := range spec.Config {
+	mergedConfig := make(map[string]string, spec.Config.Len())
+	for k, v := range spec.Config.All() {
 		mergedConfig[k] = v
 	}
 
@@ -666,7 +820,7 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		newConfig := convertToStringMap(configAny.(map[string]any))
 		// Refuse operator-set values for keys the server seals, before merging —
 		// afterwards the caller's input and the stored value are indistinguishable.
-		if err := b.checkSystemManagedSpecConfig(spec.Type, newConfig, spec.Config); err != nil {
+		if err := b.checkSystemManagedSpecConfig(spec.Type, newConfig, spec.Config.Map()); err != nil {
 			return logical.ErrorResponse(err), nil
 		}
 		for k, v := range newConfig {
@@ -682,7 +836,7 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 		Name:           spec.Name,
 		Type:           spec.Type,
 		Source:         spec.Source,
-		Config:         mergedConfig,
+		Config:         credential.NewConfig(mergedConfig),
 		MinTTL:         spec.MinTTL,
 		MaxTTL:         spec.MaxTTL,
 		RotationPeriod: spec.RotationPeriod,
@@ -718,18 +872,45 @@ func (b *SystemBackend) handleCredentialSpecUpdate(ctx context.Context, req *log
 	// For a connected connect-gated spec (e.g. OAuth2 authorization_code), skip the
 	// validation test-mint: it would consume/rotate the sealed refresh token on an
 	// unrelated edit. Re-run `cred spec connect` to re-verify.
-	var opts []UpdateSpecOptions
+	opts := UpdateSpecOptions{ExpectedConfigHash: spec.Config.Hash()}
 	if b.specRequiresConnect(updatedSpec) && b.specIsConnected(updatedSpec) {
-		opts = append(opts, UpdateSpecOptions{SkipVerification: true})
+		opts.SkipVerification = true
 	}
-	if err := b.core.credConfigStore.UpdateSpec(ctx, updatedSpec, opts...); err != nil {
+
+	// The resulting config is judged, as on the source path, so an edit to a spec
+	// that still holds a secret is refused under enforce until the secret moves
+	// out. The source is not re-judged: its secret is judged on its own writes.
+	// Checked before the discard below, so a refused write costs nothing.
+	keylessWarnings, errResp := b.checkSpecKeyless(ctx, updatedSpec, false)
+	if errResp != nil {
+		return errResp, nil
+	}
+
+	// Discard a staged spec rotation first, as the source path does: its
+	// snapshot of this config must never be written over the edit.
+	if !spec.Config.Equal(updatedSpec.Config) && b.core.rotationManager != nil {
+		if err := b.core.rotationManager.DiscardStagedSpec(ctx, name); err != nil {
+			b.logger.Warn("failed to discard staged rotation before spec update",
+				logger.String("name", name), logger.Err(err))
+		}
+	}
+
+	if err := b.core.credConfigStore.UpdateSpec(ctx, updatedSpec, opts); err != nil {
+		if errors.Is(err, ErrConfigChanged) {
+			return logical.ErrorResponse(logical.ErrConflictf(
+				"credential spec %q changed while this update was in progress; read it again and retry", name)), nil
+		}
 		return logical.ErrorResponse(err), nil
 	}
 
-	return b.respondSuccess(map[string]any{
+	data := map[string]any{
 		"name":    updatedSpec.Name,
 		"message": fmt.Sprintf("Successfully updated credential spec %s", name),
-	}), nil
+	}
+	appendWarnings(data, b.core.assertionTTLWarnings(updatedSpec.Config)...)
+	appendWarnings(data, keylessWarnings...)
+	b.core.logKeylessWarnings(keylessKindSpec, name, keylessWarnings)
+	return b.respondSuccess(data), nil
 }
 
 // handleCredentialSpecAuthorize handles POST /sys/cred/specs/{name}/authorize.
@@ -748,15 +929,29 @@ func (b *SystemBackend) handleCredentialSpecAuthorize(ctx context.Context, req *
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
 	}
 
+	// Connect would seal a token into the spec, so under enforce the flow is
+	// refused here, before the operator is sent to the provider to approve a
+	// grant the server would then refuse to store.
+	keylessWarnings, errResp := b.checkSpecKeyless(ctx, spec, false)
+	if errResp != nil {
+		return errResp, nil
+	}
+
 	authorizeURL, err := authorizer.BuildAuthorizeURL(spec, redirectURI, state, codeChallenge)
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
 	}
 
-	return b.respondSuccess(map[string]any{
+	// The issuer travels with the authorize URL because the check it enables
+	// belongs at the callback, in the CLI, before the code comes back here to
+	// be redeemed. Empty when the source records none.
+	data := map[string]any{
 		"name":          name,
 		"authorize_url": authorizeURL,
-	}), nil
+		"issuer":        authorizer.AuthorizationIssuer(),
+	}
+	appendWarnings(data, keylessWarnings...)
+	return b.respondSuccess(data), nil
 }
 
 // handleCredentialSpecConnect handles POST /sys/cred/specs/{name}/connect. It
@@ -791,6 +986,13 @@ func (b *SystemBackend) handleCredentialSpecConnect(ctx context.Context, req *lo
 
 	reconnected := b.specIsConnected(spec)
 
+	// Checked before the code is exchanged: a refused connect must not consume
+	// the code, or rotate a refresh token at the provider, only to discard it.
+	keylessWarnings, errResp := b.checkSpecKeyless(ctx, spec, false)
+	if errResp != nil {
+		return errResp, nil
+	}
+
 	sealed, err := authorizer.ExchangeAuthorizationCode(ctx, spec, code, redirectURI, codeVerifier)
 	if err != nil {
 		return logical.ErrorResponse(logical.ErrBadRequest(err.Error())), nil
@@ -804,13 +1006,7 @@ func (b *SystemBackend) handleCredentialSpecConnect(ctx context.Context, req *lo
 		MinTTL:         spec.MinTTL,
 		MaxTTL:         spec.MaxTTL,
 		RotationPeriod: spec.RotationPeriod,
-		Config:         make(map[string]string, len(spec.Config)+len(sealed)),
-	}
-	for k, v := range spec.Config {
-		updated.Config[k] = v
-	}
-	for k, v := range sealed {
-		updated.Config[k] = v
+		Config:         spec.Config.WithAll(sealed),
 	}
 
 	// Skip verification: the exchange is itself the verification, and re-minting
@@ -823,12 +1019,35 @@ func (b *SystemBackend) handleCredentialSpecConnect(ctx context.Context, req *lo
 	if reconnected {
 		msg = fmt.Sprintf("Successfully re-connected credential spec %s (replaced the existing authorization)", name)
 	}
-	return b.respondSuccess(map[string]any{
+	b.core.logKeylessWarnings(keylessKindSpec, name, keylessWarnings)
+	data := map[string]any{
 		"name":        name,
 		"connected":   true,
 		"reconnected": reconnected,
 		"message":     msg,
-	}), nil
+	}
+	appendWarnings(data, keylessWarnings...)
+	return b.respondSuccess(data), nil
+}
+
+// lockSource takes the per-source mutation lock shared with the rotation
+// manager's source jobs, keyed by ns.UUID, returning the unlock func. It
+// returns an error response if the credential manager is unavailable, the
+// namespace is missing, or the context is cancelled while waiting.
+func (b *SystemBackend) lockSource(ctx context.Context, name string) (func(), *logical.Response) {
+	if b.core.credentialManager == nil {
+		return nil, logical.ErrorResponse(logical.ErrInternal("credential manager not initialized"))
+	}
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, logical.ErrorResponse(err)
+	}
+	unlock, err := b.core.credentialManager.LockSource(ctx, ns.UUID, name)
+	if err != nil {
+		return nil, logical.ErrorResponse(logical.ErrServiceUnavailablef(
+			"credential source %q is busy (a rotation is in progress); retry: %v", name, err))
+	}
+	return unlock, nil
 }
 
 // lockSpec takes the per-spec mutation lock (shared with the minting layer's
@@ -910,7 +1129,7 @@ func validateConnectRedirectURI(spec *credential.CredSpec, redirectURI string) e
 	if redirectURI == "" {
 		return fmt.Errorf("redirect_uri is required")
 	}
-	if pinned := spec.Config["redirect_uri"]; pinned != "" {
+	if pinned := spec.Config.Get("redirect_uri"); pinned != "" {
 		if redirectURI != pinned {
 			return fmt.Errorf("redirect_uri %q does not match the spec's pinned redirect_uri", redirectURI)
 		}
@@ -937,6 +1156,20 @@ func (b *SystemBackend) handleCredentialSpecDelete(ctx context.Context, req *log
 
 	b.logger.Info("deleting credential spec", logger.String("name", name))
 
+	unlock, errResp := b.lockSpec(ctx, name)
+	if errResp != nil {
+		return errResp, nil
+	}
+	defer unlock()
+
+	// Discard a staged spec rotation while the spec still exists.
+	if b.core.rotationManager != nil {
+		if err := b.core.rotationManager.DiscardStagedSpec(ctx, name); err != nil {
+			b.logger.Warn("failed to discard staged rotation before spec delete",
+				logger.String("name", name), logger.Err(err))
+		}
+	}
+
 	// Delete via credential config store
 	if err := b.core.credConfigStore.DeleteSpec(ctx, name); err != nil {
 		if errors.Is(err, ErrSpecNotFound) {
@@ -961,8 +1194,8 @@ func (b *SystemBackend) handleCredentialSpecList(ctx context.Context, req *logic
 	// Convert to output format with masked sensitive fields
 	specInfos := make([]map[string]any, 0, len(specs))
 	for _, spec := range specs {
-		maskedConfig := b.maskSpecConfig(spec.Type, spec.Config)
-		specInfos = append(specInfos, map[string]any{
+		maskedConfig := b.maskSpecConfig(spec.Type, spec.Config.Map())
+		specInfos = append(specInfos, withStoredSecrets(map[string]any{
 			"name":            spec.Name,
 			"type":            spec.Type,
 			"source":          spec.Source,
@@ -970,7 +1203,7 @@ func (b *SystemBackend) handleCredentialSpecList(ctx context.Context, req *logic
 			"min_ttl":         int64(spec.MinTTL.Seconds()),
 			"max_ttl":         int64(spec.MaxTTL.Seconds()),
 			"rotation_period": int64(spec.RotationPeriod.Seconds()),
-		})
+		}, b.core.specStoredSecrets(spec.Type, spec.Config)))
 	}
 
 	return b.respondSuccess(map[string]any{

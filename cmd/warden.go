@@ -8,7 +8,10 @@ import (
 	"github.com/stephnangue/warden/cmd/auth"
 	"github.com/stephnangue/warden/cmd/basic"
 	"github.com/stephnangue/warden/cmd/cred"
+	"github.com/stephnangue/warden/cmd/dev"
 	"github.com/stephnangue/warden/cmd/helpers"
+	"github.com/stephnangue/warden/cmd/identity"
+	"github.com/stephnangue/warden/cmd/login"
 	"github.com/stephnangue/warden/cmd/namespaces"
 	"github.com/stephnangue/warden/cmd/oidcissuer"
 	"github.com/stephnangue/warden/cmd/operator"
@@ -71,6 +74,9 @@ func init() {
 
 	wardenCmd.AddCommand(server.ServerCmd)
 	wardenCmd.AddCommand(status.StatusCmd)
+	wardenCmd.AddCommand(login.LoginCmd)
+	wardenCmd.AddCommand(login.LogoutCmd)
+	wardenCmd.AddCommand(login.PrintCmd)
 	wardenCmd.AddCommand(operator.OperatorCmd)
 	wardenCmd.AddCommand(providers.ProvidersCmd)
 	wardenCmd.AddCommand(auth.AuthCmd)
@@ -82,7 +88,9 @@ func init() {
 	wardenCmd.AddCommand(cred.CredCmd)
 	wardenCmd.AddCommand(schema.SchemaCmd)
 	wardenCmd.AddCommand(roles.RolesCmd)
+	wardenCmd.AddCommand(identity.IdentityCmd)
 	wardenCmd.AddCommand(skills.SkillsCmd)
+	wardenCmd.AddCommand(dev.DevCmd)
 	wardenCmd.AddCommand(basic.WriteCmd)
 	wardenCmd.AddCommand(basic.ReadCmd)
 	wardenCmd.AddCommand(basic.ListCmd)

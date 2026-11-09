@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -369,4 +370,198 @@ func TestHandleGateway_FiltersToolsList(t *testing.T) {
 	out := rec.Body.String()
 	assert.Contains(t, out, "get_x")
 	assert.NotContains(t, out, "delete_x", "denied tool must be pruned from the mcp_aws tools/list response")
+}
+
+// The Skills extension's listing goes through the same filter; a denied skill
+// is dropped whole and a kept one keeps its resources.
+func TestHandleGateway_FiltersSkillsList(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"skills":[` +
+			`{"uri":"skill://ok/SKILL.md","frontmatter":{"name":"ok","description":"a"},"resources":[{"uri":"skill://ok/SKILL.md","digest":"sha256:aa","size":1}]},` +
+			`{"uri":"skill://secret/SKILL.md","frontmatter":{"name":"secret","description":"b"},"resources":"dynamic"}]}}`))
+	}))
+	defer srv.Close()
+
+	b := setupBackend(t)
+	configureBackendForUpstream(t, b, srv)
+
+	req, rec := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"skills/list"}`, stsCredential())
+	req.MCPListFilter = &logical.MCPListFilter{
+		ListMethod: "skills/list",
+		Keep:       func(uri string) bool { return uri == "skill://ok/SKILL.md" },
+	}
+
+	b.handleGateway(context.Background(), req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	out := rec.Body.String()
+	assert.Contains(t, out, `"digest":"sha256:aa"`)
+	assert.NotContains(t, out, "skill://secret/", "denied skill must be pruned from the mcp_aws skills/list response")
+}
+
+// --- shape-aware deadline ---
+
+// mcp_aws implements MCPPolicyEnforced directly rather than going through
+// httpproxy's spec hooks, so its deadline selection is its own code path and
+// needs its own coverage.
+func TestHandleGateway_ListenTakesTheListenTimeout(t *testing.T) {
+	srv, _ := newCapturingUpstream(t)
+	defer srv.Close()
+
+	b := setupBackend(t)
+	configureBackendForUpstream(t, b, srv)
+	b.SetTimeout(30 * time.Second)
+	b.mu.Lock()
+	b.listenTimeout = time.Hour
+	b.mu.Unlock()
+
+	req, _ := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen"}`, stsCredential())
+	req.MCPDescriptor = &logical.MCPRequestDescriptor{
+		Calls: []logical.MCPCall{{Method: "subscriptions/listen"}},
+	}
+
+	b.handleGateway(context.Background(), req)
+
+	assert.Greater(t, remainingDeadline(t, req), 55*time.Minute,
+		"a subscriptions/listen stream must answer to listen_timeout, not the unary ceiling")
+}
+
+func TestHandleGateway_UnaryKeepsTheMountTimeout(t *testing.T) {
+	srv, _ := newCapturingUpstream(t)
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		name  string
+		calls []logical.MCPCall
+	}{
+		{"tools/call", []logical.MCPCall{{Method: "tools/call", Name: "get_x"}}},
+		{"batch containing a listen", []logical.MCPCall{
+			{Method: "tools/call", BatchIndex: 0},
+			{Method: "subscriptions/listen", BatchIndex: 1},
+		}},
+		{"empty sentinel — the body-less GET/DELETE verbs", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := setupBackend(t)
+			configureBackendForUpstream(t, b, srv)
+			b.SetTimeout(30 * time.Second)
+			b.mu.Lock()
+			b.listenTimeout = time.Hour
+			b.mu.Unlock()
+
+			req, _ := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`, stsCredential())
+			req.MCPDescriptor = &logical.MCPRequestDescriptor{Calls: tc.calls}
+
+			b.handleGateway(context.Background(), req)
+
+			assert.LessOrEqual(t, remainingDeadline(t, req), 30*time.Second)
+		})
+	}
+}
+
+// A provider with no MCP descriptor at all — nothing parsed this request as
+// MCP — must keep the mount timeout untouched.
+func TestHandleGateway_NoDescriptorKeepsTheMountTimeout(t *testing.T) {
+	srv, _ := newCapturingUpstream(t)
+	defer srv.Close()
+
+	b := setupBackend(t)
+	configureBackendForUpstream(t, b, srv)
+	b.SetTimeout(30 * time.Second)
+	b.mu.Lock()
+	b.listenTimeout = time.Hour
+	b.mu.Unlock()
+
+	req, _ := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, stsCredential())
+
+	b.handleGateway(context.Background(), req)
+
+	assert.LessOrEqual(t, remainingDeadline(t, req), 30*time.Second)
+}
+
+// remainingDeadline reads the deadline handleGateway armed on the outgoing
+// request. The cancel func has already fired by the time the handler returns,
+// but a context's Deadline outlives its cancellation.
+func remainingDeadline(t *testing.T, req *logical.Request) time.Duration {
+	t.Helper()
+	dl, ok := req.HTTPRequest.Context().Deadline()
+	require.True(t, ok, "handleGateway must arm a deadline on the proxied request")
+	return time.Until(dl)
+}
+
+// --- cache hygiene ---
+
+// mcp_aws writes upstream headers straight onto the client's writer rather
+// than through a reverse proxy's response hook, so its declaration rides a
+// writer wrapper. Both response shapes must carry it: the streaming path and
+// the filtered one.
+func TestHandleGateway_MarksResponsePrivate(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"get_x"}]}}`))
+	}))
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		name   string
+		filter *logical.MCPListFilter
+	}{
+		{name: "streamed response"},
+		{name: "filtered response", filter: &logical.MCPListFilter{
+			ListMethod: "tools/list",
+			Keep:       func(string) bool { return true },
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := setupBackend(t)
+			configureBackendForUpstream(t, b, srv)
+
+			req, rec := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, stsCredential())
+			req.MCPDescriptor = &logical.MCPRequestDescriptor{
+				Calls: []logical.MCPCall{{Method: "tools/list"}},
+			}
+			req.MCPListFilter = tc.filter
+
+			b.handleGateway(context.Background(), req)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, "public, max-age=300, private", rec.Header().Get("Cache-Control"),
+				"a listing pruned per principal must not be served to another from a shared cache")
+		})
+	}
+}
+
+// A request this mount did not judge as MCP is left alone.
+func TestHandleGateway_NonMCPResponseUnmarked(t *testing.T) {
+	srv, _ := newCapturingUpstream(t)
+	defer srv.Close()
+
+	b := setupBackend(t)
+	configureBackendForUpstream(t, b, srv)
+
+	req, rec := makeMCPRequest("/gateway/", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, stsCredential())
+
+	b.handleGateway(context.Background(), req)
+
+	assert.Empty(t, rec.Header().Get("Cache-Control"))
+}
+
+// The wrapper must not cost the SSE path its incremental delivery.
+func TestCachePrivateWriter_PreservesFlusher(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w := newCachePrivateWriter(rec)
+
+	_, ok := interface{}(w).(http.Flusher)
+	require.True(t, ok, "the SSE loop selects on http.Flusher")
+
+	_, _ = w.Write([]byte("event: ping\n\n"))
+	w.Flush()
+
+	assert.Equal(t, "private", rec.Header().Get("Cache-Control"),
+		"a handler that never calls WriteHeader must still get the declaration")
+	assert.Equal(t, "event: ping\n\n", rec.Body.String())
 }

@@ -1,0 +1,101 @@
+---
+import { render } from 'astro:content';
+import BlogLayout from '../../layouts/BlogLayout.astro';
+import { getPosts, formatDate, readingTime, type Post } from '../../lib/posts';
+
+export async function getStaticPaths() {
+  const posts = await getPosts();
+  return posts.map((post, i) => ({
+    params: { slug: post.id },
+    props: {
+      post,
+      // getPosts() is newest-first, so the *newer* post is the previous index.
+      newer: posts[i - 1],
+      older: posts[i + 1],
+    },
+  }));
+}
+
+interface Props {
+  post: Post;
+  newer?: Post;
+  older?: Post;
+}
+
+const { post, newer, older } = Astro.props;
+const { Content } = await render(post);
+const { title, description, publishDate, updatedDate, authors, tags, canonicalUrl, heroImage, draft } =
+  post.data;
+const minutes = readingTime(post.body);
+---
+
+<BlogLayout
+  title={title}
+  description={description}
+  canonicalUrl={canonicalUrl}
+  heroImage={heroImage}
+  publishDate={publishDate}
+  updatedDate={updatedDate}
+>
+  <article class="prose-wrap">
+    <header class="post-head">
+      <h1>{title}{draft && <span class="draft-flag">draft</span>}</h1>
+      <p class="post-deck">{description}</p>
+      <div class="post-meta">
+        <time datetime={publishDate.toISOString()}>{formatDate(publishDate)}</time>
+        <span class="dot"></span>
+        <span>
+          {
+            authors.map((a, i) => (
+              <>
+                {i > 0 && ', '}
+                {a.url ? <a href={a.url}>{a.name}</a> : a.name}
+              </>
+            ))
+          }
+        </span>
+        <span class="dot"></span>
+        <span>{minutes} min read</span>
+      </div>
+      {
+        updatedDate && (
+          <p class="post-updated">
+            Updated <time datetime={updatedDate.toISOString()}>{formatDate(updatedDate)}</time>
+          </p>
+        )
+      }
+      {
+        tags.length > 0 && (
+          <ul class="tags">
+            {tags.map((t) => (
+              <li>{t}</li>
+            ))}
+          </ul>
+        )
+      }
+    </header>
+
+    <div class="prose">
+      <Content />
+    </div>
+
+    {
+      (newer || older) && (
+        <nav class="post-nav">
+          {older && (
+            <a href={`/blog/${older.id}/`}>
+              <span class="dir">← Older</span>
+              {older.data.title}
+            </a>
+          )}
+          {newer && (
+            <a class="next" href={`/blog/${newer.id}/`}>
+              <span class="dir">Newer →</span>
+              {newer.data.title}
+            </a>
+          )}
+        </nav>
+      )
+    }
+  </article>
+</BlogLayout>

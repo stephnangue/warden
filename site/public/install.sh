@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Warden installer — downloads the latest Warden release for your platform.
 #
-#   curl -sL https://wardengateway.com/install | bash
+#   curl -sL https://wardengateway.com/install.sh | bash
 #
 # It installs into the first writable directory already on your PATH (so `warden`
 # works right away); otherwise it uses $HOME/.local/bin and adds that to your shell

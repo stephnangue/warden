@@ -2,10 +2,21 @@
 title: "policy"
 ---
 
-Manage [policies](/concepts/policies/) — the capability-based rules that
-control what an identity may do on which paths. A policy grants a set of
-`capabilities` (`create`, `read`, `update`, `delete`, `list`, …) on path globs;
-[roles](/concepts/roles/) bind policies to authenticated identities.
+Manage [policies](/identity/policies/) — the rules that control what an identity
+may do. Warden has **two policy types**, and every subcommand selects one with
+`-type`:
+
+| Type | Governs | Stored at |
+|---|---|---|
+| `cbp` *(default)* | Paths and operations. Grants `capabilities` (`create`, `read`, `update`, …) on path globs. | `sys/policies/cbp/<name>` |
+| `mcp` | Individual [MCP](/concepts/mcp/) calls — methods, tool/resource/prompt names, and arguments. | `sys/policies/mcp/<name>` |
+
+[Roles](/identity/roles/) bind capability policies to authenticated identities.
+MCP policies are purely restrictive: access is the **intersection** of both types,
+so an MCP policy can only narrow what a capability policy already grants.
+
+Names are unique across both types — an MCP policy cannot reuse a capability
+policy's name.
 
 ## Usage
 
@@ -24,12 +35,18 @@ Global flags apply to every subcommand — see the [CLI overview](/cli/#global-f
 | `list` | List policy names. |
 | `delete <name>` | Delete a policy. |
 
+### Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `-type` | `cbp` | Which policy type the subcommand acts on: `cbp` or `mcp`. |
+
 ### `policy write`
 
 Create or update the policy named `<name>` from a file, or from stdin by passing
 `-` as the filename.
 
-**Usage:** `warden policy write <name> <policy_file>`
+**Usage:** `warden policy write [-type=cbp|mcp] <name> <policy_file>`
 
 **Examples:**
 
@@ -49,34 +66,59 @@ path "secret/metadata/myapp/*" {
 EOF
 ```
 
+An MCP policy uses `-type mcp` and a different grammar — family blocks rather
+than `capabilities`:
+
+```bash
+warden policy write -type mcp github-tools - <<'EOF'
+path "mcp/gateway/github/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools {
+    allowed = ["get_repository", "list_issues"]
+    denied  = ["delete_*"]
+  }
+  condition = "call.args.?env.orValue('') != 'prod'"
+}
+EOF
+```
+
+:::note[One argument per single-line block]
+HCL allows only a single argument in a one-line block, so
+`tools { allowed = [...] denied = [...] }` is a parse error. Write a block with
+both `allowed` and `denied` across multiple lines, as above.
+:::
+
 ### `policy read`
 
 Print the contents of the policy named `<name>`.
 
-**Usage:** `warden policy read <name>`
+**Usage:** `warden policy read [-type=cbp|mcp] <name>`
 
 ```bash
 warden policy read my-policy
+warden policy read -type mcp github-tools
 ```
 
 ### `policy list`
 
-List the names of all policies.
+List the names of all policies of the selected type.
 
-**Usage:** `warden policy list`
+**Usage:** `warden policy list [-type=cbp|mcp]`
 
 ```bash
 warden policy list
+warden policy list -type mcp
 ```
 
 ### `policy delete`
 
 Delete the policy named `<name>`.
 
-**Usage:** `warden policy delete <name>`
+**Usage:** `warden policy delete [-type=cbp|mcp] <name>`
 
 ```bash
 warden policy delete my-policy
+warden policy delete -type mcp github-tools
 ```
 
 ## Conditions (CEL)
@@ -111,13 +153,13 @@ EOF
 # Error: ... condition must evaluate to bool
 ```
 
-For the full variable namespaces, functions, and 20 worked examples, see
-[Fine-grained access](/concepts/policies/#fine-grained-access) and the
-[CEL Condition Cookbook](/concepts/cel-conditions/).
+For the full variable namespaces, functions, and the worked recipes, see
+[Fine-grained access](/identity/policies/#fine-grained-access) and the
+[CEL Condition Cookbook](/identity/cel-conditions/).
 
 ## See Also
 
-- [Policies](/concepts/policies/) — the capability model and policy syntax.
-- [CEL Condition Cookbook](/concepts/cel-conditions/) — condition recipes, simple to complex.
-- [Roles](/concepts/roles/) — how policies attach to an identity.
+- [Policies](/identity/policies/) — the capability model and policy syntax.
+- [CEL Condition Cookbook](/identity/cel-conditions/) — condition recipes, simple to complex.
+- [Roles](/identity/roles/) — how policies attach to an identity.
 - [CLI overview](/cli/) — global flags, output formats, exit codes.

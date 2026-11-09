@@ -2,8 +2,13 @@ package azure
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
@@ -281,4 +286,129 @@ func TestGetAzureCredentialInfo(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, "eyJ0eXAiOiJKV1Qi.test-token", info.bearerToken)
 	})
+}
+
+// configuredBackend is a backend running a known configuration, over the
+// shared transport, with storage.
+func configuredBackend(storage sdklogical.Storage) *azureBackend {
+	b := &azureBackend{StreamingBackend: &framework.StreamingBackend{Logger: testLogger()}}
+	b.SetMaxBodySize(framework.DefaultMaxBodySize)
+	b.SetTimeout(30 * time.Second)
+	b.SetTransparentConfig(&framework.TransparentConfig{AutoAuthPath: "auth/jwt/"})
+	initTransport()
+	b.InitProxy(sharedTransport)
+	b.StorageView = storage
+	return b
+}
+
+func writeConfig(b *azureBackend, raw map[string]interface{}) *logical.Response {
+	resp, _ := b.handleConfigWrite(context.Background(), nil,
+		&framework.FieldData{Raw: raw, Schema: b.pathConfig().Fields})
+	return resp
+}
+
+func assertUnchanged(t *testing.T, b *azureBackend) {
+	t.Helper()
+	skipVerify, caData := b.tlsSettings()
+	assert.False(t, skipVerify)
+	assert.Empty(t, caData)
+	assert.Equal(t, framework.DefaultMaxBodySize, b.MaxBodySize())
+	assert.Equal(t, 30*time.Second, b.Timeout())
+	assert.Equal(t, "auth/jwt/", b.TransparentConfig().AutoAuthPath)
+}
+
+// A rejected write changes nothing — not the limits, not the transparent
+// config, and not the transport, which is proved by what it does. Before, the
+// write below turned TLS verification off and only then refused it.
+func TestConfigWrite_RejectedWriteChangesNothing(t *testing.T) {
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer tlsServer.Close()
+	verifies := func(b *azureBackend) bool {
+		req, _ := http.NewRequest(http.MethodGet, tlsServer.URL, nil)
+		resp, err := b.Transport().RoundTrip(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		// A self-signed server fails verification, and nothing else is wrong.
+		var verifyErr *tls.CertificateVerificationError
+		return errors.As(err, &verifyErr)
+	}
+
+	storage := newInmemStorage()
+	b := configuredBackend(storage)
+	require.True(t, verifies(b))
+
+	resp := writeConfig(b, map[string]interface{}{
+		"timeout":         99,
+		"max_body_size":   int64(1024),
+		"tls_skip_verify": true,
+		"auto_auth_path":  "",
+	})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assertUnchanged(t, b)
+	assert.True(t, verifies(b), "a rejected write must not have turned TLS verification off")
+	assert.Empty(t, storage.data)
+
+	resp = writeConfig(b, map[string]interface{}{"tls_skip_verify": true, "auto_auth_path": "auth/jwt/"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.False(t, verifies(b))
+}
+
+// A bad ca_data is refused every time it is sent, not recorded as current by
+// the first refusal and saved by the second.
+func TestConfigWrite_BadCADataRefusedEveryTime(t *testing.T) {
+	storage := newInmemStorage()
+	b := configuredBackend(storage)
+	for i := 0; i < 2; i++ {
+		resp := writeConfig(b, map[string]interface{}{"ca_data": "not-a-certificate", "auto_auth_path": "auth/jwt/"})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "attempt %d", i+1)
+	}
+	assertUnchanged(t, b)
+	assert.Empty(t, storage.data)
+}
+
+// failingStorage refuses every write.
+type failingStorage struct{ *inmemStorage }
+
+func (failingStorage) Put(context.Context, *sdklogical.StorageEntry) error {
+	return errors.New("storage unavailable")
+}
+
+// A write that cannot be persisted is not applied either.
+func TestConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
+	b := configuredBackend(failingStorage{newInmemStorage()})
+	resp := writeConfig(b, map[string]interface{}{"timeout": 99, "auto_auth_path": "auth/other/"})
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assertUnchanged(t, b)
+}
+
+// The timeout is the only bound on how long an upstream may take, so a write
+// that would remove it is refused, and changes nothing. "500ms" truncates to
+// zero seconds and is refused the same way.
+func TestConfigWrite_ZeroTimeoutRefused(t *testing.T) {
+	for _, timeout := range []any{0, "0s", "500ms"} {
+		storage := newInmemStorage()
+		b := configuredBackend(storage)
+		resp := writeConfig(b, map[string]interface{}{"timeout": timeout, "auto_auth_path": "auth/jwt/"})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "timeout %v", timeout)
+		assert.Contains(t, resp.Err.Error(), "timeout must be at least 1s")
+		assertUnchanged(t, b)
+		assert.Empty(t, storage.data)
+	}
+}
+
+// A zero timeout already in storage keeps the default rather than leaving the
+// mount with no deadline.
+func TestInitialize_StoredZeroTimeoutKeepsDefault(t *testing.T) {
+	storage := newInmemStorage()
+	entry, _ := sdklogical.StorageEntryJSON("config", map[string]any{
+		"timeout":        "0s",
+		"auto_auth_path": "auth/jwt/",
+	})
+	_ = storage.Put(context.Background(), entry)
+
+	b := setupBackend(t)
+	b.StorageView = storage
+	require.NoError(t, b.Initialize(context.Background()))
+	assert.Equal(t, framework.DefaultTimeout, b.Timeout())
 }

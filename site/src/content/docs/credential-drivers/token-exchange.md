@@ -24,15 +24,154 @@ the **source**; the target audience, scope, and token-exchange wiring live on th
 
 ## Sourcing the client secret keylessly
 
-The token endpoint requires client authentication (`client_secret_*` or a
-`private_key_jwt` client assertion). Rather than storing that secret inline, a source can
+Most token endpoints require client authentication (`client_secret_*` or a
+`private_key_jwt` client assertion) — one that accepts a
+[public client](#public-clients--client_authnone) needs none at all. Rather than storing
+that secret inline, a source can
 **chain it**: set `secret_spec` (and optional `secret_field`) to fetch the `client_secret`
 — or the `private_key` for `client_auth=private_key_jwt` — from another cred spec at mint
-time. `client_id` stays in config and the inline secret is omitted, so the exchange
-becomes **keyless at Warden**. The same keys cover `client_secret_basic`/`_post`,
+time. The referenced payload carries the `client_id` beside the secret, so both are
+omitted from the source — setting either alongside `secret_spec` is refused — and the
+exchange becomes **keyless at Warden**. The same keys cover `client_secret_basic`/`_post`,
 `private_key_jwt`, and both legs of an ID-JAG exchange. Set `secret_spec` on the
 **source** (client authentication is a source concern) — not on the spec. See
 [credential chaining](/federation/credential-chaining/).
+
+### Signing the client assertion without holding the key
+
+`client_auth=kms_private_key_jwt` goes one step further. It puts the **same RFC 7523
+client assertion** on the wire as `private_key_jwt` — an authorization server cannot tell
+them apart — but the signing key lives in a KMS and this process never sees it. Warden
+chains a *signing capability* rather than a key, and asks the KMS to sign each assertion.
+
+It is a separate method rather than a modifier on `private_key_jwt` because the two are
+configured from opposite ends: one takes a key, the other a reference to a capability,
+and nothing an operator sets for one is meaningful for the other. There is **no inline
+form** — the capability arrives only through `secret_spec`.
+
+The capability comes from the [`hvault`](/credential-drivers/vault/) driver's
+`transit_signer` mint method:
+
+```bash
+# the producer: a capability to sign with one transit key, and nothing else
+warden cred spec create signer-cap \
+  -source vault-keyless \
+  -config mint_method=transit_signer \
+  -config jwt_role=warden-signer \
+  -config transit_key=oauth-client-key \
+  -config subject_token_source=warden_identity
+
+# the consumer: a token-exchange source that holds no key and no secret
+warden cred source create exchange-src \
+  -type token_exchange \
+  -config token_url=https://idp.example.com/oauth2/token \
+  -config client_auth=kms_private_key_jwt \
+  -config secret_spec=signer-cap
+```
+
+Note there is no `client_id` on the source. When `secret_spec` is set the referenced spec
+supplies the **whole** client credential, and setting `client_id` alongside it is rejected
+at write. The client id travels with the capability instead, as the producer's
+`payload.client_id` above.
+
+#### A signing key per caller
+
+`transit_key` on the producer accepts `{{user.<claim>}}` and `{{agent.<claim>}}`
+templating, so **one spec can select a different signing key per caller** — the
+assertion is then signed by a key belonging to that principal rather than a shared
+broker key, and the KMS audit log attributes each signature to them.
+
+```bash
+warden cred spec create signer-cap \
+  -source vault-keyless \
+  -config mint_method=transit_signer \
+  -config jwt_role=warden-signer \
+  -config transit_key='client-{{user.department}}' \
+  -config subject_token_source=warden_identity \
+  -config assertion_user_claims=department
+```
+
+The claims come from the assertion minted for **this request**, so what a template can
+reach depends on what the spec projects:
+
+| Template | Available when |
+|---|---|
+| `{{agent.sub}}` | Always — the agent's principal is projected unconditionally, given `subject_token_source` is `agent_identity` or `warden_identity`. |
+| `{{agent.<other>}}` | The claim is listed in `assertion_metadata_claims` **and** the agent's credential actually carries it. |
+| `{{user.<claim>}}` | The claim is listed in `assertion_user_claims`, which requires `subject_token_source=warden_identity`. |
+
+Resolution happens **at mint time**, not at spec create — a spec whose template can never
+resolve is still accepted at write, and fails on first use. It is **fail-closed**, and the
+errors are directed rather than generic: a claim that was never projected names the key
+you need to add, and pairing `{{user.…}}` with `subject_token_source=user_identity` is
+called out specifically, since that combination cannot populate user claims at all.
+
+Substituted values are constrained — a claim value must match an allow-list, cannot be
+empty, and cannot span a path segment; any `.` or `..` segment it composes is rejected
+after substitution. A caller therefore cannot steer the template at a key it was not
+meant to reach.
+
+### The client assertion's audience
+
+A client assertion, from `private_key_jwt` or `kms_private_key_jwt`, names by default the
+endpoint it is sent to as its `aud`. An authorization server that enforces
+draft-ietf-oauth-rfc7523bis wants its **issuer identifier** instead, as the sole audience.
+Set `client_assertion_aud=issuer` and name the issuer:
+
+- `issuer` is the issuer of the server behind `token_url`. A single-hop exchange and leg 1
+  of `id_jag` name it.
+- `resource_issuer` is the issuer of the resource authorization server behind
+  `resource_token_url`. Leg 2 of `id_jag` names it, and `id_jag` requires it in this mode.
+
+Both must be `https://` (`http://` only with `tls_skip_verify`), with no query or
+fragment. Each is refused where nothing would read it: `client_assertion_aud` on a method
+that sends no assertion, `issuer` and `resource_issuer` outside issuer mode, and
+`resource_issuer` on a grant other than `id_jag`.
+
+```bash
+warden cred source create exchange-src -json '{
+  "type": "token_exchange",
+  "config": {
+    "token_url": "https://idp.example.com/oauth2/token",
+    "client_auth": "kms_private_key_jwt",
+    "secret_spec": "signer-cap",
+    "client_assertion_aud": "issuer",
+    "issuer": "https://idp.example.com"
+  }
+}'
+```
+
+### A fresh assertion on every attempt
+
+An authorization server refuses a client assertion it has already seen. When a token
+request is retried, after a `429`, a `5xx` or a dropped connection, Warden signs a new
+assertion for the retry rather than resending the first one. With `kms_private_key_jwt`
+that is one remote signature per attempt.
+
+On `id_jag`, the ID-JAG that leg 2 presents is single-use too, and a new client assertion
+cannot replace it: a leg-2 retry after the server consumed the ID-JAG still fails.
+
+## Public clients — `client_auth=none`
+
+Some token endpoints accept a **public client** (RFC 6749 §2.1): the caller is identified
+by the subject token alone, and no client credential is presented. Set `client_auth=none`
+and the source holds nothing — keyless without chaining. Warden sends `client_id` only
+when one is set.
+
+```bash
+warden cred source create idp-public -json '{
+  "type": "token_exchange",
+  "config": {
+    "token_url": "https://idp.example.com/oauth2/v1/token",
+    "client_auth": "none",
+    "client_id": "warden-gateway"
+  }
+}'
+```
+
+With `none`, `client_secret`, `private_key`, `client_assertion_alg`,
+`client_assertion_kid`, `secret_spec`, `secret_field` and `secret_cache_ttl` are refused:
+a public client presents no client credential.
 
 ## Grant modes
 
@@ -109,16 +248,21 @@ credential's audit metadata records the exchanged `subject`.
 
 ### Keyless (recommended)
 
-**Chained client secret (`private_key_jwt`)** — Warden signs a client assertion with a private key fetched from another cred spec, so no secret is stored inline.
+**Chained client secret (`private_key_jwt`)** — Warden signs a client assertion with a private key fetched from another cred spec, so no secret is stored inline. The referenced payload carries `client_id` beside `private_key`.
 
 ```bash
-warden cred source create idp-pkjwt \
-  -type=token_exchange \
-  -config=token_url=https://idp.example.com/oauth2/v1/token \
-  -config=client_auth=private_key_jwt \
-  -config=client_id=warden-gateway \
-  -config=secret_spec=idp-client-key
+warden cred source create idp-pkjwt -json '{
+  "type": "token_exchange",
+  "config": {
+    "token_url": "https://idp.example.com/oauth2/v1/token",
+    "client_auth": "private_key_jwt",
+    "secret_spec": "idp-client-key"
+  }
+}'
 ```
+
+**Public client (`none`)** — no client credential at all; see
+[Public clients](#public-clients--client_authnone).
 
 ### Inline secret (discouraged)
 
@@ -154,8 +298,9 @@ warden cred spec create internal-api-deleg \
 ```
 
 The user is presented via secondary transparent authentication — see
-[Delegation](/concepts/delegation/) for how `user_auth_path` and `X-Warden-User-Token` are
-configured.
+[Delegation](/concepts/delegation/) for how `user_auth_path` is configured. On such a
+mount the user's credential rides in `Authorization` and the agent moves to
+`X-Warden-Agent-Token` or a client certificate.
 
 **Microsoft Entra OBO (`jwt_bearer`)** — the subject is sent as `assertion` with Entra's on-behalf-of flag.
 
@@ -207,15 +352,18 @@ Keys for `warden cred source create <name> -type=token_exchange -config=key=valu
 |-----|----------|---------|-------------|
 | `token_url` | Yes | — | Token endpoint (HTTPS) of the STS/IdP performing the exchange. |
 | `grant` | No | `rfc8693` | Exchange grant: `rfc8693`, `jwt_bearer`, or `id_jag`. |
-| `client_auth` | No | `client_secret_post` | How Warden authenticates to the token endpoint: `client_secret_basic`, `client_secret_post`, or `private_key_jwt`. |
-| `client_id` | Yes | — | OAuth2 client ID Warden presents to the token endpoint. |
+| `client_auth` | No | `client_secret_post` | How Warden authenticates to the token endpoint: `client_secret_basic`, `client_secret_post`, `private_key_jwt`, `kms_private_key_jwt`, or `none` (a [public client](#public-clients--client_authnone)). |
+| `client_id` | Inline auth | — | OAuth2 client ID Warden presents to the token endpoint. Optional with `client_auth=none`; omitted when sourced via `secret_spec`, whose payload carries it. |
 | `client_secret` | For secret auth | — | Client secret (masked on read). Omit when sourced via `secret_spec`. |
 | `private_key` | For `private_key_jwt` | — | PEM RSA private key that signs the client assertion (masked). Omit when sourced via `secret_spec`. |
-| `secret_spec` | No | — | Source the `client_secret`/`private_key` from another cred spec via [credential chaining](/federation/credential-chaining/) instead of storing it inline. |
+| `secret_spec` | No | — | Source the whole client credential — `client_id` with the `client_secret`/`private_key` — from another cred spec via [credential chaining](/federation/credential-chaining/) instead of storing it inline. Refused with `client_auth=none`. |
 | `secret_field` | No | — | Field of the referenced `secret_spec`'s credential holding the secret (when its payload has multiple keys). |
 | `secret_cache_ttl` | No | *(off)* | Cache the chained secret for a bounded TTL, keyed on the source. |
 | `client_assertion_alg` | No | `RS256` | Signing algorithm for the client assertion. `RS256` is the only supported value. |
 | `client_assertion_kid` | No | — | Optional `kid` header for the client assertion. |
+| `client_assertion_aud` | No | `token_url` | Audience of the client assertion: `token_url` names each endpoint it is sent to, `issuer` names the server's issuer identifier. See [The client assertion's audience](#the-client-assertions-audience). |
+| `issuer` | For `client_assertion_aud=issuer` | — | Issuer identifier of the server behind `token_url`. Read only in issuer mode. |
+| `resource_issuer` | For `id_jag` in issuer mode | — | Issuer identifier of the resource authorization server behind `resource_token_url`, named on leg 2. |
 | `resource_token_url` | For `id_jag` | — | Resource authorization-server token endpoint (HTTPS) for ID-JAG leg 2. |
 | `ca_data` | No | — | Base64-encoded PEM CA certificate for custom/self-signed CAs (masked). |
 | `tls_skip_verify` | No | `false` | Skip TLS certificate verification (development only). |

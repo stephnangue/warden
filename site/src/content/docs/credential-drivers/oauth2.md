@@ -4,29 +4,98 @@ title: "OAuth2"
 
 > Source `type`: `oauth2`
 
+:::tip[Prefer keyless]
+This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (via chaining)](#keyless-via-chaining).
+:::
+
 The **OAuth2 driver** exchanges OAuth2 credentials for short-lived **bearer tokens** against any standards-compliant provider. It supports two flows: the **client_credentials** flow (machine-to-machine, no user present) and the **authorization_code** flow with refresh-token rotation (acting on behalf of a user who granted consent once). Reach for it when a workload needs an OAuth2 access token and no purpose-built driver exists for the provider.
 
 The token endpoint and connection options live in the **source** config (`token_url` required). The `client_id` and `client_secret` may live on the source — natural for `client_credentials` — or be supplied per **spec**, resolved spec-over-source. For the `authorization_code` flow, per-user tokens are sealed onto the spec by a one-time interactive consent step, and the driver refreshes them at mint time.
 
 ## Acting on behalf of a user
 
-:::tip[Prefer the Vault/OpenBao OAuth-app engine, via chaining]
-The recommended way to act on behalf of a user is a **per-user OAuth token vended by an
-[OAuth-app secrets engine](/concepts/delegation/)** and fetched **keylessly via
-[chaining](/federation/credential-chaining/)** — Warden federates to the vault with a per-request
-identity assertion, and the engine returns a fresh token. Prefer it **even once this driver gains a
-native keyless mode**, because the engine **owns and rotates the refresh token** internally. When a
-provider rotates the refresh token on use, this driver's own chaining path **cannot write the rotated
-token back** to the referenced spec — so the next mint reuses the stale token and eventually fails.
-The secrets engine has no such problem: it holds the refresh token and rotates it in place.
+:::tip[Prefer the Vault/OpenBao OAuth-app engine at fleet scale]
+This driver seals **one** consent per spec. That is the right shape for a handful of
+grants, but a spec per user does not scale to a fleet, and the sealed refresh token lives
+in Warden's barrier.
+
+For per-user tokens across many users, prefer an
+[OAuth-app secrets engine](/concepts/delegation/) reached **keylessly via
+[chaining](/federation/credential-chaining/)**: Warden federates to the vault with a
+per-request identity assertion, the engine returns a token for the verified user, and the
+refresh token stays in the vault — so Warden stores nothing and one spec serves everyone.
 :::
 
-This driver can also **source a refresh token from another cred spec** directly: set `secret_spec`
-(and `secret_field`), and at mint time Warden fetches that spec's material and refreshes it into a
-fresh access token. This mode still requires an **inline `client_id` and `client_secret`** — the
-refresh grant is authenticated with them, so chaining supplies the *refresh token*, not the client
-secret, and it is **not keyless**. It also inherits the write-back limitation above: use it only when
-the provider does **not** rotate the refresh token on each use.
+## Keyless (via chaining)
+
+The OAuth client credential does not have to be stored. Set `secret_spec` (and optionally
+`secret_field`) **on the source**, and at mint time Warden fetches **both halves** — `client_id` and
+`client_secret` — from the referenced spec via [credential chaining](/federation/credential-chaining/).
+With `client_auth=private_key_jwt` the payload carries `private_key` instead of the secret,
+and the kid under `client_assertion_kid` or `kid`; see
+[Client authentication](#client-authentication).
+A chained source therefore stores neither half, so one source and one spec can serve a different
+OAuth client per agent.
+
+Two constraints:
+
+- It applies to the **`client_credentials`** grant only. `authorization_code` seals its consent in
+  steps that run without a caller and so cannot reach chained material; the combination is refused
+  at validation.
+- The reference belongs on the **source**, not the spec. Chaining on an `oauth2` *spec* used to mean
+  "this material is a refresh token"; that is no longer supported, and a spec still carrying
+  `secret_spec` is **rejected at write** with a message telling you to move the key to the source.
+
+## Client authentication
+
+The source's `client_auth` says how Warden authenticates to the token endpoint. It applies
+to every flow: the client-credentials grant, the authorization-code exchange and the
+refresh grant.
+
+| `client_auth` | What Warden sends | What it needs |
+|---|---|---|
+| `client_secret_post` (default) | `client_id` and `client_secret` in the form body | `client_secret` |
+| `client_secret_basic` | The pair in an `Authorization: Basic` header, nothing in the body | `client_secret` |
+| `private_key_jwt` | An RFC 7523 client assertion signed RS256 with `private_key` | `private_key`, optional `client_assertion_kid` |
+| `kms_private_key_jwt` | The same assertion, signed by a key held in a KMS | `secret_spec` naming a spec that mints a signing capability |
+
+A method refuses what it would never send. A secret method refuses `private_key`,
+`client_assertion_alg`, `client_assertion_kid` and `client_assertion_aud`;
+`private_key_jwt` refuses `client_secret`. A `client_assertion_kid` needs the key it names
+beside it. `client_assertion` and `client_assertion_type` cannot be set through
+`token_param.*`.
+
+`private_key` and `client_assertion_kid` resolve spec over source, like `client_id` and
+`client_secret`, so an `authorization_code` spec can bring its own client and key. A kid
+always travels with its key: a spec's key never inherits the source's kid. `private_key`
+is masked on read.
+
+**The assertion's audience.** By default the assertion names the token endpoint as its
+`aud`. Set `client_assertion_aud=issuer` to name the source's `issuer` instead, as its sole
+audience, for an authorization server that enforces draft-ietf-oauth-rfc7523bis. That
+mode requires `issuer`.
+
+**A fresh assertion on every attempt.** An authorization server refuses a client
+assertion it has already seen. When a token request is retried, after a `429`, a `5xx` or a
+dropped connection, Warden signs a new assertion for the retry instead of resending the
+first one.
+
+**Without holding the key.** `kms_private_key_jwt` takes the client id and kid from the
+capability's payload, and refuses `secret_field` and `client_assertion_alg`, which the
+payload and the key decide. The capability comes from the
+[`hvault`](/credential-drivers/vault/#transit_signer--signing-without-the-key) driver's
+`transit_signer` mint method:
+
+```bash
+warden cred source create oauth-kms -json '{
+  "type": "oauth2",
+  "config": {
+    "token_url": "https://idp.example.com/oauth2/token",
+    "client_auth": "kms_private_key_jwt",
+    "secret_spec": "signer-cap"
+  }
+}'
+```
 
 ## Credential issued
 
@@ -40,6 +109,88 @@ Always `oauth_bearer_token`. It is **dynamic** when the provider returns an expi
 No source rotation — the source secret is not rotated by the driver.
 
 ## Examples
+
+### Keyless (via chaining, recommended)
+
+The source stores no secret: both halves of the client credential is fetched from a keyless-federated
+vault per request.
+
+The **consumer** is the same whichever producer you use — only the `secret_spec` name
+changes:
+
+```bash
+warden cred source create oauth-keyless \
+  -type=oauth2 \
+  -config=token_url=https://identity.example.com/oauth/token \
+  -config=secret_spec=oauth-client-in-vault
+
+warden cred spec create api-readonly \
+  -source=oauth-keyless \
+  -config=auth_method=client_credentials \
+  -config=scope="read"
+```
+
+The **producer** is the spec that yields that secret. Any of the three below can serve it;
+pick the one where the secret already lives. Each is itself keyless, so nothing is stored
+at either hop.
+
+**OpenBao / Vault — `kv2_read`**
+
+```bash
+warden cred spec create oauth-client-in-vault \
+  -source=vault-keyless \
+  -config=mint_method=kv2_read \
+  -config=kv2_mount=secret \
+  -config=secret_path=oauth/example-client \
+  -config=subject_token_source=warden_identity
+```
+
+**AWS Secrets Manager — `secret_read`**
+
+```bash
+warden cred spec create oauth-client-in-asm \
+  -source=aws-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_id=prod/oauth/example-client \
+  -config=role_arn=arn:aws:iam::123456789012:role/SecretReader \
+  -config=subject_token_source=warden_identity
+```
+
+**GCP Secret Manager — `secret_read`**
+
+```bash
+warden cred spec create oauth-client-in-sm \
+  -source=gcp-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_name=oauth-example-client \
+  -config=project=my-project \
+  -config=subject_token_source=warden_identity
+```
+
+`vault-keyless`, `aws-keyless` and `gcp-keyless` are ordinary
+[keyless sources](/federation/keyless-credentials/) — the producer holds no secret either.
+
+**Scoped secrets: A client per tenant.** A producer's locator key templates on verified
+claims, so one spec resolves to a different secret per caller. A multi-tenant service registers one OAuth client per customer. One spec covers every tenant, and the token minted is always the calling tenant's.
+
+```bash
+warden cred spec create oauth-client-per-tenant \
+  -source=gcp-keyless \
+  -config=mint_method=secret_read \
+  -config=secret_name=oauth-client-{{agent.metadata.tenant}} \
+  -config=project=my-project \
+  -config=subject_token_source=warden_identity \
+  -config=assertion_metadata_claims=tenant
+```
+
+An agent claim other than `sub` resolves only if the spec lists it in
+`assertion_metadata_claims`. Resolution is fail-closed at mint: a claim the agent's credential does not
+carry fails the request rather than falling back to a shared secret. `{{user.<claim>}}`
+works the same way via `assertion_user_claims`, and the two can be combined in one path.
+
+See [credential chaining](/federation/credential-chaining/#producers).
+
+### Inline secret (discouraged)
 
 **client_credentials** — machine-to-machine, client credentials on the source:
 
@@ -88,8 +239,17 @@ Keys for `warden cred source create <name> -type=oauth2 -config=key=value ...`:
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `token_url` | Yes | — | OAuth2 token endpoint (HTTPS). |
-| `client_id` | No | — | OAuth2 client ID (source-level for client_credentials; may be set per-spec). |
-| `client_secret` | No | — | OAuth2 client secret (masked). Required for the refresh grant even when a refresh token is chained. |
+| `client_id` | No | — | OAuth2 client ID (source-level for client_credentials; may be set per-spec). Omit when chaining — it comes from the chained payload. |
+| `client_secret` | No | — | OAuth2 client secret (masked). Omit when chaining. |
+| `client_auth` | No | `client_secret_post` | How Warden authenticates to the token endpoint: `client_secret_post`, `client_secret_basic`, `private_key_jwt` or `kms_private_key_jwt`. See [Client authentication](#client-authentication). |
+| `private_key` | For `private_key_jwt` | — | PEM RSA private key that signs the client assertion (masked). May be set per spec. Omit when chaining. |
+| `client_assertion_alg` | No | `RS256` | Signing algorithm of the client assertion. `RS256` is the only value. |
+| `client_assertion_kid` | No | — | `kid` header of the client assertion, naming the key beside it. Omit when chaining. |
+| `client_assertion_aud` | No | `token_url` | Audience of the client assertion: `token_url` or `issuer`. |
+| `issuer` | For `client_assertion_aud=issuer` | — | The authorization server's issuer identifier (HTTPS). Also checked against the `iss` of an authorization-code callback that carries one. |
+| `secret_spec` | No | — | Chain the **whole client credential** (`client_id` + `client_secret`) from another cred spec via [credential chaining](/federation/credential-chaining/), so this source stores neither half. `client_credentials` grant only. |
+| `secret_field` | No | — | Field of the referenced spec's credential holding the client credential. |
+| `secret_cache_ttl` | No | *(off)* | Cache the chained client credential for a bounded TTL, keyed on the source. |
 | `auth_url` | No | — | Authorization endpoint (HTTPS); required for authorization_code specs. |
 | `introspection_url` | No | — | Userinfo/introspection endpoint called at mint to fetch identity fields for opaque tokens. |
 | `metadata_fields` | No | `sub` | Comma-separated identity fields copied into the credential's non-secret, audit-logged metadata (empty disables). |
@@ -119,6 +279,8 @@ Keys operators set with `warden cred spec create ... -config=key=value`:
 | `scope` | No | source `default_scopes` | Scopes requested for `client_credentials`. |
 | `client_id` | No | source `client_id` | Client ID, resolved spec-over-source. |
 | `client_secret` | No | source `client_secret` | Client secret, resolved spec-over-source. |
+| `private_key` | No | source `private_key` | PEM RSA key for `client_auth=private_key_jwt`, resolved spec-over-source (masked). |
+| `client_assertion_kid` | No | — | `kid` for the spec's own `private_key`. Never inherited from the source. |
 | `refresh_token` | No | — | Sealed refresh token for `authorization_code` (set by consent). |
 | `access_token` | No | — | Sealed static access token for providers that issue no refresh token (set by consent). |
 | `access_token_expires_at` | No | — | RFC3339 expiry of a sealed static access token. |
@@ -126,9 +288,10 @@ Keys operators set with `warden cred spec create ... -config=key=value`:
 | `scopes` | No | — | Scopes requested at the consent (`connect`) step for `authorization_code`. |
 | `redirect_uri` | No | — | Loopback redirect used by the consent step. |
 | `pkce` | No | `false` | Enable PKCE (`code_challenge`/`code_verifier`) in the consent step. |
-| `secret_spec` | No | — | Chain a **refresh token** from another cred spec via [credential chaining](/federation/credential-chaining/) instead of sealing one by consent. Still needs inline `client_id`/`client_secret`; not keyless. |
-| `secret_field` | No | — | Field of the referenced spec's credential holding the refresh token. |
-| `secret_cache_ttl` | No | *(off)* | Cache the chained refresh token for a bounded TTL, keyed on the source. |
+
+`secret_spec` is **not** a spec key — chaining is configured on the **source** and supplies the
+client credential, not a refresh token. A spec still carrying it is rejected at write. See
+[Source config](#source-config).
 
 For `authorization_code`, do not set the token keys by hand — they are populated by the one-time consent flow (see Capabilities). When the provider rotates the refresh token during a refresh, the driver surfaces the new value to the minting layer automatically, so the sealed grant stays current.
 

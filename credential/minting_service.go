@@ -94,7 +94,7 @@ func (s *MintingService) MintWithCleanup(
 	success := false
 	defer func() {
 		if !success && leaseID != "" {
-			s.revokeOrphanedLease(driver, leaseID, spec.Source)
+			s.revokeOrphanedLease(ctx, driver, leaseID, spec.Source)
 		}
 	}()
 
@@ -133,7 +133,7 @@ func (s *MintingService) MintFromSecretWithCleanup(
 	success := false
 	defer func() {
 		if !success && leaseID != "" {
-			s.revokeOrphanedLease(driver, leaseID, spec.Source)
+			s.revokeOrphanedLease(ctx, driver, leaseID, spec.Source)
 		}
 	}()
 
@@ -170,7 +170,7 @@ func (s *MintingService) MintFromSecretWithExchangeCleanup(
 	success := false
 	defer func() {
 		if !success && leaseID != "" {
-			s.revokeOrphanedLease(driver, leaseID, spec.Source)
+			s.revokeOrphanedLease(ctx, driver, leaseID, spec.Source)
 		}
 	}()
 
@@ -182,20 +182,29 @@ func (s *MintingService) MintFromSecretWithExchangeCleanup(
 	return nil
 }
 
+// orphanRevokeTimeout bounds the revocation of a lease nothing else will track.
+const orphanRevokeTimeout = 10 * time.Second
+
 // revokeOrphanedLease attempts to revoke a lease that was minted but not successfully processed.
 // This is a best-effort operation that logs errors but does not fail the overall operation.
-// Uses a fresh background context since the original context may have been cancelled.
-func (s *MintingService) revokeOrphanedLease(driver SourceDriver, leaseID, sourceName string) {
-	// Use background context with timeout since original may be cancelled
-	revokeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// It runs on ctx's values (the namespace) without its cancellation, since a lease
+// left here is never revoked by anything else and ctx may already be done.
+func (s *MintingService) revokeOrphanedLease(ctx context.Context, driver SourceDriver, leaseID, sourceName string) {
+	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), orphanRevokeTimeout)
 	defer cancel()
 
-	if err := driver.Revoke(revokeCtx, leaseID); err != nil {
+	gone, err := RevokeLease(revokeCtx, driver, leaseID)
+	switch {
+	case err != nil:
 		s.logger.Warn("failed to revoke orphaned lease after issuance failure",
 			logger.String("lease_id", leaseID),
 			logger.String("source", sourceName),
 			logger.Err(err))
-	} else {
+	case gone:
+		s.logger.Debug("orphaned lease was already gone at the source",
+			logger.String("lease_id", leaseID),
+			logger.String("source", sourceName))
+	default:
 		s.logger.Debug("revoked orphaned lease after issuance failure",
 			logger.String("lease_id", leaseID),
 			logger.String("source", sourceName))

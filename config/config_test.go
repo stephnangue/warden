@@ -415,3 +415,74 @@ service_registration "consul" {
 		assert.Contains(t, joined, want, "expected warning for %s", want)
 	}
 }
+
+// TestDecodeConfig_PKCS11SealAttributesPruned verifies that a leftover
+// pkcs11 seal stanza still parses, but its HSM attributes — the PIN among
+// them — are dropped with a warning rather than kept on the seal.
+func TestDecodeConfig_PKCS11SealAttributesPruned(t *testing.T) {
+	w := &collectingWarner{}
+	cfg, err := decodeConfig("warden.hcl", []byte(`
+seal "pkcs11" {
+  lib   = "/usr/lib/softhsm/libsofthsm2.so"
+  slot  = "0"
+  pin   = "1234"
+  key_label = "warden"
+}
+`), w)
+	require.NoError(t, err)
+	require.Len(t, cfg.Seals, 1)
+	assert.Equal(t, "pkcs11", cfg.Seals[0].Type)
+	assert.Equal(t, map[string]string{"type": "pkcs11"}, cfg.Seals[0].Config())
+
+	joined := strings.Join(w.msgs, "\n")
+	for _, attr := range []string{"lib", "slot", "pin", "key_label"} {
+		assert.Contains(t, joined, `unknown attribute "`+attr+`"`)
+	}
+}
+
+func TestLoadConfigDir_KeylessEnforcementLevel(t *testing.T) {
+	base := `
+storage "postgres" {
+  connection_url = "postgres://x/db"
+}
+
+listener "tcp" {
+  address     = ":8400"
+  tls_disable = true
+}
+`
+	t.Run("absent defaults to empty", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "00-base.hcl", base)
+		cfg, err := LoadConfigDir(dir)
+		require.NoError(t, err)
+		assert.Equal(t, "", cfg.KeylessEnforcementLevel, "core reads an empty level as warn")
+	})
+
+	for _, level := range []string{"off", "warn", "enforce"} {
+		t.Run(level, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "00-base.hcl", base+"\nkeyless_enforcement_level = \""+level+"\"\n")
+			cfg, err := LoadConfigDir(dir)
+			require.NoError(t, err)
+			assert.Equal(t, level, cfg.KeylessEnforcementLevel)
+		})
+	}
+
+	t.Run("invalid", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "00-base.hcl", base+"\nkeyless_enforcement_level = \"strict\"\n")
+		_, err := LoadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "keyless_enforcement_level")
+	})
+
+	t.Run("last file wins", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "00-base.hcl", base+"\nkeyless_enforcement_level = \"warn\"\n")
+		writeFile(t, dir, "10-overlay.hcl", "keyless_enforcement_level = \"enforce\"\n")
+		cfg, err := LoadConfigDir(dir)
+		require.NoError(t, err)
+		assert.Equal(t, "enforce", cfg.KeylessEnforcementLevel)
+	})
+}

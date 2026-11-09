@@ -17,7 +17,7 @@ import (
 //
 // Example:
 //
-//	func (f *MyDriverFactory) ValidateConfig(config map[string]string) error {
+//	func (f *MyDriverFactory) ValidateConfig(config Config) error {
 //	    // Validate required fields exist
 //	    if err := credential.ValidateRequired(config, "address", "token"); err != nil {
 //	        return err
@@ -34,20 +34,31 @@ type SourceDriverFactory interface {
 
 	// Create instantiates a new driver with the given configuration
 	// Config values are strings - use credential.Get* helpers to parse to expected types
-	Create(config map[string]string, logger *logger.GatedLogger) (SourceDriver, error)
+	Create(config Config, logger *logger.GatedLogger) (SourceDriver, error)
 
 	// ValidateConfig validates driver-specific configuration
 	// Config values are strings - use credential.Get* helpers to validate types
-	ValidateConfig(config map[string]string) error
+	ValidateConfig(config Config) error
 
 	// SensitiveConfigFields returns the list of config keys that should be masked in output
 	SensitiveConfigFields() []string
+
+	// StoredSecrets returns the long-lived secrets this source config makes Warden
+	// hold: the secret config keys present with a non-empty value, plus a
+	// description of any held outside config (such as a token inherited from the
+	// server's environment). Nil means the source is keyless.
+	//
+	// It is decided from the fields present, never from auth_method or
+	// secret_spec, so a config that names a keyless mode while still carrying a
+	// secret is reported. It is not a masking list: it leaves out keys such as
+	// ca_data that are masked for tidiness but are not secret.
+	StoredSecrets(config Config) []string
 
 	// InferCredentialType determines the credential type from the spec config.
 	// Simple sources return a fixed type (ignoring specConfig).
 	// Multi-type sources inspect specConfig (e.g., mint_method) to disambiguate.
 	// Returns error if the type cannot be inferred and must be provided explicitly.
-	InferCredentialType(specConfig map[string]string) (string, error)
+	InferCredentialType(specConfig Config) (string, error)
 }
 
 // SourceDriver defines the interface for credential source drivers.
@@ -98,6 +109,32 @@ type SpecVerifier interface {
 	// a lightweight API call to the upstream provider.
 	// Returns nil if verification succeeds or is not applicable for this spec config.
 	VerifySpec(ctx context.Context, spec *CredSpec) error
+}
+
+// RotationConfigValidator is an optional interface for driver factories that can
+// tell, from source config alone, that a source will never be able to rotate.
+//
+// It exists because a source accepted with a rotation_period its driver cannot
+// honour does not fail loudly — it fails on a schedule, forever. Every cycle the
+// manager finds SupportsRotation false, errors, retries to MaxRotateAttempts,
+// parks the entry as failed, comes back after FailedMinAge and repeats, visible
+// only in server logs and never to the operator who created the source.
+//
+// SupportsRotation cannot serve this purpose at config time. It is a method on a
+// live driver, and some implementations probe the upstream to answer (Azure asks
+// Microsoft Graph whether it holds the permissions), which is not something a
+// config write should do. Others answer false for configurations that are
+// perfectly valid and required to carry a rotation_period anyway — a token-auth
+// hvault source is the standing example.
+//
+// So this is opt-in per factory and must be pure: read the config map, return an
+// error naming the missing key, touch nothing else. A factory that does not
+// implement it is simply not checked. Drivers whose SupportsRotation is already
+// pure config inspection can adopt it as the need arises.
+type RotationConfigValidator interface {
+	// ValidateRotationConfig returns an error if a rotation_period on this config
+	// could never be honoured. It is called only when a rotation_period is set.
+	ValidateRotationConfig(config Config) error
 }
 
 // Rotatable is an optional interface for drivers that support credential rotation.
@@ -156,6 +193,26 @@ type Rotatable interface {
 	//
 	// The cleanupConfig format is driver-specific.
 	CleanupRotation(ctx context.Context, cleanupConfig map[string]string) error
+}
+
+// StagedRotationDiscarder is implemented by a Rotatable driver whose
+// PrepareRotation can stage (return activateAfter > 0). It turns the newConfig a
+// PrepareRotation returned into a cleanup config naming the credential that
+// prepare created, so that CleanupRotation — called on an instance that still
+// authenticates with the old credential — deletes the staged one instead.
+//
+// The rotation manager uses it when a staged rotation must be abandoned: an
+// operator edited or deleted the source first, the source left the schedule, or
+// the entry was found orphaned at restore. Without it the staged credential
+// stays live upstream with nothing left that knows about it.
+type StagedRotationDiscarder interface {
+	StagedCleanupConfig(ctx context.Context, newConfig map[string]string) (map[string]string, error)
+}
+
+// StagedSpecRotationDiscarder is StagedRotationDiscarder for SpecRotatable: it
+// names the credential PrepareSpecRotation created, for CleanupSpecRotation.
+type StagedSpecRotationDiscarder interface {
+	StagedSpecCleanupConfig(ctx context.Context, newConfig map[string]string) (map[string]string, error)
 }
 
 // SpecRotatable is an optional interface for drivers that can rotate credentials
@@ -250,6 +307,13 @@ type OAuth2Authorizer interface {
 	// returns the spec-config keys to seal (notably "refresh_token", or a static
 	// "access_token" for providers that do not issue refresh tokens).
 	ExchangeAuthorizationCode(ctx context.Context, spec *CredSpec, code, redirectURI, codeVerifier string) (map[string]string, error)
+
+	// AuthorizationIssuer returns the issuer identifier the caller must find in
+	// an RFC 9207 "iss" callback parameter, or "" when the source records
+	// none. It travels with the authorize URL because the check it enables
+	// happens in the CLI, at the callback, before the code is sent back for
+	// redemption — which is the whole of the mix-up defense.
+	AuthorizationIssuer() string
 }
 
 // ExchangeMinter is an optional interface for drivers that consume caller-derived

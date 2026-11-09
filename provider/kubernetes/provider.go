@@ -46,6 +46,12 @@ var Spec = &httpproxy.ProviderSpec{
 		credential.TypeKubernetesToken, "token", "Authorization", "Bearer ",
 	),
 	ExtractToken: extractTokens,
+	// Impersonation headers ask the API server to act as another user, group,
+	// uid or extra attribute. Forwarded, an agent could escalate past the service
+	// account Warden minted for it whenever that account holds the impersonate
+	// verb; the extra attributes are a family keyed by the client's own suffix.
+	ExtraHeadersToRemove:        []string{"Impersonate-User", "Impersonate-Group", "Impersonate-Uid"},
+	ExtraHeaderPrefixesToRemove: []string{"Impersonate-Extra-"},
 	ValidateExtraConfig: func(conf map[string]any) error {
 		addr, ok := conf["kubernetes_url"].(string)
 		if !ok || addr == "" {

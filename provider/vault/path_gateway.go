@@ -11,24 +11,15 @@ import (
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/sdk/upstream"
 )
 
 // Headers to remove before proxying
-var headersToRemove = []string{
+var headersToRemove = append(logical.WardenRequestHeaders(),
 	// Security headers (will be replaced with real values)
 	"Authorization",   // Remove Warden auth token to prevent leakage
 	"X-Vault-Token",   // Will be replaced with real Vault token
 	"X-Vault-Request", // Internal Vault header
-	"X-Warden-Token",
-	"X-Warden-Agent-Token", // Warden-specific auth header
-	// Retired in 0.20: the user credential now rides Authorization. Still
-	// stripped so a client that keeps sending the old header cannot leak the
-	// credential to the upstream.
-	"X-Warden-User-Token",
-	"X-Warden-Role",          // Warden role header
-	"X-Warden-Provider",      // Warden provider-mount routing header
-	"X-Warden-Subject-Token", // token-exchange subject token — internal-only, never forwarded
-	"X-Warden-Actor-Token",   // token-exchange actor token — internal-only, never forwarded
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",
@@ -45,11 +36,12 @@ var headersToRemove = []string{
 	"X-Forwarded-Port",
 	"X-Real-Ip",
 	"Forwarded",
-}
+)
 
 func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) {
-	// Check if Vault address is configured
-	if b.vaultAddress == "" {
+	// Read once: a config write may replace it mid-request.
+	address := b.address()
+	if address == "" {
 		b.Logger.Error("vault_address not configured")
 		http.Error(req.ResponseWriter, "Vault provider not configured", http.StatusServiceUnavailable)
 		return
@@ -86,7 +78,7 @@ func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	}
 
 	// Build target URL
-	targetURL, err := b.buildTargetURL(req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
+	parsedURL, err := targetURLFor(address, req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
 	if err != nil {
 		b.Logger.Error("Failed to build target URL", logger.Err(err))
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
@@ -95,12 +87,6 @@ func (b *vaultBackend) handleGateway(ctx context.Context, req *logical.Request) 
 
 	// Prepare request for proxying
 	r := req.HTTPRequest
-	parsedURL, err := url.Parse(targetURL)
-	if err != nil {
-		b.Logger.Error("Failed to parse target URL", logger.Err(err))
-		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
-		return
-	}
 	r.URL = parsedURL
 	r.Host = r.URL.Host
 	r.RequestURI = "" // Required for outgoing requests
@@ -131,11 +117,18 @@ func (b *vaultBackend) getVaultToken(req *logical.Request) (string, error) {
 }
 
 // buildTargetURL constructs the target Vault URL from the gateway path
-func (b *vaultBackend) buildTargetURL(path, rawQuery string) (string, error) {
+func (b *vaultBackend) buildTargetURL(path, rawQuery string) (*url.URL, error) {
+	return targetURLFor(b.address(), path, rawQuery)
+}
+
+// targetURLFor constructs the target URL at address from the gateway path.
+// path is the decoded request path the request was authorized on; it is
+// escaped once on the wire and never decoded again (see package upstream).
+func targetURLFor(address, path, rawQuery string) (*url.URL, error) {
 	// Find gateway path marker
 	gatewayIdx := strings.Index(path, "/gateway")
 	if gatewayIdx == -1 {
-		return "", fmt.Errorf("invalid gateway path: %s", path)
+		return nil, fmt.Errorf("invalid gateway path: %s", path)
 	}
 
 	// Extract path after "/gateway"
@@ -147,11 +140,7 @@ func (b *vaultBackend) buildTargetURL(path, rawQuery string) (string, error) {
 		vaultPath = "/v1" + vaultPath
 	}
 
-	// Build URL string directly (avoid url.Parse overhead for simple case)
-	if rawQuery != "" {
-		return b.vaultAddress + vaultPath + "?" + rawQuery, nil
-	}
-	return b.vaultAddress + vaultPath, nil
+	return upstream.URL(address, vaultPath, rawQuery)
 }
 
 // prepareHeaders removes unwanted headers and injects the Vault token (if provided)

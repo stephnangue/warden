@@ -55,6 +55,7 @@ func runRead(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("error reading auth method at path %s: %w", path, err)
 	}
+	helpers.PrintWarnings(authInfo.Warnings)
 
 	data := map[string]any{
 		"path":        path,
@@ -68,6 +69,9 @@ func runRead(cmd *cobra.Command, args []string) error {
 			cfg[k] = v
 		}
 		data["config"] = cfg
+	}
+	if len(authInfo.Warnings) > 0 {
+		data["warnings"] = authInfo.Warnings
 	}
 
 	return helpers.RenderMap(data, func() {

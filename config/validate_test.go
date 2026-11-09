@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -68,6 +69,28 @@ func TestLoadConfig_IPBindingPolicy(t *testing.T) {
 				require.NoError(t, err)
 			}
 		})
+	}
+}
+
+func TestLoadConfig_CacheBudgets(t *testing.T) {
+	cfg, err := loadFromHCL(t, minimalConfigHCL+"\ntoken_cache_megabytes = 256\ncredential_cache_megabytes = 128\n")
+	require.NoError(t, err)
+	assert.Equal(t, 256, cfg.TokenCacheMegabytes)
+	assert.Equal(t, 128, cfg.CredentialCacheMegabytes)
+
+	cfg, err = loadFromHCL(t, minimalConfigHCL)
+	require.NoError(t, err)
+	assert.Zero(t, cfg.TokenCacheMegabytes, "unset: the built-in default")
+	assert.Zero(t, cfg.CredentialCacheMegabytes)
+
+	for _, body := range []string{
+		"token_cache_megabytes = -1",
+		"credential_cache_megabytes = -64",
+		"token_cache_megabytes = 1048577",
+	} {
+		_, err := loadFromHCL(t, minimalConfigHCL+"\n"+body+"\n")
+		require.Error(t, err, body)
+		assert.Contains(t, err.Error(), "must be 0 (the default) or between 1 and 1048576", body)
 	}
 }
 
@@ -334,6 +357,125 @@ listener "tcp" {
 	assert.Equal(t, "20s", ln.TLSSPIFFEStartupTimeout)
 }
 
+func TestLoadConfig_ListenerHTTPTimeouts(t *testing.T) {
+	tests := []struct {
+		name    string
+		extra   string
+		wantErr string // substring; "" means expect success
+	}{
+		{
+			name: "all three set — ok",
+			extra: `
+listener "tcp" {
+  address            = ":8520"
+  tls_disable        = true
+  http_read_timeout  = "10s"
+  http_write_timeout = "30s"
+  http_idle_timeout  = "2m"
+}
+`,
+		},
+		{
+			name: "unset — ok, listener applies its defaults",
+			extra: `
+listener "tcp" {
+  address     = ":8521"
+  tls_disable = true
+}
+`,
+		},
+		{
+			name: "unparseable write timeout — error",
+			extra: `
+listener "tcp" {
+  address            = ":8522"
+  tls_disable        = true
+  http_write_timeout = "soon"
+}
+`,
+			wantErr: "invalid http_write_timeout",
+		},
+		{
+			// Zero is net/http's "no deadline at all", which is never what an
+			// operator writing an explicit value is asking for.
+			name: "zero read timeout — error",
+			extra: `
+listener "tcp" {
+  address           = ":8523"
+  tls_disable       = true
+  http_read_timeout = "0s"
+}
+`,
+			wantErr: "http_read_timeout must be positive",
+		},
+		{
+			name: "negative idle timeout — error",
+			extra: `
+listener "tcp" {
+  address           = ":8524"
+  tls_disable       = true
+  http_idle_timeout = "-1m"
+}
+`,
+			wantErr: "http_idle_timeout must be positive",
+		},
+		{
+			// The deadlines are independent of the TLS mode, so they must be
+			// validated on a SPIFFE listener too — not only in the default arm.
+			name: "invalid timeout on a SPIFFE listener — still rejected",
+			extra: `
+listener "tcp" {
+  address           = ":8525"
+  tls_spiffe        = true
+  http_idle_timeout = "later"
+}
+`,
+			wantErr: "invalid http_idle_timeout",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadFromHCL(t, minimalConfigHCL+tt.extra)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestLoadConfig_ListenerHTTPTimeoutsDecode guards the HCL tag names and the
+// accessor initListeners uses: an empty field must yield zero, which the
+// listener reads as "use the built-in default".
+func TestLoadConfig_ListenerHTTPTimeoutsDecode(t *testing.T) {
+	body := `
+storage "postgres" {
+  connection_url = "postgres://u:p@db:5432/warden"
+}
+
+listener "tcp" {
+  address            = ":8530"
+  tls_disable        = true
+  http_read_timeout  = "10s"
+  http_write_timeout = "30s"
+}
+`
+	cfg, err := loadFromHCL(t, body)
+	require.NoError(t, err)
+	require.Len(t, cfg.Listeners, 1)
+	ln := cfg.Listeners[0]
+	assert.Equal(t, "10s", ln.HTTPReadTimeout)
+	assert.Equal(t, "30s", ln.HTTPWriteTimeout)
+	assert.Empty(t, ln.HTTPIdleTimeout)
+
+	read, write, idle := ln.HTTPTimeouts()
+	assert.Equal(t, 10*time.Second, read)
+	assert.Equal(t, 30*time.Second, write)
+	assert.Zero(t, idle, "an unset field must not manufacture a deadline")
+}
+
 func TestLoadConfig_ClusterAddrValidation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -507,14 +649,14 @@ func TestKMS_Config(t *testing.T) {
 	t.Run("aws kms seal", func(t *testing.T) {
 		k := &KMS{
 			Type:      "awskms",
-			AwsRegion: "us-east-1",
+			Region:    "us-east-1",
 			AccessKey: "AKIA...",
 			SecretKey: "secret",
 			KmsKeyID:  "arn:aws:kms:us-east-1:111:key/abc",
 		}
 		got := k.Config()
 		assert.Equal(t, "awskms", got["type"])
-		assert.Equal(t, "us-east-1", got["aws_region"])
+		assert.Equal(t, "us-east-1", got["region"])
 		assert.Equal(t, "AKIA...", got["access_key"])
 		assert.Equal(t, "arn:aws:kms:us-east-1:111:key/abc", got["kms_key_id"])
 	})
@@ -627,5 +769,10 @@ func TestMergeConfig(t *testing.T) {
 		overlay := &Config{LogRotateMegabytes: 500}
 		mergeConfig(base, overlay)
 		assert.Equal(t, 500, base.LogRotateMegabytes)
+
+		base = &Config{TokenCacheMegabytes: 100, CredentialCacheMegabytes: 64}
+		mergeConfig(base, &Config{TokenCacheMegabytes: 256})
+		assert.Equal(t, 256, base.TokenCacheMegabytes)
+		assert.Equal(t, 64, base.CredentialCacheMegabytes, "an unset overlay keeps the base")
 	})
 }

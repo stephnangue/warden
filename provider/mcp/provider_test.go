@@ -5,9 +5,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -99,9 +102,10 @@ func TestExtractBearerToken_UnsupportedType(t *testing.T) {
 }
 
 // The enforcement gate decides whether a request is subject to body-authoritative
-// mcp { } rules. It has to decline anything whose body is not a JSON-RPC call —
-// SSE reconnects and session closes carry no method to authorise — while
-// admitting every shape a real client's POST takes.
+// MCP rules. SSE reconnects and session closes carry no method to authorise and
+// are declined. Every POST is admitted whatever its label: a relabelled tools/call
+// must not slip past the rules, and the strict parser refuses a body that is not
+// JSON-RPC.
 
 func TestShouldEnforceMCPPolicy(t *testing.T) {
 	cases := []struct {
@@ -114,8 +118,9 @@ func TestShouldEnforceMCPPolicy(t *testing.T) {
 		{"json-rpc post with charset", http.MethodPost, "application/json; charset=utf-8", true},
 		{"sse reconnect", http.MethodGet, "application/json", false},
 		{"session close", http.MethodDelete, "application/json", false},
-		{"post with no content type", http.MethodPost, "", false},
-		{"post with a non-json body", http.MethodPost, "text/plain", false},
+		{"post with no content type", http.MethodPost, "", true},
+		{"post labelled text/plain", http.MethodPost, "text/plain", true},
+		{"post labelled with a +json type", http.MethodPost, "application/vnd.api+json", true},
 	}
 
 	for _, tc := range cases {
@@ -145,6 +150,8 @@ func TestSpec(t *testing.T) {
 	assert.Equal(t, "mcp_url", Spec.URLConfigKey)
 	assert.NotNil(t, Spec.ExtractCredentials)
 	assert.NotNil(t, Spec.ShouldEnforceMCPPolicy)
+	// A refusal must answer the call, not end the client's session.
+	assert.NotNil(t, Spec.RenderGatewayError)
 	assert.NotNil(t, Factory)
 	// Streaming bodies must not be parsed: MCP responses may be SSE, and buffering
 	// one would stall a session rather than proxy it.
@@ -152,4 +159,56 @@ func TestSpec(t *testing.T) {
 	// No default Accept: MCP clients negotiate their own, and forcing one would
 	// break a one-shot JSON client.
 	assert.Empty(t, Spec.DefaultAccept)
+}
+
+// The listen_timeout hooks are what make the mount's second deadline
+// reachable at all: the field must be declared, survive a write, be read back
+// in the shape that gets persisted, and come back from persisted config on
+// restart. A gap in any one of them leaves the mount silently on the default.
+func TestSpec_ListenTimeoutWiring(t *testing.T) {
+	require.NotNil(t, Spec.SelectTimeout, "without the hook every call takes the unary timeout")
+	require.Contains(t, Spec.ExtraConfigFields, httpproxy.ListenTimeoutKey)
+	require.NotNil(t, Spec.OnConfigWrite)
+	require.NotNil(t, Spec.OnConfigRead)
+	require.NotNil(t, Spec.OnInitialize)
+
+	schema := map[string]*framework.FieldSchema{
+		httpproxy.ListenTimeoutKey: Spec.ExtraConfigFields[httpproxy.ListenTimeoutKey],
+	}
+
+	state, err := Spec.OnConfigWrite(
+		&framework.FieldData{Raw: map[string]any{httpproxy.ListenTimeoutKey: "2h"}, Schema: schema},
+		map[string]any{},
+	)
+	require.NoError(t, err)
+
+	// OnConfigRead's output is both the config-read response and what gets
+	// persisted, so the string form has to round-trip back through
+	// OnInitialize.
+	read := Spec.OnConfigRead(state)
+	assert.Equal(t, "2h0m0s", read[httpproxy.ListenTimeoutKey])
+
+	restored := Spec.OnInitialize(read, map[string]any{})
+	assert.Equal(t, 2*time.Hour, httpproxy.ReadListenTimeout(restored))
+}
+
+func TestSpec_ListenTimeoutRejectsNonPositive(t *testing.T) {
+	schema := map[string]*framework.FieldSchema{
+		httpproxy.ListenTimeoutKey: Spec.ExtraConfigFields[httpproxy.ListenTimeoutKey],
+	}
+
+	_, err := Spec.OnConfigWrite(
+		&framework.FieldData{Raw: map[string]any{httpproxy.ListenTimeoutKey: "0s"}, Schema: schema},
+		map[string]any{},
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "greater than 0")
+}
+
+// The two MCP providers deliberately share their timeout defaults so
+// operators learn one knob across every MCP mount.
+func TestSpec_UnaryTimeoutIsNotTheStreamingCeiling(t *testing.T) {
+	assert.Equal(t, DefaultMCPTimeout, Spec.DefaultTimeout)
+	assert.Less(t, DefaultMCPTimeout, httpproxy.DefaultListenTimeout,
+		"a unary call must be bounded more tightly than an open-ended subscription")
 }

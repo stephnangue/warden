@@ -15,9 +15,6 @@ type Auth struct {
 	// is associated with.
 	Policies []string `json:"policies" mapstructure:"policies" structs:"policies"`
 
-	// Credential spec as a result of the authentification if any
-	CredentialSpec string
-
 	// ClientToken is the token that is generated for the authentication.
 	ClientToken string `json:"client_token" mapstructure:"client_token" structs:"client_token"`
 
@@ -35,10 +32,10 @@ type Auth struct {
 	// requesting path.
 	PolicyResults *sdklogical.PolicyResults `json:"policy_results"`
 
-	// MCPDecision carries the MCP-specific policy decision when an mcp { }
-	// block was consulted during CBP evaluation. nil when no such block
-	// applied (every non-MCP request, plus MCP-mount requests whose bound
-	// policies contain no mcp block). Flows through buildAuditAuth into
+	// MCPDecision carries the MCP-specific policy decision when an MCP
+	// rule-set was consulted during CBP evaluation. nil when no rule-set
+	// applied (every non-MCP request, plus MCP-mount requests with no MCP
+	// policy rule-set at the path). Flows through buildAuditAuth into
 	// audit.PolicyResults.MCPDecision and is also consumed by the
 	// deny-response path to populate the WWW-Authenticate header and the
 	// OAuth-shaped 403 body.
@@ -46,13 +43,19 @@ type Auth struct {
 
 	// Condition carries the path-level CEL condition decision when a
 	// path-level condition was evaluated during CBP evaluation. nil when the
-	// matched permission had no path-level condition. Flows through
+	// operation answered to no path-level condition. Flows through
 	// buildAuditAuth into audit.PolicyResults.Condition.
 	Condition *ConditionResult
 
-	PrincipalID string
+	// DenyingPolicy names the policy whose deny stanza refused the request. Empty
+	// when none did. Flows through buildAuditAuth into
+	// audit.PolicyResults.DenyingPolicy.
+	DenyingPolicy string
 
-	RoleName string
+	// PrincipalID names the caller, as the auth mount's configuration reads it
+	// from the credential. A login carries no role and no credential spec:
+	// every login is an admission, and the role is granted per request.
+	PrincipalID string
 
 	TokenTTL time.Duration
 
@@ -75,9 +78,13 @@ type Auth struct {
 	// the issued token and consulted by token_metadata policy conditions.
 	// Never caller-supplied — only an auth method writes it.
 	Metadata map[string]string
+
+	// Admission is what the auth method verified about the credential, carried
+	// to the issued token. In memory only: never serialized or persisted.
+	Admission *Admission `json:"-"`
 }
 
-// MCPDecision records the outcome of evaluating an mcp { } policy block
+// MCPDecision records the outcome of evaluating an MCP rule-set
 // against a request. Populated on every branch (allow and deny) so the
 // audit layer can render the decision unconditionally. The JSON tags
 // double as the wire shape exposed in audit records under
@@ -96,14 +103,32 @@ type MCPDecision struct {
 
 	// Name is the lowercased name-bearing field from the JSON-RPC
 	// body — params.name for tools/call and prompts/get, params.uri
-	// for resources/read. Empty for methods without a name
+	// for resources/read, resources/subscribe, resources/directory/read
+	// and skills/get. Empty for methods without a name
 	// (tools/list, initialize, notifications) and for any deny
 	// produced before the name gate ran.
 	Name string `json:"name,omitempty"`
 
-	// Decision is "allow" or "deny". Always populated when an mcp { }
-	// block was consulted.
+	// Decision is "allow" or "deny". Always populated when an MCP
+	// rule-set was consulted.
 	Decision string `json:"decision"`
+
+	// PolicyName is the MCP policy that MatchedRule and RuleType came from.
+	// Tool contracts are separately-owned documents, so a record carrying only
+	// the rule cannot say which document to edit.
+	//
+	// Several contracts can cover one path, and the two outcomes differ in what
+	// this names. On allow, evaluation stops at the first rule-set that permits
+	// the call, so this is *a* contract that allowed it — others may also have
+	// allowed it and were never consulted. On deny, every rule-set refused and
+	// the most informative refusal is reported, so this names the source of the
+	// reported reason rather than the sole cause: editing that one policy need
+	// not lift the denial, because the others denied too. A denied list is the
+	// exception: it is final, so this names the policy that holds it.
+	//
+	// Empty on structural denies (malformed body, oversized, and so on), which
+	// are produced before any rule-set is chosen.
+	PolicyName string `json:"policy_name,omitempty"`
 
 	// MatchedRule is the pattern from the policy (allow- or deny-list
 	// entry) that fired. For a literal match it equals the request's
@@ -145,7 +170,7 @@ type MCPDecision struct {
 	// which set's deny surfaces on a multi-set deny.
 	BatchIndex *int `json:"batch_index,omitempty"`
 
-	// Condition carries the CEL condition decision when an mcp{} condition
+	// Condition carries the CEL condition decision when an MCP policy condition
 	// was evaluated for this call. Populated when RuleType is "condition" or
 	// "condition_error"; nil when no condition applied.
 	Condition *ConditionResult `json:"condition,omitempty"`
@@ -189,6 +214,20 @@ type ConditionResult struct {
 	// clean allow/deny.
 	ErrorKind string `json:"error_kind,omitempty"`
 
+	// UserAbsent marks a deny that occurred with no user principal on the
+	// request while at least one merged condition reads user.* — so acquiring a
+	// user credential MIGHT change the outcome. It is a syntactic
+	// over-approximation, not a satisfiability result: a condition can reference
+	// user.* and still be unsatisfiable no matter what user is presented.
+	//
+	// The handler uses it to answer with a 401 and the user challenge instead of
+	// a bare 403, so a client can discover where to acquire a user identity. That
+	// conversion is gated on the request being able to carry one at all; this
+	// flag is recorded on every matching deny, including paths where no user
+	// could ever be presented, so read it as "a user was absent here", not as
+	// "a user would have helped".
+	UserAbsent bool `json:"user_absent,omitempty"`
+
 	// Inputs maps the expression's referenced variables to their CTL-stripped
 	// values so a denial is self-explanatory. Sensitive keys are
 	// redacted/salted by the audit format layer.
@@ -218,19 +257,20 @@ func (c *ConditionResult) Sanitize() {
 	if c == nil {
 		return
 	}
-	c.Decision = stripControlChars(c.Decision)
-	c.Expression = stripControlChars(c.Expression)
-	c.ErrorKind = stripControlChars(c.ErrorKind)
+	c.Decision = StripControlChars(c.Decision)
+	c.Expression = StripControlChars(c.Expression)
+	c.ErrorKind = StripControlChars(c.ErrorKind)
 	// Inputs keys are operator-authored CEL paths (identifiers — no control
 	// chars possible), so only values need stripping; strip them in place to
 	// avoid reallocating the map on the eval hot path.
 	for k, v := range c.Inputs {
-		c.Inputs[k] = stripControlChars(v)
+		c.Inputs[k] = StripControlChars(v)
 	}
 }
 
-// stripControlChars removes C0 control characters and DEL.
-func stripControlChars(s string) string {
+// StripControlChars removes C0 control characters and DEL. A string with
+// none is returned as is, without allocating.
+func StripControlChars(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7F {
 			return -1
@@ -244,22 +284,26 @@ func stripControlChars(s string) string {
 // RFC 8693 §4.1), so there is no unverified variant.
 type ActorRef struct {
 	Subject string
+	// Issuer is the "iss" member of this act layer, copied only when the inbound
+	// layer carried one — never filled in from the token's own iss. It names the
+	// context Subject is to be interpreted in, and an assertion that re-emits the
+	// chain must pass it through unchanged rather than invent one. omitempty keeps
+	// entries stored before this field byte-identical.
+	Issuer string `json:",omitempty"`
 }
 
 // AuthData contains the authentication data used to generate a token.
 type AuthData struct {
-	PrincipalID    string    // Principal identifier
-	RoleName       string    // Associated role
-	ExpireAt       time.Time // Token expiration
-	CredentialSpec string
-	Policies       []string
-	ClientIP       string
-	TokenValue     string // External token value (e.g., JWT for transparent mode)
+	PrincipalID string    // Principal identifier
+	ExpireAt    time.Time // Token expiration
+	Policies    []string
+	ClientIP    string
+	TokenValue  string // External token value (e.g., JWT for transparent mode)
 
 	// MountAccessor is the stable identifier of the auth mount that
 	// issued this login. Transparent token types include it in the cache
-	// key so two mounts of the same auth type with overlapping role
-	// names + the same credential cannot share a cache entry.
+	// key so two mounts of the same auth type presented the same credential
+	// cannot share a cache entry.
 	MountAccessor string
 
 	// Actors carries the verified RFC 8693 "act" delegation chain extracted at
@@ -271,4 +315,8 @@ type AuthData struct {
 	// method extracted (e.g. mapped JWT claims). Persisted onto the issued
 	// TokenEntry and consulted by token_metadata policy conditions.
 	Metadata map[string]string
+
+	// Admission is what the auth method verified about the credential; the
+	// issued TokenEntry shares the pointer. Never serialized.
+	Admission *Admission `json:"-"`
 }

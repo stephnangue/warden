@@ -1,5 +1,6 @@
 ---
 title: "Alibaba Cloud (Alicloud)"
+description: "Proxy Alibaba Cloud APIs through Warden: the agent signs with its own identity, Warden federates it into short-lived STS credentials, and re-signs the request."
 ---
 
 The Alicloud provider enables proxied access to Alibaba Cloud APIs through Warden with automatic credential management and request signing. It supports two authentication modes, auto-detected per request:
@@ -9,30 +10,96 @@ The Alicloud provider enables proxied access to Alibaba Cloud APIs through Warde
 
 Warden is transparent to clients: they use standard Alicloud SDKs pointed at the Warden mount, and Warden injects real Alicloud credentials into every proxied request.
 
+## How a request flows
+
+The recommended setup stores **no Alicloud credentials at all**. Warden mints a short-lived
+identity assertion describing the agent and trades it at STS for temporary credentials.
+
+<p align="center"><img alt="An agent signs an Alicloud SDK request with its own identity, Warden builds an assertion carrying the agent's claims, has an external KMS sign it, exchanges it at Alicloud STS for temporary credentials, and re-signs the request before forwarding it to the Alicloud service API" src="/images/warden-prov-alicloud-oidc-fed.png" width="860"></p>
+
+1. The user authenticates to the agent and the agent holds an ID token.
+2. The agent signs an ordinary Alicloud SDK request carrying **its own** identity, and
+   asserts a role. Warden authenticates it and verifies the signature.
+3. The asserted role selects the credential spec. Warden builds the assertion that spec
+   calls for — agent claims, scoped to one audience — and sends it to an **external KMS**
+   unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden presents it to **Alicloud STS** as `AssumeRoleWithOIDC`, against the spec's
+   `role_arn` and the source's OIDC provider.
+6. STS returns a temporary access key, secret and security token.
+7. Warden re-signs the request with those credentials and forwards it.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the minted credential, so most requests skip from step 2 to step 7. The entry
+is keyed by namespace, the agent's token id and the spec name, and lives for the shorter of
+the credential's lease and the agent's session.
+:::
+
+The KMS leg is optional, and **recommended in production**: with a
+[`signer` stanza](/configuration/signer/) configured, Warden holds no key material at all.
+Omit the stanza and the issuer signs with a locally held key instead.
+
+:::note[The agent is the only principal here]
+Like the [`aws` provider](/provider-backends/aws/), this mount has no user leg — it accepts
+no `user_auth_path`, because a signed SDK request has nowhere to carry a second credential.
+The agent's identity is what reaches Warden and what the assertion describes, which is why
+the assertion above carries agent claims only.
+:::
+
+### When you must store a management key
+
+Where you cannot register an OIDC provider in RAM, Warden holds a management access key in
+encrypted storage and can rotate it.
+
+<p align="center"><img alt="Warden resolves the asserted role to a credential spec, reads that spec's management access key from encrypted storage, calls Alicloud STS AssumeRole for temporary credentials, and re-signs the request before forwarding it to the Alicloud service API" src="/images/warden-prov-alicloud-static-sts.png" width="860"></p>
+
+Steps 3 and 4 become a storage read instead of a signing call, and step 5 is a plain
+`AssumeRole` using the management key rather than `AssumeRoleWithOIDC`. Steps 1, 2, 6 and 7
+are unchanged, and the agent still never sees a key.
+
+## Credential modes
+
+| Mode | Supported | How |
+|---|---|---|
+| **Keyless federation** ✅ *recommended* | Yes | `auth_method=oidc_federation`; **nothing stored**, and no RAM user to rotate |
+| **Stored root → short-lived mint** | Yes | `auth_method=static`; a management key in Warden storage, optionally rotated |
+| **Static inline** | No | Every mode mints through STS |
+| **Chaining** | Via an `hvault` source | Keys held in Vault/OpenBao and read per request — see Option B below |
+| **Delegated user token** | No | No user leg on this provider |
+
+See the [Alicloud credential driver](/credential-drivers/alicloud/) for every source and
+spec key.
+
 ## Prerequisites
 
-- An **Alicloud account** with a RAM user holding a programmatic access key. Depending on the mint method you pick in [Step 3](#step-3-create-a-credential-source-and-spec):
-  - **`assume_role`** (recommended): the management key needs `AliyunSTSAssumeRoleAccess` (or an equivalent policy allowing `sts:AssumeRole`), and the target RAM role must trust the management user.
+- An **Alicloud account**. Keyless ([Option A](#option-a-keyless-federation-recommended)),
+  it needs a RAM **OIDC provider** trusting Warden's issuer and target RAM roles that trust
+  it — no RAM user and no access key. With a stored key instead, a RAM user holding a
+  programmatic access key; depending on the mint method you pick in
+  [Step 3](#step-3-create-a-credential-source-and-spec):
+  - **`assume_role`**: the management key needs `AliyunSTSAssumeRoleAccess` (or an equivalent policy allowing `sts:AssumeRole`), and the target RAM role must trust the management user.
   - **Management key rotation** (optional): the management key additionally needs `ram:ListAccessKeys`, `ram:CreateAccessKey`, and `ram:DeleteAccessKey` scoped to its own RAM user. See [Management key rotation](#management-key-rotation).
   - **`static_alicloud`**: a pair of RAM access keys stored in a Vault/OpenBao KV v2 mount, with whatever Alicloud permissions your workloads need.
 - Warden running (see `deploy/docker-compose.quickstart.yml` in the repository root)
 - An identity provider that issues JWTs (Ory Hydra in the quickstart)
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/alicloud-user \
-    token_policies="alicloud-access" \
-    user_claim=sub \
-    cred_spec_name=alicloud-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -55,7 +122,7 @@ Verify the provider is enabled:
 warden provider list
 ```
 
-Configure the provider with `auto_auth_path` and — if Warden is behind a reverse proxy — `proxy_domains` (see [Prerequisite: host-based routing](#prerequisite-host-based-routing)):
+Configure the provider with `auto_auth_path` and — if Warden is behind a reverse proxy — `proxy_domains` (see [Prerequisite: host-based routing](#prerequisite-host-based-routing)). A config write **merges** into the stored config: a key the write leaves out keeps its current value. To reset one, name it — `tls_skip_verify=false`, `ca_data=""`, `timeout=30s`. A refused write changes nothing.
 
 ```bash
 warden write alicloud/config <<EOF
@@ -81,32 +148,92 @@ Alicloud credentials come from one of two source types. Pick the one that matche
 | `alicloud` | `assume_role` | **Temporary** STS credentials (900-3600s) | Short-lived, least-privilege access (recommended) |
 | `hvault` | `static_alicloud` | Permanent RAM keys from Vault KV v2 | Keys already live in your Vault/OpenBao |
 
-The `alicloud` source requires a *management* access key that Warden uses to call the STS `AssumeRole` API per request. When keys are managed elsewhere (e.g., Vault/OpenBao), use the `hvault` source.
+An `alicloud` source either federates — exchanging a Warden assertion at STS `AssumeRoleWithOIDC`, with no key at all — or holds a *management* access key that Warden uses to call STS `AssumeRole` per request. When keys are managed elsewhere (e.g., Vault/OpenBao), use the `hvault` source.
 
 > **Why no `dynamic_keys`?** Alicloud RAM access keys created via `CreateAccessKey` can take seconds to minutes to propagate across regions. Minting a fresh RAM key per request would produce spurious `InvalidAccessKeyId` errors on the first use. `assume_role` issues STS session tokens that avoid that propagation window, so it's the only dynamic mint method the driver exposes.
 
-### Option A: Alicloud source with STS `AssumeRole`
+### Option A: Keyless federation (recommended)
 
-Create an `alicloud` source holding a *management* access key with permissions to call `sts:AssumeRole`. Warden calls Alicloud's STS API per request and hands clients short-lived credentials, so even a compromised session window is bounded.
-
-The example below also enables [management key rotation](#management-key-rotation) via `-rotation-period=720h` (30 days). The `management_user_name` config key is the RAM user that owns the management key — required for rotation to work.
+A federated source holds no key. It names the RAM **OIDC provider** Alicloud should trust,
+and nothing else — `access_key_id`, `access_key_secret`, `management_user_name`,
+`activation_delay` and `ram_endpoint` are all **rejected**, because there is no key of its
+own and no RAM user to rotate as. `rotation_period` is rejected for the same reason.
 
 ```bash
-warden cred source create alicloud-src \
-  -type=alicloud \
-  -rotation-period=720h \
-  -config access_key_id=LTAI-mgmt-key \
-  -config access_key_secret=mgmt-secret \
-  -config management_user_name=warden-management
+warden cred source create alicloud-src -json '{
+  "type": "alicloud",
+  "config": {
+    "auth_method": "oidc_federation",
+    "oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+    "audience": "sts.aliyuncs.com"
+  }
+}'
 
-warden cred spec create alicloud-ops \
-  -source alicloud-src \
-  -type=alicloud_keys \
-  -config mint_method=assume_role \
-  -config role_arn=acs:ram::123456789012:role/warden-ops \
-  -config role_session_name=warden-session \
-  -config duration_seconds=1h
+warden cred spec create alicloud-ops -json '{
+  "source": "alicloud-src",
+  "type": "alicloud_keys",
+  "min_ttl": 900,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "assume_role",
+    "subject_token_source": "warden_identity",
+    "role_arn": "acs:ram::123456789012:role/warden-ops",
+    "role_session_name": "warden-session",
+    "duration_seconds": "1h"
+  }
+}'
 ```
+
+`assume_role` is the **only** mint method supported over federation. The target RAM role's
+trust policy must accept `AssumeRoleWithOIDC` from that provider rather than trusting a
+management user — see [Keyless credentials](/federation/keyless-credentials/). `audience`
+has no default: it must match a client ID registered on the RAM OIDC provider.
+
+RAM binds only the token's `oidc:iss`, `oidc:aud` and `oidc:sub`, so condition the trust
+policy on `oidc:sub` — the agent's composite `wid:<namespaceID>:<mountAccessor>:<principalID>`.
+No user is ever disclosed to RAM: a spec's `assertion_user_claims` still drives request
+templating, but the assertion keeps naming the agent. See
+[Assertion claims](/federation/assertion-claims/#when-a-user-is-disclosed).
+
+### Option B: Alicloud source with a stored management key
+
+Where you cannot register an OIDC provider. Create an `alicloud` source holding a
+*management* access key with permissions to call `sts:AssumeRole`. Warden calls STS per
+request and hands clients short-lived credentials, so even a compromised session window is
+bounded.
+
+The example below also enables [management key rotation](#management-key-rotation) via
+`rotation_period` — `2592000` seconds (30 days). The `management_user_name` key is the RAM
+user that owns the management key, required for rotation to work.
+
+```bash
+warden cred source create alicloud-static -json '{
+  "type": "alicloud",
+  "rotation_period": 2592000,
+  "config": {
+    "auth_method": "static",
+    "access_key_id": "LTAI-mgmt-key",
+    "access_key_secret": "<mgmt-secret>",
+    "management_user_name": "warden-management"
+  }
+}'
+
+warden cred spec create alicloud-ops -json '{
+  "source": "alicloud-static",
+  "type": "alicloud_keys",
+  "min_ttl": 900,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "assume_role",
+    "role_arn": "acs:ram::123456789012:role/warden-ops",
+    "role_session_name": "warden-session",
+    "duration_seconds": "1h"
+  }
+}'
+```
+
+`oidc_provider_arn` and `audience` are rejected on a static source — they seed only the
+federation exchange, so accepting them would mislead.
 
 The RAM role's trust policy must allow the management user to assume it, and the source's management key needs `AliyunSTSAssumeRoleAccess` (or an equivalent custom policy). See [Alicloud: Use STS to grant an access to a RAM role](https://www.alibabacloud.com/help/en/ram/user-guide/use-sts-tokens-to-access-resources) for setup.
 
@@ -185,7 +312,33 @@ path "alicloud/role/+/gateway/*" {
 EOF
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 5: Grant Agents the Role
+
+Create the role that binds the credential spec and policy, then a virtual group that grants it to callers of the JWT mount. The provider must already be configured with its `auto_auth_path` (Step 2), so the role is reachable through it. See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+```bash
+warden role create alicloud-user -json '{
+  "policies": ["alicloud-access"],
+  "cred_spec_name": "alicloud-ops",
+  "provider_path": "alicloud/"
+}'
+
+warden identity group create alicloud-user-agents -json '{
+  "type": "virtual",
+  "roles": ["alicloud-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, such as `"sub": ["agent-*"]`.
+
+## Step 6: Get a JWT and Make Requests
 
 Obtain a JWT from your identity provider (client credentials flow, implicit flow, etc.), then point the Alicloud CLI at Warden.
 
@@ -247,7 +400,7 @@ Create an `StsToken` profile. **`access-key-id` carries the Warden role name** (
 
 ```bash
 export JWT="eyJhbGciOiJIUzI1NiJ9..."   # obtained from your IdP
-export ROLE="alicloud-user"             # the auth/jwt/role/<name> you configured in Step 1
+export ROLE="alicloud-user"             # the role you created in Step 5
 
 aliyun configure set \
   --profile warden \
@@ -258,7 +411,7 @@ aliyun configure set \
   --region cn-hangzhou
 ```
 
-The CLI signs requests with ACS3-HMAC-SHA256 using `access-key-secret` and sets `x-acs-security-token` from `sts-token` — both are the JWT. `access-key-id` is part of the signed Credential field; Warden extracts it as the auth role for implicit JWT login.
+The CLI signs requests with ACS3-HMAC-SHA256 using `access-key-secret` and sets `x-acs-security-token` from `sts-token` — both are the JWT. `access-key-id` is part of the signed Credential field; Warden extracts it as the role the request asks for.
 
 ### Make requests
 
@@ -291,7 +444,7 @@ For each request, Warden extracts the JWT from `x-acs-security-token` (it starts
 
 ### Client-side signing inputs (for SDK users)
 
-In **both** JWT and cert flows, `access_key_id` carries the **role name**. Warden extracts it from the signed ACS3 `Credential` field and uses it as the auth role for implicit login. This is what lets a single nginx/Warden mount serve multiple roles transparently.
+In **both** JWT and cert flows, `access_key_id` carries the **role name**. Warden extracts it from the signed ACS3 `Credential` field and uses it as the role the request asks for. This is what lets a single nginx/Warden mount serve multiple roles.
 
 | Field | JWT auth | Cert auth |
 |---|---|---|
@@ -300,24 +453,25 @@ In **both** JWT and cert flows, `access_key_id` carries the **role name**. Warde
 | `x-acs-security-token` | the JWT | *omit* |
 | `endpoint` | `<real>.aliyuncs.com.warden.example.com` | same |
 
-For JWT auth, the JWT must have claims that match the declared role's `bound_claims` — otherwise auth fails. The client *declares* which role it wants via `access_key_id`; Warden *validates* the claim against the JWT before issuing credentials.
+A group must grant the declared role to the caller — otherwise the request is refused. The client *declares* which role it wants via `access_key_id`; Warden *checks* that one of the caller's groups grants it before issuing credentials.
 
 ### Role resolution
 
 Warden resolves the role in this order, first match wins:
-1. URL path segment `/role/<name>/gateway/...` (explicit, used when clients aren't going through the reverse proxy)
-2. `access_key_id` from the signed ACS3 `Credential` — via `GetAuthRoleFromRequest` (this is how the wildcard-subdomain setup works)
-3. `default_role` from provider config (fallback)
+1. `X-Warden-Role` header
+2. URL path segment `/role/<name>/gateway/...` (explicit, used when clients aren't going through the reverse proxy)
+3. `access_key_id` from the signed ACS3 `Credential` — via `GetAuthRoleFromRequest` (this is how the wildcard-subdomain setup works)
+4. `default_role` from provider config (fallback, a namespace role)
 
-Because of #2, the nginx `proxy_pass` does **not** need to hard-code a role. Serve everything at `/v1/alicloud/gateway/...` and let clients declare their role through the signed request.
+Because of #3, the nginx `proxy_pass` does **not** need to hard-code a role. Serve everything at `/v1/alicloud/gateway/...` and let clients declare their role through the signed request.
 
 ## OSS Object Storage
 
-OSS goes through the same wildcard subdomain as the OpenAPI path, and follows the same signing-inputs convention: **`aws_access_key_id` is the Warden role name**, not a placeholder. Warden extracts it from the signed SigV4 `Credential` field and uses it as the auth role.
+OSS goes through the same wildcard subdomain as the OpenAPI path, and follows the same signing-inputs convention: **`aws_access_key_id` is the Warden role name**, not a placeholder. Warden extracts it from the signed SigV4 `Credential` field and uses it as the role the request asks for.
 
 ```bash
 export JWT="eyJhbGciOiJIUzI1NiJ9..."
-export ROLE="alicloud-user"           # your auth/jwt/role/<name>
+export ROLE="alicloud-user"           # the role you created in Step 5
 
 aws configure set aws_access_key_id  "${ROLE}"
 aws configure set aws_secret_access_key "${JWT}"
@@ -328,17 +482,17 @@ aws s3 ls s3://my-bucket/ \
   --region cn-hangzhou
 ```
 
-Warden extracts the JWT from `X-Amz-Security-Token` (it starts with `eyJ`), authenticates against `auto_auth_path` using `${ROLE}` as the auth role (the JWT's claims must satisfy its `bound_claims`), strips the `.warden.example.com` suffix to get `oss-cn-hangzhou.aliyuncs.com`, verifies the client's SigV4 signature against the original subdomain host, and re-signs against the real OSS endpoint. Both path-style and virtual-hosted-bucket-style URLs work; the region is resolved from the SigV4 Credential scope.
+Warden extracts the JWT from `X-Amz-Security-Token` (it starts with `eyJ`), authenticates against `auto_auth_path` using `${ROLE}` as the requested role (a group must grant it to the token), strips the `.warden.example.com` suffix to get `oss-cn-hangzhou.aliyuncs.com`, verifies the client's SigV4 signature against the original subdomain host, and re-signs against the real OSS endpoint. Both path-style and virtual-hosted-bucket-style URLs work; the region is resolved from the SigV4 Credential scope.
 
 ## TLS Certificate Authentication
 
-Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+The steps above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
+Steps 2-4 (provider, credential and policy setup) are identical. Replace Steps 1, 5 and 6 with the following.
 
 ### Enable Cert Auth
 
@@ -349,18 +503,7 @@ warden auth enable cert
 ### Configure Trusted CA
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=alicloud-user
-```
-
-### Create a Cert Role
-
-```bash
-warden write auth/cert/role/alicloud-user \
-    allowed_common_names="agent-*" \
-    token_policies="alicloud-access" \
-    cred_spec_name=alicloud-ops
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
 
 ### Update Provider Config for Cert Auth
@@ -375,9 +518,31 @@ warden write alicloud/config <<EOF
 EOF
 ```
 
+### Grant the Role to Certificates
+
+Create the role as in Step 5, and grant it with a group whose rule matches certificate fields:
+
+```bash
+warden role create alicloud-user -json '{
+  "policies": ["alicloud-access"],
+  "cred_spec_name": "alicloud-ops",
+  "provider_path": "alicloud/"
+}'
+
+warden identity group create alicloud-user-agents -json '{
+  "type": "virtual",
+  "roles": ["alicloud-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+Values support glob patterns; a rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
+
 ### Make Requests with Certificates
 
-For cert-based transparent auth, the client signs with the **role name** as both `access_key_id` and `access_key_secret` (no JWT, no security token). Warden extracts the role from the ACS3 (or SigV4 for OSS) `Credential` field and matches it against the mTLS-authenticated identity.
+For implicit authentication with a certificate, the client signs with the **role name** as both `access_key_id` and `access_key_secret` (no JWT, no security token). Warden extracts the role from the ACS3 (or SigV4 for OSS) `Credential` field and checks that a group grants it to the certificate.
 
 ```bash
 # Alicloud OpenAPI (via any Alicloud SDK pointed at Warden over mTLS):

@@ -88,13 +88,11 @@ export WARDEN_TOKEN="root"
 
 # Enable JWT auth
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create role
-warden write auth/jwt/role/scaleway-user \
-    token_policies="scaleway-access" \
-    user_claim=sub \
-    cred_spec_name=scaleway-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 
 # Enable Scaleway provider
 warden provider enable scaleway
@@ -129,6 +127,18 @@ path "scaleway/role/+/gateway*" {
   capabilities = ["create", "read", "update", "delete", "patch"]
 }
 EOF
+
+# Create the role, and a group granting it to every agent the JWT mount admits
+warden role create scaleway-user -json '{
+  "policies": ["scaleway-access"],
+  "cred_spec_name": "scaleway-ops",
+  "provider_path": "scaleway/"
+}'
+warden identity group create scaleway-user-agents -json '{
+  "type": "virtual",
+  "roles": ["scaleway-user"],
+  "rules": [{ "mount": ["auth/jwt/"] }]
+}'
 ```
 
 ### 4. Get a JWT token
@@ -136,7 +146,7 @@ EOF
 ```bash
 export JWT_TOKEN=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
+  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write&audience=warden" \
   | jq -r '.access_token')
 ```
 

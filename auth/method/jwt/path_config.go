@@ -2,78 +2,72 @@ package jwt
 
 import (
 	"context"
+	"maps"
 	"net/http"
+	"slices"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
 
 // pathConfig returns the config path definition
 func (b *jwtAuthBackend) pathConfig() *framework.Path {
+	fields := map[string]*framework.FieldSchema{
+		"oidc_discovery_url": {
+			Type:        framework.TypeString,
+			Description: "OIDC Discovery URL. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
+		},
+		"oidc_discovery_ca_pem": {
+			Type:        framework.TypeString,
+			Description: "CA certificate for OIDC discovery",
+		},
+		"jwks_url": {
+			Type:        framework.TypeString,
+			Description: "JWKS URL. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
+		},
+		"jwks_ca_pem": {
+			Type:        framework.TypeString,
+			Description: "CA certificate for JWKS endpoint",
+		},
+		"bound_issuer": {
+			Type:        framework.TypeString,
+			Description: "Required issuer for JWT validation",
+		},
+		"bound_audiences": {
+			Type:        framework.TypeCommaStringSlice,
+			Description: "Audiences a JWT must carry, any one of them. Required when entity_kind is agent.",
+		},
+		"bound_subject": {
+			Type:        framework.TypeString,
+			Description: "Required subject for JWT validation",
+		},
+		"bound_claims": {
+			Type:        framework.TypeMap,
+			Description: "Map of claims to required values for JWT validation",
+		},
+		"jwt_validation_pubkeys": {
+			Type:        framework.TypeCommaStringSlice,
+			Description: "PEM-encoded RSA or ECDSA public keys for static JWT validation. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
+		},
+		"user_claim": {
+			Type:        framework.TypeString,
+			Description: "Claim to use as principal identity (default: sub)",
+			Default:     "sub",
+		},
+		"token_ttl": {
+			Type:        framework.TypeDurationSecond,
+			Description: "Token TTL (default: 1h)",
+		},
+		"max_age": helper.MaxAgeFieldSchema(),
+	}
+	maps.Copy(fields, helper.FactsFieldSchemas("a claim name, or a JSON Pointer with a leading / into nested claims", jwtAliasSources))
+
 	return &framework.Path{
 		Pattern: "config",
-		Fields: map[string]*framework.FieldSchema{
-			"oidc_discovery_url": {
-				Type:        framework.TypeString,
-				Description: "OIDC Discovery URL. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
-			},
-			"oidc_discovery_ca_pem": {
-				Type:        framework.TypeString,
-				Description: "CA certificate for OIDC discovery",
-			},
-			"jwks_url": {
-				Type:        framework.TypeString,
-				Description: "JWKS URL. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
-			},
-			"jwks_ca_pem": {
-				Type:        framework.TypeString,
-				Description: "CA certificate for JWKS endpoint",
-			},
-			"bound_issuer": {
-				Type:        framework.TypeString,
-				Description: "Required issuer for JWT validation",
-			},
-			"bound_audiences": {
-				Type:        framework.TypeCommaStringSlice,
-				Description: "Required audiences for JWT validation",
-			},
-			"bound_subject": {
-				Type:        framework.TypeString,
-				Description: "Required subject for JWT validation",
-			},
-			"bound_claims": {
-				Type:        framework.TypeMap,
-				Description: "Map of claims to required values for JWT validation",
-			},
-			"jwt_validation_pubkeys": {
-				Type:        framework.TypeCommaStringSlice,
-				Description: "PEM-encoded RSA or ECDSA public keys for static JWT validation. Set exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys.",
-			},
-			"user_claim": {
-				Type:        framework.TypeString,
-				Description: "Claim to use as principal identity (default: sub)",
-				Default:     "sub",
-			},
-			"groups_claim": {
-				Type:        framework.TypeString,
-				Description: "JWT claim containing group names for dynamic policy mapping. Empty disables group-based policies.",
-			},
-			"group_policy_prefix": {
-				Type:        framework.TypeString,
-				Description: "Prefix prepended to each group name to form the policy name (default: group-)",
-				Default:     "group-",
-			},
-			"token_ttl": {
-				Type:        framework.TypeDurationSecond,
-				Description: "Token TTL (default: 1h)",
-			},
-			"default_role": {
-				Type:        framework.TypeString,
-				Description: "Default role for transparent operations when no role is specified",
-			},
-		},
+		Fields:  fields,
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{
 				Callback: b.handleConfigRead,
@@ -92,8 +86,15 @@ endpoint), or 'jwt_validation_pubkeys' (static PEM-encoded RSA/ECDSA keys)
 to configure how token signatures are verified.
 
 Use 'bound_issuer', 'bound_audiences', 'bound_subject', and 'bound_claims'
-to constrain which tokens are accepted. Per-role 'metadata_claims' copies
-JWT claims into token metadata for use in token_metadata policy conditions.`,
+to constrain which tokens are admitted. 'bound_audiences' is required on a
+mount that admits agents: without it, a token the issuer minted for any other
+relying party would be admitted.
+
+'entity_kind' (agent or human, default agent) names what the mount admits.
+'facts' maps source claims to the fact names the mount publishes beyond its
+built-in facts (sub, iss, aud); a write replaces the whole map.
+'max_age' bounds a JWT's age at admission, from its iat: a JWT older than it,
+or without an iat, is not admitted.`,
 	}
 }
 
@@ -109,35 +110,67 @@ func (b *jwtAuthBackend) handleConfigRead(ctx context.Context, req *logical.Requ
 		}, nil
 	}
 
-	return &logical.Response{
-		StatusCode: http.StatusOK,
-		Data: map[string]any{
-			"oidc_discovery_url":     b.config.OIDCDiscoveryURL,
-			"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
-			"jwks_url":               b.config.JWKSURL,
-			"jwks_ca_pem":            b.config.JWKSCA,
-			"jwt_validation_pubkeys": b.config.JWTValidationPubKeys,
-			"bound_issuer":           b.config.BoundIssuer,
-			"bound_audiences":        b.config.BoundAudiences,
-			"bound_subject":          b.config.BoundSubject,
-			"bound_claims":           b.config.BoundClaims,
-			"user_claim":             b.config.UserClaim,
-			"groups_claim":           b.config.GroupsClaim,
-			"group_policy_prefix":    b.config.GroupPolicyPrefix,
-			"token_ttl":              b.config.TokenTTL.String(),
-			"default_role":           b.config.DefaultRole,
-		},
-	}, nil
+	data := map[string]any{
+		"oidc_discovery_url":     b.config.OIDCDiscoveryURL,
+		"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
+		"jwks_url":               b.config.JWKSURL,
+		"jwks_ca_pem":            b.config.JWKSCA,
+		"jwt_validation_pubkeys": slices.Clone(b.config.JWTValidationPubKeys),
+		"bound_issuer":           b.config.BoundIssuer,
+		"bound_audiences":        slices.Clone(b.config.BoundAudiences),
+		"bound_subject":          b.config.BoundSubject,
+		"bound_claims":           b.config.BoundClaims,
+		"user_claim":             b.config.UserClaim,
+		"token_ttl":              b.config.TokenTTL.String(),
+		"max_age":                b.config.MaxAge.String(),
+		"entity_kind":            b.config.EntityKind,
+		"facts":                  maps.Clone(b.config.Facts),
+		"alias_name_source":      b.config.AliasNameSource,
+	}
+	helper.SetWarnings(data, helper.RemovedConfigWarnings(b.config.removed))
+	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
 }
 
-// handleConfigWrite handles writing the configuration
+// handleConfigWrite handles writing the configuration.
+//
+// The write is built, persisted, and only then installed, so a write that is
+// refused or cannot be stored leaves the mount authenticating against what
+// storage holds. Writes are serialized, so each merges onto the configuration
+// the previous one left.
 func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
+	// Keys of the role era are refused, not ignored: the write would otherwise
+	// succeed while doing nothing the operator asked for. The stored config
+	// never carries them, so this write also removes any it still did.
+	if err := helper.RefuseRemovedConfigKeys(d.Raw); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+
 	// Build config map from field data
 	conf := make(map[string]any)
+
+	_, factsSent := d.GetOk("facts")
+	_, kindSent := d.GetOk("entity_kind")
+	_, aliasSent := d.GetOk("alias_name_source")
+	factsTouched := factsSent || kindSent || aliasSent
 
 	// Copy existing config if present (under lock to avoid data race)
 	b.configMu.RLock()
 	if b.config != nil {
+		// Stored facts that do not compile would fail a write that leaves
+		// them in place, whatever else it changes; say how to replace them
+		// before any key set is fetched.
+		if !factsTouched {
+			if err := helper.FactsWriteError(&b.config.FactsConfig, false); err != nil {
+				b.configMu.RUnlock()
+				return &logical.Response{
+					StatusCode: http.StatusBadRequest,
+					Err:        err,
+				}, nil
+			}
+		}
 		conf["oidc_discovery_url"] = b.config.OIDCDiscoveryURL
 		conf["oidc_discovery_ca_pem"] = b.config.OIDCDiscoveryCA
 		conf["jwks_url"] = b.config.JWKSURL
@@ -148,10 +181,11 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		conf["bound_subject"] = b.config.BoundSubject
 		conf["bound_claims"] = b.config.BoundClaims
 		conf["user_claim"] = b.config.UserClaim
-		conf["groups_claim"] = b.config.GroupsClaim
-		conf["group_policy_prefix"] = b.config.GroupPolicyPrefix
 		conf["token_ttl"] = b.config.TokenTTL
-		conf["default_role"] = b.config.DefaultRole
+		conf["max_age"] = b.config.MaxAge
+		conf["entity_kind"] = b.config.EntityKind
+		conf["facts"] = b.config.Facts
+		conf["alias_name_source"] = b.config.AliasNameSource
 	}
 	b.configMu.RUnlock()
 
@@ -162,38 +196,46 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 		}
 	}
 
-	// Setup new config
-	if err := b.setupJWTConfig(ctx, conf); err != nil {
+	// A facts write replaces the whole mapping; every name must be a string.
+	if raw, ok := d.GetOk("facts"); ok {
+		facts, err := helper.ParseFactsField(raw)
+		if err != nil {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        err,
+			}, nil
+		}
+		conf["facts"] = facts
+	}
+
+	// Build new config
+	config, err := buildJWTConfig(ctx, conf)
+	if err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        err,
 		}, nil
 	}
+	// A write is the one place facts can be refused outright; storage and
+	// load only ever see a config that compiled here.
+	if err := helper.FactsWriteError(&config.FactsConfig, factsTouched); err != nil {
+		return &logical.Response{
+			StatusCode: http.StatusBadRequest,
+			Err:        err,
+		}, nil
+	}
+	// An agent mount binds an audience; a stored config without one refuses
+	// admission, and a write cannot create one.
+	if helper.RequireAgentAudiences(config.EntityKind, config.BoundAudiences) != nil {
+		return &logical.Response{
+			StatusCode: http.StatusBadRequest,
+			Err:        helper.AgentAudiencesWriteError(),
+		}, nil
+	}
 
-	// Persist the normalized config to storage so that on restart the
-	// parser always sees consistent types (e.g., token_ttl is always a
-	// duration string, never a raw int from an HTTP request).
+	// Persist the normalized config before installing it
 	if b.storageView != nil {
-		b.configMu.RLock()
-		normalized := map[string]any{
-			"oidc_discovery_url":     b.config.OIDCDiscoveryURL,
-			"oidc_discovery_ca_pem":  b.config.OIDCDiscoveryCA,
-			"jwks_url":               b.config.JWKSURL,
-			"jwks_ca_pem":            b.config.JWKSCA,
-			"jwt_validation_pubkeys": b.config.JWTValidationPubKeys,
-			"bound_issuer":           b.config.BoundIssuer,
-			"bound_audiences":        b.config.BoundAudiences,
-			"bound_subject":          b.config.BoundSubject,
-			"bound_claims":           b.config.BoundClaims,
-			"user_claim":             b.config.UserClaim,
-			"groups_claim":           b.config.GroupsClaim,
-			"group_policy_prefix":    b.config.GroupPolicyPrefix,
-			"token_ttl":              b.config.TokenTTL.String(),
-			"default_role":           b.config.DefaultRole,
-		}
-		b.configMu.RUnlock()
-
-		entry, err := sdklogical.StorageEntryJSON("config", normalized)
+		entry, err := sdklogical.StorageEntryJSON("config", normalizedJWTConfig(config))
 		if err != nil {
 			return &logical.Response{
 				StatusCode: http.StatusInternalServerError,
@@ -207,6 +249,8 @@ func (b *jwtAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Req
 			}, nil
 		}
 	}
+
+	b.installConfig(config)
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,
@@ -239,5 +283,4 @@ authenticated principal identity.
 Configuration:
   POST /auth/{mount}/config   - Configure key source and claim bindings
   GET  /auth/{mount}/config   - Read current configuration
-  POST /auth/{mount}/role/:name - Create roles with per-role claim constraints
 `

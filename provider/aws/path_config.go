@@ -65,24 +65,56 @@ func (b *awsBackend) pathConfig() *framework.Path {
 // handleConfigRead handles reading the AWS provider configuration
 func (b *awsBackend) handleConfigRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	tc := b.TransparentConfig()
+	proxyDomains, skipVerify, caData := b.settings()
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
-			"proxy_domains":   b.proxyDomains,
+			"proxy_domains":   proxyDomains,
 			"max_body_size":   b.MaxBodySize(),
 			"timeout":         b.Timeout().String(),
-			"tls_skip_verify": b.tlsSkipVerify,
-			"ca_data":         b.caData,
+			"tls_skip_verify": skipVerify,
+			"ca_data":         caData,
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 		},
 	}, nil
 }
 
-// handleConfigWrite handles writing the AWS provider configuration
+// snapshotForMerge returns the running configuration in the shape parseConfig
+// takes, as the base a config write overlays. A value never set is left out,
+// so parseConfig gives it its default as before.
+func (b *awsBackend) snapshotForMerge() map[string]any {
+	proxyDomains, skipVerify, caData := b.settings()
+	conf := map[string]any{
+		"tls_skip_verify": skipVerify,
+		"ca_data":         caData,
+	}
+	if proxyDomains != nil {
+		conf["proxy_domains"] = proxyDomains
+	}
+	if maxBodySize := b.MaxBodySize(); maxBodySize > 0 {
+		conf["max_body_size"] = maxBodySize
+	}
+	if timeout := b.Timeout(); timeout > 0 {
+		conf["timeout"] = timeout.String()
+	}
+	return conf
+}
+
+// handleConfigWrite handles writing the AWS provider configuration.
+//
+// A write changes nothing until it has succeeded: every value is validated and
+// built — the transport and the processors included — into locals, persisted,
+// and only then applied, so a rejected write leaves the running configuration
+// exactly as it was, and a storage failure leaves it matching storage.
 func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	// Build config map from field data
-	conf := make(map[string]any)
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
+	// A write is a partial update: it starts from what the mount is running
+	// and overlays only the keys the request names, so setting one key does
+	// not reset the others to their defaults.
+	conf := b.snapshotForMerge()
 
 	// Apply values from request
 	if val, ok := d.GetOk("proxy_domains"); ok {
@@ -109,39 +141,34 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 		}, nil
 	}
 
-	// Apply configuration
 	parsedConfig := parseConfig(conf)
-	b.proxyDomains = parsedConfig.ProxyDomains
-	b.SetMaxBodySize(parsedConfig.MaxBodySize)
-	b.SetTimeout(parsedConfig.Timeout)
 
-	// Update transport if TLS settings changed
-	tlsChanged := b.tlsSkipVerify != parsedConfig.TLSSkipVerify || b.caData != parsedConfig.CAData
-	b.tlsSkipVerify = parsedConfig.TLSSkipVerify
-	b.caData = parsedConfig.CAData
+	// Build the transport now if TLS settings changed (compared against what
+	// is running); it is installed only once the whole write has succeeded.
+	_, oldSkipVerify, oldCAData := b.settings()
+	tlsChanged := oldSkipVerify != parsedConfig.TLSSkipVerify || oldCAData != parsedConfig.CAData
+	var transport http.RoundTripper
 	if tlsChanged {
-		if b.tlsSkipVerify || b.caData != "" {
-			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+		if parsedConfig.TLSSkipVerify || parsedConfig.CAData != "" {
+			custom, err := newTransportWithTLS(parsedConfig.CAData, parsedConfig.TLSSkipVerify)
 			if err != nil {
 				return &logical.Response{
 					StatusCode: http.StatusBadRequest,
 					Err:        logical.ErrBadRequest(err.Error()),
 				}, nil
 			}
-			b.SetTransport(transport)
+			transport = custom
 		} else {
 			initTransport()
-			b.SetTransport(sharedTransport)
+			transport = sharedTransport
 		}
 	}
 
-	// Reinitialize processors with new config
-	b.initializeProcessors()
-
 	// Transparent mode settings — build config from current values + overrides
+	current := b.TransparentConfig()
 	tc := &framework.TransparentConfig{
-		AutoAuthPath:    b.TransparentConfig().AutoAuthPath,
-		DefaultAuthRole: b.TransparentConfig().DefaultAuthRole,
+		AutoAuthPath:    current.AutoAuthPath,
+		DefaultAuthRole: current.DefaultAuthRole,
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -158,16 +185,17 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 		}, nil
 	}
 
-	b.StreamingBackend.SetTransparentConfig(tc)
+	// The processors for the new domains, installed with the rest below.
+	registry := newProcessorRegistry(parsedConfig.ProxyDomains, b.Logger)
 
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"proxy_domains":   b.proxyDomains,
-			"max_body_size":   b.MaxBodySize(),
-			"timeout":         b.Timeout().String(),
-			"tls_skip_verify": b.tlsSkipVerify,
-			"ca_data":         b.caData,
+			"proxy_domains":   parsedConfig.ProxyDomains,
+			"max_body_size":   parsedConfig.MaxBodySize,
+			"timeout":         parsedConfig.Timeout.String(),
+			"tls_skip_verify": parsedConfig.TLSSkipVerify,
+			"ca_data":         parsedConfig.CAData,
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 		})
@@ -184,6 +212,16 @@ func (b *awsBackend) handleConfigWrite(ctx context.Context, req *logical.Request
 			}, nil
 		}
 	}
+
+	// Apply. Nothing below can fail.
+	b.setSettings(parsedConfig.ProxyDomains, parsedConfig.TLSSkipVerify, parsedConfig.CAData)
+	b.SetMaxBodySize(parsedConfig.MaxBodySize)
+	b.SetTimeout(parsedConfig.Timeout)
+	if tlsChanged {
+		b.SetTransport(transport)
+	}
+	b.processorRegistry.Store(registry)
+	b.StreamingBackend.SetTransparentConfig(tc)
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,

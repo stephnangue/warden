@@ -110,6 +110,34 @@ type BackendConfig struct {
 	// multiple times only keeps one hook. Use this for process-level cleanup like
 	// shared transport shutdown that must not run on individual unmount.
 	RegisterShutdownHook func(key string, fn func())
+
+	// ExternalBaseURL returns the external HTTPS base clients reach Warden at
+	// (the protected-resource resource_url, no trailing slash), or "" when none is
+	// configured. Cheap enough to call per response. A backend building a link
+	// back to itself uses this, never a request's Host header. Nil for backends
+	// mounted outside core.
+	ExternalBaseURL func(ctx context.Context) string
+
+	// Sealer encrypts and authenticates small values under Warden's key for
+	// this mount alone. Set for auth mounts; nil for backends mounted outside
+	// core, so a backend that needs it checks at setup.
+	Sealer Sealer
+}
+
+// Sealer seals values a backend hands out and takes back later (a pending
+// login carried in an OAuth state parameter), so the backend keeps no server
+// state for them. Seal encrypts and authenticates plaintext under Warden's
+// encryption key; Open returns it, or an error when the value was not sealed by
+// this mount for this purpose, was altered, or its key is gone.
+//
+// Core binds every sealed value to the mount and to purpose, a short non-empty
+// name ("oidc-login-state/v1"): a value sealed by one mount never
+// opens on another, nor under another purpose, and nothing a backend seals can
+// ever be taken for a value core seals for itself. A version suffix in purpose
+// lets a backend change a format without opening old values as new ones.
+type Sealer interface {
+	Seal(ctx context.Context, purpose string, plaintext []byte) ([]byte, error)
+	Open(ctx context.Context, purpose string, ciphertext []byte) ([]byte, error)
 }
 
 // Factory is the factory function to create a logical backend.
@@ -190,9 +218,21 @@ type UserAuthConfigProvider interface {
 	// configured — in which case the feature is off and the request is unchanged.
 	GetUserAuthPath() string
 
-	// GetUserAuthRole returns the role used to authenticate the user credential,
-	// or "" to fall back to the user auth mount's own default_role.
-	GetUserAuthRole() string
+	// UserAuthRefusal returns why every user credential is refused under the
+	// provider's stored configuration (it still names a setting that was
+	// removed), or nil. Core asks it once per user credential presented.
+	UserAuthRefusal() error
+}
+
+// AudienceBinder is implemented by auth methods whose configuration can bind
+// the audience of the bearer credentials they admit. Core asks it only when a
+// provider configuration is read, to warn ahead of time about a user leg whose
+// audience nothing binds; a request decides from the admission itself
+// (Admission.AudienceBound).
+type AudienceBinder interface {
+	// BindsAudience reports whether every bearer credential the mount admits
+	// under its current configuration is checked against bound_audiences.
+	BindsAudience() bool
 }
 
 // AuthorizationServerProvider is implemented by auth methods that can name the
@@ -223,6 +263,22 @@ type TransparentAuthRoleExtractor interface {
 	GetAuthRoleFromRequest(r *http.Request) string
 }
 
+// DefaultRoleURLSuffix is the mount-relative entry point an agent uses to act
+// under a role on a provider that does not implement RoleURLProvider: the
+// role-bearing gateway path most gateway providers accept.
+func DefaultRoleURLSuffix(role string) string {
+	return "role/" + role + "/gateway/"
+}
+
+// RoleURLProvider is implemented by providers whose role-scoped entry point
+// differs from DefaultRoleURLSuffix — for example a provider that reads the
+// role from the request itself and serves a mount-level gateway, or one that
+// takes the role as a query parameter. The discovery server joins the mount
+// URL and this suffix into the URL it hands an agent for the role.
+type RoleURLProvider interface {
+	RoleURLSuffix(role string) string
+}
+
 // StreamBodyParser can be implemented by streaming backends that want the core
 // to parse the request body into req.Data before policy evaluation, even for
 // streaming requests. By default, streaming requests skip body parsing to avoid
@@ -236,8 +292,17 @@ type TransparentAuthRoleExtractor interface {
 // the argument and return a static per-backend value.
 //
 // When enabled, the core parses application/json and application/x-www-form-urlencoded
-// bodies (up to maxRequestBodySize), restores the body for the provider to re-read,
-// and populates req.Data before CheckToken runs.
+// bodies (up to the backend's StreamBodyLimit when it reports one, else
+// maxRequestBodySize), restores the body for the provider to re-read, and populates
+// req.Data before CheckToken runs.
 type StreamBodyParser interface {
 	ShouldParseStreamBody(r *http.Request) bool
+}
+
+// StreamBodyLimiter is optionally implemented by a streaming backend that caps request
+// bodies. It reports the cap that applies to r, which core then uses when it buffers
+// the body to parse it for policy, so it never holds more than the backend would
+// forward. A value <= 0 means the backend reports no cap and core's own applies.
+type StreamBodyLimiter interface {
+	StreamBodyLimit(r *http.Request) int64
 }

@@ -1,6 +1,13 @@
 package types
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -47,21 +54,21 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeLocal,
 			wantErr:    true,
-			errMsg:     "require an oauth2, vault, ibm, or token_exchange source",
+			errMsg:     "require an oauth2, vault, ibm, token_exchange, anthropic, or openai source",
 		},
 		{
 			name:       "unsupported source type - aws",
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeAWS,
 			wantErr:    true,
-			errMsg:     "require an oauth2, vault, ibm, or token_exchange source",
+			errMsg:     "require an oauth2, vault, ibm, token_exchange, anthropic, or openai source",
 		},
 		{
 			name:       "unsupported source type - static apikey",
 			config:     map[string]string{},
 			sourceType: credential.SourceTypeAPIKey,
 			wantErr:    true,
-			errMsg:     "require an oauth2, vault, ibm, or token_exchange source",
+			errMsg:     "require an oauth2, vault, ibm, token_exchange, anthropic, or openai source",
 		},
 		{
 			name:       "token_exchange source - agent_identity subject",
@@ -89,11 +96,274 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 			wantErr:    true,
 			errMsg:     "is required for a token_exchange source",
 		},
+		{
+			name: "anthropic source - full target",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+				"workspace_id":                      "wrkspc_01ExampleWorkspace",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    false,
+		},
+		{
+			name: "anthropic source - workspace is optional",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    false,
+		},
+		{
+			name: "anthropic source - missing subject source",
+			config: map[string]string{
+				"federation_rule_id": "fdrl_01ExampleRule",
+				"service_account_id": "svac_01ExampleAccount",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "is required for an anthropic source: set it to 'warden_identity'",
+		},
+		{
+			name: "anthropic source - subject source none",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceNone,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "is required for an anthropic source",
+		},
+		{
+			// The federation rules trust Warden's issuer; forwarding the agent's own
+			// token would present an identity no such rule accepts.
+			name: "anthropic source - agent_identity subject refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceAgentIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "must be 'warden_identity' for an anthropic source",
+		},
+		{
+			name: "anthropic source - missing federation rule",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "svac_01ExampleAccount",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "'federation_rule_id' is required for an anthropic source",
+		},
+		{
+			name: "anthropic source - missing service account",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "'service_account_id' is required for an anthropic source",
+		},
+		{
+			// An id pasted into the wrong field is the mistake the prefix check exists for.
+			name: "anthropic source - service account id in the rule field",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "svac_01ExampleAccount",
+				"service_account_id":                "svac_01ExampleAccount",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     `'federation_rule_id' must be an Anthropic id starting with "fdrl_"`,
+		},
+		{
+			name: "anthropic source - bare prefix is not an id",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     `'service_account_id' must be an Anthropic id starting with "svac_"`,
+		},
+		{
+			name: "anthropic source - malformed workspace",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+				"workspace_id":                      "default",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     `'workspace_id' must be an Anthropic id starting with "wrkspc_"`,
+		},
+		{
+			// The driver reads the organization from the source only, so a spec
+			// value would be silently ignored.
+			name: "anthropic source - organization on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+				"organization_id":                   "00000000-0000-0000-0000-000000000000",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "'organization_id' belongs on the anthropic source",
+		},
+		{
+			// The source's key, which reads as though it set the assertion audience.
+			name: "anthropic source - audience on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+				"audience":                          "https://warden.example.com/anthropic",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    true,
+			errMsg:     "overrides with 'assertion_audience'",
+		},
+		{
+			// The key that does override it is accepted.
+			name: "anthropic source - assertion_audience on the spec accepted",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"federation_rule_id":                "fdrl_01ExampleRule",
+				"service_account_id":                "svac_01ExampleAccount",
+				credential.ConfigAssertionAudience:  "https://warden.example.com/anthropic",
+			},
+			sourceType: credential.SourceTypeAnthropic,
+			wantErr:    false,
+		},
+		{
+			name: "openai source - minimal target",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    false,
+		},
+		{
+			// The key that overrides the source's audience is accepted.
+			name: "openai source - assertion_audience on the spec accepted",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+				credential.ConfigAssertionAudience:  "https://warden.example.com/openai",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    false,
+		},
+		{
+			name:       "openai source - missing subject source",
+			config:     map[string]string{"service_account_id": "example-service-account"},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "is required for an openai source: set it to 'warden_identity'",
+		},
+		{
+			name: "openai source - subject source none",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceNone,
+				"service_account_id":                "example-service-account",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "is required for an openai source",
+		},
+		{
+			// The identity provider trusts Warden's issuer; forwarding the agent's own
+			// token would present an identity it does not trust.
+			name: "openai source - agent_identity subject refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceAgentIdentity,
+				"service_account_id":                "example-service-account",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "must be 'warden_identity' for an openai source",
+		},
+		{
+			name:       "openai source - missing service account",
+			config:     map[string]string{credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "'service_account_id' is required for an openai source",
+		},
+		{
+			// The driver reads the identity provider from the source only, so a spec
+			// value would be silently ignored.
+			name: "openai source - identity provider on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+				"identity_provider_id":              "example-identity-provider",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "'identity_provider_id' belongs on the openai source",
+		},
+		{
+			name: "openai source - audience on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+				"audience":                          "https://warden.example.com/openai",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "overrides with 'assertion_audience'",
+		},
+		{
+			// The bearer branch sends no org/project header, so these would do nothing.
+			name: "openai source - organization on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+				"organization_id":                   "org-example",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "'organization_id' is not read on an openai spec",
+		},
+		{
+			name: "openai source - project on the spec refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+				"project_id":                        "proj_example",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "'project_id' is not read on an openai spec",
+		},
+		{
+			name: "openai source - anthropic key refused",
+			config: map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				"service_account_id":                "example-service-account",
+				"federation_rule_id":                "fdrl_01ExampleRule",
+			},
+			sourceType: credential.SourceTypeOpenAI,
+			wantErr:    true,
+			errMsg:     "'federation_rule_id' is an anthropic key",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, tt.sourceType)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), tt.sourceType)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -277,10 +547,54 @@ func TestOAuthBearerTokenCredType_RequiresSpecRotation(t *testing.T) {
 	assert.False(t, ct.RequiresSpecRotation())
 }
 
+// A spec's private_key is parsed in full at write time: an authorization_code spec is
+// not test-minted, so anything the driver could not sign with would otherwise first
+// fail at connect.
+func TestValidateRSAPrivateKeyPEM(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(rsaKey)
+	require.NoError(t, err)
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	ecDER, err := x509.MarshalPKCS8PrivateKey(ecKey)
+	require.NoError(t, err)
+	certTemplate := &x509.Certificate{SerialNumber: big.NewInt(1), NotAfter: time.Now().Add(time.Hour)}
+	certDER, err := x509.CreateCertificate(rand.Reader, certTemplate, certTemplate, &rsaKey.PublicKey, rsaKey)
+	require.NoError(t, err)
+
+	encode := func(typ string, der []byte) string {
+		return string(pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}))
+	}
+	cases := []struct {
+		name   string
+		value  string
+		errMsg string
+	}{
+		{"unset", "", ""},
+		{"PKCS8 RSA", encode("PRIVATE KEY", pkcs8), ""},
+		{"PKCS1 RSA", encode("RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(rsaKey)), ""},
+		{"not PEM", "not-a-pem", "must be a PEM-encoded RSA private key"},
+		{"a certificate", encode("CERTIFICATE", certDER), "is not a private key"},
+		{"an EC key", encode("PRIVATE KEY", ecDER), "must be an RSA key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateRSAPrivateKeyPEM(tc.value)
+			if tc.errMsg == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.errMsg)
+		})
+	}
+}
+
 func TestOAuthBearerTokenCredType_SensitiveConfigFields(t *testing.T) {
 	ct := NewOAuthBearerTokenCredType()
 	assert.ElementsMatch(t,
-		[]string{"client_secret", "refresh_token", "access_token"},
+		[]string{"client_secret", "private_key", "refresh_token", "access_token"},
 		ct.SensitiveConfigFields(),
 	)
 }
@@ -289,17 +603,17 @@ func TestOAuthBearerTokenCredType_ConnectGating(t *testing.T) {
 	ct := NewOAuthBearerTokenCredType()
 
 	// client_credentials (default) is not connect-gated.
-	assert.False(t, ct.RequiresConnect(map[string]string{}))
-	assert.False(t, ct.RequiresConnect(map[string]string{"auth_method": "client_credentials"}))
+	assert.False(t, ct.RequiresConnect(credential.NewConfig(map[string]string{})))
+	assert.False(t, ct.RequiresConnect(credential.NewConfig(map[string]string{"auth_method": "client_credentials"})))
 
 	// authorization_code is connect-gated.
 	ac := map[string]string{"auth_method": "authorization_code"}
-	assert.True(t, ct.RequiresConnect(ac))
-	assert.False(t, ct.IsConnected(ac)) // no token sealed yet
+	assert.True(t, ct.RequiresConnect(credential.NewConfig(ac)))
+	assert.False(t, ct.IsConnected(credential.NewConfig(ac))) // no token sealed yet
 
 	// Connected once a refresh token or static access token is sealed.
-	assert.True(t, ct.IsConnected(map[string]string{"auth_method": "authorization_code", "refresh_token": "rt"}))
-	assert.True(t, ct.IsConnected(map[string]string{"auth_method": "authorization_code", "access_token": "at"}))
+	assert.True(t, ct.IsConnected(credential.NewConfig(map[string]string{"auth_method": "authorization_code", "refresh_token": "rt"})))
+	assert.True(t, ct.IsConnected(credential.NewConfig(map[string]string{"auth_method": "authorization_code", "access_token": "at"})))
 }
 
 func TestOAuthBearerTokenCredType_FieldSchemas(t *testing.T) {

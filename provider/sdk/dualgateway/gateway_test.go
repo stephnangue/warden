@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logical"
@@ -173,6 +175,38 @@ func TestHandleAPIRequest_InboundAuthorizationIsNotForwarded(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// The headers a request's Connection header names are hop-by-hop, so they stop at
+// this hop with Connection itself.
+func TestHandleAPIRequest_ConnectionListedHeadersAreNotForwarded(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Empty(t, r.Header.Get("X-Hop"), "a Connection-listed header reached the upstream")
+		assert.Equal(t, "keep-me", r.Header.Get("X-Keep"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	b := createBackend(t, headerAuthSpec)
+	b.providerURL = upstream.URL
+
+	rec := httptest.NewRecorder()
+	httpReq := httptest.NewRequest("GET", "/test", nil)
+	httpReq.Header.Set("Connection", "X-Hop")
+	httpReq.Header.Set("X-Hop", "hop-only")
+	httpReq.Header.Set("X-Keep", "keep-me")
+
+	req := &logical.Request{
+		HTTPRequest:    httpReq,
+		ResponseWriter: rec,
+		Credential: &credential.Credential{
+			Type: "test_keys",
+			Data: map[string]string{"secret_key": "injected-secret"},
+		},
+	}
+
+	b.handleAPIRequest(context.Background(), req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 // --- StripAuthorization: true (bearer auth replaces Authorization) ---
 
 func TestHandleAPIRequest_StripAuthorization_True(t *testing.T) {
@@ -235,6 +269,58 @@ func TestHandleAPIRequest_UpstreamError(t *testing.T) {
 		},
 	})
 	assert.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+// silentUpstream never answers: it waits for the request's context to end.
+var silentUpstream = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+	<-r.Context().Done()
+	return nil, r.Context().Err()
+})
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func apiRequest(rec *httptest.ResponseRecorder) *logical.Request {
+	return &logical.Request{
+		HTTPRequest:    httptest.NewRequest("GET", "/test", nil),
+		ResponseWriter: rec,
+		Credential: &credential.Credential{
+			Type: "test_keys",
+			Data: map[string]string{"secret_key": "val"},
+		},
+	}
+}
+
+// The mount's timeout passing before the upstream answers is a 504: the
+// client is still waiting. Only the outgoing request carries that deadline,
+// so the inbound request's context alone would never show it.
+func TestHandleAPIRequest_UpstreamTooSlowAnswers504(t *testing.T) {
+	b := createBackend(t, headerAuthSpec)
+	b.providerURL = "http://upstream.test"
+	b.SetTimeout(20 * time.Millisecond)
+	b.SetTransport(silentUpstream)
+
+	rec := httptest.NewRecorder()
+	b.handleAPIRequest(context.Background(), apiRequest(rec))
+
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code)
+	assert.Equal(t, "Gateway Timeout\n", rec.Body.String())
+}
+
+// A client that went away gets nothing written: no one is reading.
+func TestHandleAPIRequest_ClientGoneWritesNothing(t *testing.T) {
+	b := createBackend(t, headerAuthSpec)
+	b.providerURL = "http://upstream.test"
+	b.SetTransport(silentUpstream)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := httptest.NewRecorder()
+	b.handleAPIRequest(ctx, apiRequest(rec))
+
+	assert.Empty(t, rec.Header())
+	assert.Zero(t, rec.Body.Len())
 }
 
 // --- Proxy/Warden headers are stripped, custom headers survive ---
@@ -300,7 +386,7 @@ func TestS3EndpointWithState(t *testing.T) {
 
 // specWithRewrite clones headerAuthSpec and adds a RewriteAPITarget function that
 // forwards /gateway/<host>/<rest> to https://<host><rest> on the given upstream.
-func specWithRewrite(rewrite func(providerURL, apiPath string, state map[string]any) (string, error), onConfigParsed func(map[string]any) map[string]any) *ProviderSpec {
+func specWithRewrite(rewrite func(providerURL, apiPath string, state map[string]any) (*url.URL, error), onConfigParsed func(map[string]any) map[string]any) *ProviderSpec {
 	return &ProviderSpec{
 		Name:           "rewritetest",
 		HelpText:       "h",
@@ -330,9 +416,9 @@ func TestHandleAPIRequest_RewriteAPITarget_Invoked(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	rewrite := func(_ string, apiPath string, _ map[string]any) (string, error) {
+	rewrite := func(_ string, apiPath string, _ map[string]any) (*url.URL, error) {
 		// Prepend "/transformed" and send to upstream
-		return upstream.URL + "/transformed" + apiPath, nil
+		return url.Parse(upstream.URL + "/transformed" + apiPath)
 	}
 	b := createBackend(t, specWithRewrite(rewrite, nil))
 
@@ -359,8 +445,8 @@ func TestHandleAPIRequest_RewriteAPITarget_ErrorReturns400(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	rewrite := func(_ string, _ string, _ map[string]any) (string, error) {
-		return "", assertableError("host not allowed")
+	rewrite := func(_ string, _ string, _ map[string]any) (*url.URL, error) {
+		return nil, assertableError("host not allowed")
 	}
 	b := createBackend(t, specWithRewrite(rewrite, nil))
 
@@ -424,9 +510,9 @@ func TestHandleAPIRequest_RewriteAPITarget_ReceivesState(t *testing.T) {
 	onConfigParsed := func(_ map[string]any) map[string]any {
 		return map[string]any{"tenant": "acme"}
 	}
-	rewrite := func(_ string, apiPath string, state map[string]any) (string, error) {
+	rewrite := func(_ string, apiPath string, state map[string]any) (*url.URL, error) {
 		tenant, _ := state["tenant"].(string)
-		return upstream.URL + "/" + tenant + apiPath, nil
+		return url.Parse(upstream.URL + "/" + tenant + apiPath)
 	}
 	spec := specWithRewrite(rewrite, onConfigParsed)
 	b := createBackend(t, spec)
@@ -452,9 +538,9 @@ func TestHandleGateway_SigV4_DoesNotInvokeRewriteAPITarget(t *testing.T) {
 	// Verifies that SigV4 (S3/COS) requests route to handleS3Request and never
 	// invoke the API-mode hook. Regression guard for the IBM COS design.
 	hookInvoked := false
-	rewrite := func(_ string, _ string, _ map[string]any) (string, error) {
+	rewrite := func(_ string, _ string, _ map[string]any) (*url.URL, error) {
 		hookInvoked = true
-		return "https://wrong.example.com/", nil
+		return url.Parse("https://wrong.example.com/")
 	}
 	b := createBackend(t, specWithRewrite(rewrite, nil))
 
@@ -470,4 +556,31 @@ func TestHandleGateway_SigV4_DoesNotInvokeRewriteAPITarget(t *testing.T) {
 	b.handleGateway(context.Background(), req)
 
 	assert.False(t, hookInvoked, "RewriteAPITarget must not be called for SigV4 requests")
+}
+
+// TestHandleAPIRequest_UpstreamReceivesTheAuthorizedPath: a double-encoded dot
+// segment is authorized as a literal "%2e%2e" segment and reaches the upstream
+// as one, never as a ".." it would resolve.
+func TestHandleAPIRequest_UpstreamReceivesTheAuthorizedPath(t *testing.T) {
+	var gotRequestURI string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI = r.RequestURI
+	}))
+	defer upstream.Close()
+
+	b := createBackend(t, headerAuthSpec)
+	b.providerURL = upstream.URL
+
+	rec := httptest.NewRecorder()
+	b.handleAPIRequest(context.Background(), &logical.Request{
+		HTTPRequest:    httptest.NewRequest("GET", "/gateway/v1/a/%252e%252e/b?x=1", nil),
+		ResponseWriter: rec,
+		Credential: &credential.Credential{
+			Type: "test_keys",
+			Data: map[string]string{"secret_key": "v"},
+		},
+	})
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "/v1/a/%252e%252e/b?x=1", gotRequestURI)
 }

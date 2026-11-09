@@ -21,20 +21,44 @@ Two environment variables decide which server a command talks to and as whom:
 
 ```bash
 export WARDEN_ADDR=https://warden.example.com:8400
-export WARDEN_TOKEN=s.xxxxxxxxxxxxxxxxxxxx
+export WARDEN_TOKEN=wds.xxxxxxxxxxxxxxxxxxxx
 warden status
 ```
 
-There is no `login` subcommand and no `~/.warden-token` file — the token is read
-from the environment. A first token comes from [`warden operator init`](/cli/operator/),
-which prints a root token and an `export WARDEN_TOKEN=…` line to paste.
+A first token comes from [`warden operator init`](/cli/operator/), which
+prints a root token and an `export WARDEN_TOKEN=…` line to paste. People sign
+in with [`warden login`](/cli/login/) instead.
 
-`WARDEN_TOKEN` accepts two credential shapes. A Warden session token is sent in
-the `X-Warden-Token` header. A **JWT** (any value beginning with `eyJ`) is instead
-sent as `Authorization: Bearer …`, so the server's transparent-auth path can
-resolve it against the namespace's configured auth method. mTLS is also supported
-— set `WARDEN_CLIENT_CERT` / `WARDEN_CLIENT_KEY` and the server authenticates the
-client certificate directly. See [Authentication](/concepts/authentication/).
+## How the CLI picks a credential
+
+A command presents one credential, chosen in this order:
+
+1. **`WARDEN_TOKEN`.** A [Warden token](/identity/tokens/) is sent in the
+   `X-Warden-Token` header. A **JWT** (any value beginning with `eyJ`) is sent
+   as `Authorization: Bearer …` instead, so the auth mount the request is
+   checked against can verify it.
+2. **A client certificate.** With `WARDEN_CLIENT_CERT` and `WARDEN_CLIENT_KEY`
+   set, the CLI presents the certificate over mTLS and the server verifies it.
+3. **A `warden login` session.** When neither is set, the CLI sends the session
+   `warden login` saved for this Warden address and namespace, or the nearest
+   parent namespace's (it says so on stderr: `using session from namespace …`).
+   An expired session is not sent; the command runs without it, after a
+   warning.
+
+When `WARDEN_TOKEN` or `WARDEN_CLIENT_CERT` is set, no session is sent at all,
+and a session's role is never sent with another credential.
+
+The role follows the same precedence: the `-r/--role` flag, then
+`WARDEN_ROLE`, then the session's role. Change the session's role with
+[`warden role use`](/cli/role/#role-use). The namespace never comes from a
+session: `-n/--namespace` or `WARDEN_NAMESPACE` (root when neither is set)
+decides which session is used, so sign in with `warden login -namespace acme`
+and run commands with `-n acme`.
+See [Authentication](/identity/authentication/) and
+[Human operators](/identity/human-operators/).
+
+Coming from v0.21.0, where a role was chosen at login? See
+[Upgrading from v0.21.0](/upgrade/from-v0-21/).
 
 ## Global flags
 
@@ -44,7 +68,7 @@ variable equivalent; the flag wins when both are set.
 | Flag | Env | Description |
 |---|---|---|
 | `-n`, `--namespace` | `WARDEN_NAMESPACE` | [Namespace](/concepts/namespaces/) to scope the command to. |
-| `-r`, `--role` | `WARDEN_ROLE` | [Role](/concepts/roles/) to assume for the command. |
+| `-r`, `--role` | `WARDEN_ROLE` | [Role](/identity/roles/) to assume for the command. |
 | `-o`, `--output` | `WARDEN_OUTPUT` | Output format: `table`, `json`, `ndjson`, or `text`. |
 | `-F`, `--fields` | `WARDEN_FIELDS` | Comma-separated dot-paths to project from structured output. |
 | `-D`, `--dry-run` | `WARDEN_DRY_RUN` | Validate the payload locally against the server schema and exit without sending. |
@@ -63,7 +87,7 @@ optional; defaults apply when unset.
 | Variable | Default | Purpose |
 |---|---|---|
 | `WARDEN_ADDR` | `http://127.0.0.1:8400` | Server URL. |
-| `WARDEN_TOKEN` | *(none)* | Auth token (session token or JWT). |
+| `WARDEN_TOKEN` | *(none)* | Warden token or JWT. When set, no `warden login` session is sent. |
 | `WARDEN_NAMESPACE` | *(none)* | Namespace scope (`X-Warden-Namespace` header). |
 | `WARDEN_ROLE` | *(none)* | Role to assume (`X-Warden-Role` header). |
 
@@ -74,7 +98,7 @@ optional; defaults apply when unset.
 | `WARDEN_CACERT` | *(none)* | Path to a PEM CA certificate to verify the server. |
 | `WARDEN_CACERT_BYTES` | *(none)* | PEM CA certificate as an inline string. |
 | `WARDEN_CAPATH` | *(none)* | Path to a directory of PEM CA certificates. |
-| `WARDEN_CLIENT_CERT` | *(none)* | Path to a client certificate for mTLS. |
+| `WARDEN_CLIENT_CERT` | *(none)* | Path to a client certificate for mTLS. When set, no `warden login` session is sent. |
 | `WARDEN_CLIENT_KEY` | *(none)* | Path to the client private key for mTLS. |
 | `WARDEN_SKIP_VERIFY` | `false` | Disable TLS verification (insecure; testing only). |
 | `WARDEN_TLS_SERVER_NAME` | *(none)* | SNI server name for the TLS handshake. |
@@ -141,6 +165,21 @@ warden provider enable aws -D
 warden write aws/config token_ttl=1h -D
 ```
 
+## Warnings
+
+A server response can carry warnings: a configuration read that names a stored
+setting Warden ignores, a write that refers to a policy that does not exist
+yet, a delete that leaves groups naming what it removed. The CLI prints each one
+on stderr as `warning: …`, so stdout stays clean for pipes. Commands that
+print the server's response, such as `read`, `auth read`, `auth disable` and
+the role writes, also keep them under `warnings` in `json` output;
+`role list` leaves them out so its output stays a plain list. A warning never
+changes the exit code.
+
+```bash
+warden read auth/jwt/config -o json 2>/dev/null | jq .warnings
+```
+
 ## Exit codes
 
 Every invocation exits with a stable, category-based code. Agents and scripts can
@@ -160,6 +199,7 @@ a `{"error":{"code":…,"message":…,"hint":…}}` envelope on stderr.
 | 8 | Server | Server error (HTTP 5xx). |
 | 9 | Conflict | Resource conflict (HTTP 409). |
 | 10 | Sealed | Warden is sealed or uninitialized. |
+| 11 | Gone | The path was removed (HTTP 410). The same request will never succeed; the message names what replaced it. |
 
 ## Command index
 
@@ -169,12 +209,14 @@ a `{"error":{"code":…,"message":…,"hint":…}}` envelope on stderr.
 |---|---|
 | [`server`](/cli/server/) | Start a Warden server. |
 | [`status`](/cli/status/) | Show initialization, seal, and HA state. |
+| [`dev`](/cli/dev/) | Mint playground identities, read its audit log, and print its tour. |
 | [`operator`](/cli/operator/) | Administrative operations — initialize and generate a root token. |
 
 ### Auth, audit & policy
 
 | Command | Description |
 |---|---|
+| [`login`](/cli/login/) | Sign a person in through an `oidc` auth mount; also `logout` and `print token`. |
 | [`auth`](/cli/auth/) | Manage auth methods (enable, disable, list, read). |
 | [`audit`](/cli/audit/) | Manage audit devices (enable, disable, list, read). |
 | [`policy`](/cli/policy/) | Manage capability-based policies. |
@@ -186,18 +228,19 @@ a `{"error":{"code":…,"message":…,"hint":…}}` envelope on stderr.
 | [`provider`](/cli/provider/) | Manage providers (enable, disable, list, read, tune). |
 | [`cred`](/cli/cred/) | Manage credential specs and sources. |
 
-### Namespaces & roles
+### Namespaces, identity & roles
 
 | Command | Description |
 |---|---|
 | [`namespace`](/cli/namespace/) | Manage namespaces. |
-| [`role`](/cli/role/) | Discover roles the presented identity can assume. |
+| [`identity`](/cli/identity/) | Manage the identity store: entities, native identities, groups and sponsors. |
+| [`role`](/cli/role/) | Manage roles, list the ones granted to you, and choose a session's role. |
 
 ### Skills & schema
 
 | Command | Description |
 |---|---|
-| [`skill`](/cli/skill/) | Manage the global agent skill registry. |
+| [`skill`](/cli/skill/) | Manage the agent skills Warden serves. |
 | [`schema`](/cli/schema/) | Inspect the server's OpenAPI schema. |
 
 ### Generic data access

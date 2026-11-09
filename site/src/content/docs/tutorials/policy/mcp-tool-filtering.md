@@ -35,7 +35,7 @@ holds regardless of what the model decides to do.
 Route the MCP server through Warden and attach a policy that decides which tools the agent may use.
 Warden strict-parses every JSON-RPC call, **prunes `tools/list`** so the client only sees permitted
 tools, and refuses any disallowed `tools/call` before it leaves the gateway. See
-[MCP concepts](/concepts/mcp/) for the full grammar and [Policies](/concepts/policies/) for how a
+[MCP concepts](/concepts/mcp/) for the full grammar and [Policies](/identity/policies/) for how a
 policy attaches to a path.
 
 ### Prerequisites
@@ -48,7 +48,7 @@ policy attaches to a path.
   the whole point: no agent you launch from this shell (Claude included) ever sees it.
 - The **Warden CLI + server** binary. This installs the latest release for your platform:
   ```bash
-  curl -sL https://wardengateway.com/install | bash
+  curl -sL https://wardengateway.com/install.sh | bash
   warden --version      # confirm it's on your PATH
   ```
 
@@ -94,15 +94,20 @@ warden status          # sealed: false
 
 ### Step 3 — trust Hydra's JWTs
 
-Enable the [JWT auth method](/auth-methods/jwt/) and point it at Hydra via OIDC discovery. Warden runs
-on your host, so it reaches Hydra at `localhost:4444` for both discovery and key fetching:
+Enable the [JWT auth method](/auth-methods/jwt/) and point it at Hydra's signing keys. Warden runs
+on your host, so it reaches Hydra at `localhost:4444`:
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config \
-  oidc_discovery_url=http://localhost:4444 \
-  bound_issuer=http://localhost:4444
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
+
+The mount admits a token signed by Hydra, issued by it, and minted for the audience `warden`.
+It grants no role: a group does, in Step 5.
 
 ### Step 4 — front GitHub's MCP server
 
@@ -120,7 +125,6 @@ warden provider enable -path=github-mcp -description="GitHub Copilot MCP" mcp
 warden write github-mcp/config \
   mcp_url=https://api.githubcopilot.com/mcp \
   auto_auth_path=auth/jwt/ \
-  timeout=10m \
   max_body_size=10485760
 ```
 
@@ -140,35 +144,67 @@ warden cred spec create github-ops -source github-src \
   -config mint_method=pat -config token=ghp_your_token_here
 ```
 
-See [GitHub MCP](/provider-backends/mcp-github/) for App-based and OAuth credential options.
+Storing the PAT in Warden keeps the tutorial short. In production, keep the secret in your own secret
+store and let Warden fetch it per request with [credential chaining](/federation/credential-chaining/)
+(`secret_spec`), so Warden holds nothing at rest. [GitHub MCP](/provider-backends/mcp-github/) covers
+the other credential options.
 
 ### Step 5 — start with NO filter (the "before")
 
 Three small pieces; run them one at a time.
 
-**1. Write a permissive policy** — every method, every tool:
+**1. Write a permissive policy** — every method, every tool. This takes *two*
+documents: a capability policy granting the path, and an MCP policy permitting the
+calls. Access is the intersection of both, and MCP traffic with no MCP policy in
+scope is denied — so the wildcard MCP policy is what keeps this "before" state
+open:
 
 ```bash
 warden policy write mcp-tools - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["*"]
-    allowed_tools   = ["*"]
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-tools-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["*"] }
+  tools   { allowed = ["*"] }
 }
 EOF
 ```
 
-**2. Create the role** that carries that policy and the GitHub credential:
+**2. Create the role** that carries *both* policies and the GitHub credential, and a group
+that grants it. An MCP policy comes into scope the same way a capability policy does — by
+being named in the role's `policies` — so leaving it out would deny every call:
 
 ```bash
-warden write auth/jwt/role/mcp-user \
-  token_policies=mcp-tools \
-  user_claim=sub \
-  cred_spec_name=github-ops \
-  token_ttl=1h
+warden role create mcp-user -json '{
+  "description": "Use the GitHub MCP server",
+  "policies": ["mcp-tools", "mcp-tools-calls"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github-mcp/"
+}'
+
+warden identity group create mcp-users -json '{
+  "type": "virtual",
+  "description": "Agents with a Hydra token for Warden",
+  "roles": ["mcp-user"],
+  "rules": [
+    {
+      "mount": ["auth/jwt/"]
+    }
+  ]
+}'
 ```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for this tutorial, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+The group's one rule trusts `auth/jwt/`, so every token that mount admits holds `mcp-user`.
+The request names the role in its URL path, and Warden checks on each request that a group
+grants it.
 
 **3. Turn on an audit log** so you can watch the decisions:
 
@@ -184,7 +220,7 @@ it's meant for Claude to present, so exporting it is fine:
 ```bash
 export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
+  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write&audience=warden" \
   | jq -r '.access_token')
 ```
 
@@ -220,25 +256,25 @@ next.
 
 Claude fetches an MCP server's tool list once, when a session starts, and caches it for the whole
 session — so a running session won't notice a policy change. **Exit your `claude` session first**
-(`/exit`), *then* rewrite the **same** policy as an allow-list, plus an explicit deny-list for good
-measure:
+(`/exit`), *then* rewrite the **same MCP policy** as an allow-list, plus an explicit deny-list for
+good measure. Only the MCP policy changes; the capability policy granting the path stays as it is:
 
 ```bash
-warden policy write mcp-tools - <<'EOF'
+warden policy write -type mcp mcp-tools-calls - <<'EOF'
 path "github-mcp/role/+/gateway*" {
-  capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["get_*", "list_*", "search_*"]
-    denied_tools    = ["delete_*", "create_*", "update_*", "push_*", "merge_*"]
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools {
+    allowed = ["get_*", "list_*", "search_*"]
+    denied  = ["delete_*", "create_*", "update_*", "push_*", "merge_*"]
   }
 }
 EOF
 ```
 
-The block is **deny-by-default**: a tool must match `allowed_tools` and must *not* match `denied_tools`
-(a deny always wins). Patterns are case-insensitive and use a trailing `*`. The MCP handshake methods
-(`initialize`, `ping`, `notifications/*`) are always exempt.
+An MCP policy is **deny-by-default**: a tool must match the `tools` block's `allowed` and must *not*
+match its `denied` (a deny always wins). Patterns are case-insensitive and use a trailing `*`. The
+MCP session-lifecycle methods (`initialize`, `ping`, `notifications/*`, `server/discover`) are always
+exempt.
 
 ### Step 8 — ask the same question again (the "after")
 
@@ -259,8 +295,10 @@ can't attempt the delete at all, and tells you it has no way to do it. The dange
 never offered to the model in the first place, so there's nothing to hallucinate or inject.
 
 That pruning is trustworthy because it comes from the *same policy* the gateway enforces on every
-request: even a forged call that skipped the tool list would be refused with `insufficient_permissions`
-("Tool 'delete_repository' not allowed.") before anything reached GitHub.
+request: even a forged call that skipped the tool list would be refused before anything reached
+GitHub, with a JSON-RPC error for that one call — code `-32090`, message
+*"Warden: Tool 'delete_repository' not allowed."*, and `insufficient_permissions` in its `data`. The
+session survives the refusal, so the agent's next call goes through.
 
 ### Step 9 — see it in the audit log
 
@@ -296,6 +334,8 @@ The injected GitHub token never appears in the clear — the audit layer salts i
     -H "Accept: application/json, text/event-stream" \
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
   ```
+- **`authentication failed`** — the token was not minted for the audience `warden`. Mint it again
+  with `&audience=warden` (Step 6).
 - **`credential spec "github-ops" not found`** — Step 4's `cred spec create` failed (usually an
   invalid PAT — Warden verifies it on creation). Re-run that command with a valid token.
 - **`404` from GitHub on a tool call** — trailing-slash mismatch. The gateway URL must end

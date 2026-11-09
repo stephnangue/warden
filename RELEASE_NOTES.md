@@ -1,37 +1,83 @@
-## Warden v0.19.0
+## Warden v0.22.0
 
-v0.19.0 is the **keyless federation** release. Warden can now act as its own **OIDC issuer** — minting short-lived, signed **identity assertions** that describe the caller and publishing the **JWKS / OIDC discovery** to verify them — so an upstream trusts *who the caller is* instead of a secret Warden holds. On top of that, **keyless credential sources** (`auth_method=oidc_federation`) across AWS, Azure, GCP, and OpenBao/Vault store **no cloud secret** at all — each request federates an assertion for a short-lived credential — and **credential chaining** (`secret_spec`) sources any *remaining* standing secret from an external keyless-federated vault per request, so there is no key-trove to breach. The issuer's **signing key can live in an external KMS** (the private key never enters Warden), and a public **publisher** exposes the verification keys to internet-facing clouds without exposing Warden itself. Finally, a second **user principal** lets an agent act **on behalf of a verified human** — natively ([RFC 8693](https://www.rfc-editor.org/rfc/rfc8693) / [RFC 7523](https://www.rfc-editor.org/rfc/rfc7523) / ID-JAG) or, for upstreams with no on-behalf-of flow, via a per-user OAuth token from OpenBao/Vault at fleet scale. Three breaking changes — read **Upgrading** before bumping.
+v0.22.0 is the **agent identity and governance** release: register every agent, name the team that answers for it, and refuse the ones nobody claimed. Every caller already had a native identity — the JWT subject, certificate, service account or SPIFFE ID its auth mount verified. What is new is the **entity**: a record in Warden's identity store that claims an agent's native identities and names its **sponsor**, a group of humans who accepted it. Entities are optional. Under the default `unknown_aliases=observe`, the audit log tells you which agents `deny` would refuse; switch to `deny` and unclaimed or ungoverned agents are refused. Suspend an entity and every native identity it claims is refused from the next request.
+
+Roles are no longer bound at login. A login admits a credential and names the facts its mount verified, and groups grant roles one request at a time: **virtual groups** by rules over those facts, **static groups** by listing governed entities. A **`governed_only`** role is never granted by a rule.
+
+People sign in with **`warden login`** through the new **`oidc`** auth method and hold roles through their IdP's claims, without becoming entities. Four **built-in operator roles** — `warden-admin`, `warden-provider-admin`, `warden-security-admin` and `warden-viewer` — cover the usual operator jobs, and none ever reaches a data plane.
+
+Discovery now answers to policy and audit like every other request. Agents reach **Microsoft 365 as the user** through Entra on-behalf-of and the new **msgraph** provider. Azure sources can authenticate with a **certificate** whose key stays in a KMS, oauth2 sources gain `client_secret_basic`, `private_key_jwt` and KMS-signed assertions, and **Bedrock** model calls go through the aws gateway. Policy compilation is about 2.7 times cheaper, and the token and credential caches are sized by the bytes they hold.
+
+**Twelve breaking changes — read Upgrading before you bump.**
 
 ### Breaking Changes
 
-- **RFC 8693 token exchange reshaped around the user.** The `header` token source and its subject-trust keys (`subject_issuer` / `subject_audience` / `subject_jwks_url` / `subject_oidc_discovery_url`) are removed; the `subject_token_source` / `actor_token_source` value **`auth_token` is renamed to `agent_identity`**; and delegation now forwards the end user's own validated credential via **`subject_token_source=user_identity`** (with `actor_token_source=warden_identity` for the on-behalf-of-user shape). A create/update with a retired value is rejected, and a persisted spec carrying one **fails closed at mint**.
+- **Auth roles are removed.** `auth/<mount>/role/*` answers `410`; roles live at `sys/roles/<name>` and groups grant them per request. Logins take no role, and the role-era mount keys (`default_role`, `groups_claim`, `group_policy_prefix`, `metadata_claims`, `metadata_mappings`, `token_type`) and the provider's `user_auth_role` are refused.
+- **Agent jwt and spiffe mounts require `bound_audiences`**, and `max_age` moves from the role to the mount.
+- **Token types are `identity_token` and `service_token`** (`wds.`). Root and other `cws.` tokens no mount issued resolve until they expire; tokens a v0.21.0 auth mount issued are refused, so agents log in again.
+- **Reserved names**: policies `default` and `default-*`, roles `warden-*`.
+- **Discovery runs through the request path**: authorized by built-in policies, audited, `401` without a credential, `503` when no mount admitted it and one could not decide, batches capped at 50.
+- **The MCP `resources` family covers `skills/get` and `resources/directory/read`.** A contract allowing every method with no `resources` block now refuses them.
+- **gcp and azure forward only to `allowed_host_suffixes`**, and azure refuses Graph `$batch`.
+- **Policy names and request paths have one spelling**: non-canonical policy names and percent-encoded dot or empty segments get `400`.
+- **Credential sources are held to their own config**: `hvault` edits need `auth_method`, `wid:` user principals are refused, impersonation and routing headers are stripped, and edits reach live sessions.
+- **Audit has a floor**: no headers or bodies, `salt_fields` extends the default salting, unknown paths are refused at enable.
+- **Nested namespaces written through an ancestor were misplaced** — recreate them; no repair ships.
+- **Mixed-version clusters**: a v0.21.0 node cannot read PS256 capabilities, roles or groups, and the token cache holds about 113,000 service tokens at its default 100 MiB.
 
-- **GitHub credential specs select the credential with `mint_method`, not `auth_method`.** The `github` driver now reads a required spec-level `mint_method` (`app` | `pat`); the old `auth_method` key is rejected. GitLab is unaffected.
+### Security
 
-- **`X-Warden-On-Behalf-Of` retired; audit/policy actors are verified-only.** The self-reported header is gone — the actor chain now has a single source, the cryptographically-verified RFC 8693 `act` claim. The `verified` field is dropped everywhere, so a CEL `condition` referencing `a.verified` (e.g. `token.actors.all(a, a.verified)`) must become `size(token.actors) > 0`.
+- **Canonical policy names and request paths** close two inherited upstream policy advisories.
+- **SigV4 upstreams stay on AWS hosts**, and gcp and azure carry a token only to allowed hosts.
+- **Every stored secret is masked on read**, and an `hvault` source never inherits the server process's environment.
+- **`sys/step-down` requires root or sudo**, and discovery is authorized and audited.
+- **No credential reaches an audit entry or log in clear.**
+- **The `wid:` prefix is reserved for agents**, and Kubernetes impersonation and Elastic run-as headers are stripped.
+- **Skills on MCP gateways are gated by URI**, and Graph `$batch` is refused.
 
 ### New Features
 
-**Federation & keyless identity**
+**Agent identity and governance**
 
-- **Warden is now an OIDC issuer.** It mints short-lived, signed JWT identity assertions (`sub = wid:<namespaceID>:<mountAccessor>:<principalID>`, plus `warden_*` claims) and publishes the matching JWKS + OIDC discovery, so any upstream that trusts an OIDC issuer — a cloud STS, an IdP, a secrets vault — can verify a caller's identity directly. The issuer fails closed until a signing key is installed, and key rotation retires prior keys into the JWKS so in-flight assertions keep verifying.
-- **The signing key can live in an external KMS.** A `signer { }` stanza binds the assertion-signing key to an external KMS (`type = "transit"` today) so the **private key never enters Warden**; the interface is built for more backends.
-- **Publishers expose the keys to internet-facing upstreams.** A publisher pushes the discovery + JWKS to a bucket/CDN (`s3`, `gcs`, `azure_blob`, `http_put`, `local_file`) that becomes the `issuer_url` upstreams fetch from — so Warden itself need not be internet-facing — and self-rotates its own write credential.
-- **Keyless credential sources — `auth_method=oidc_federation`.** A source can hold no stored cloud secret: on each request Warden federates an identity assertion for a short-lived credential. Ships for AWS (`AssumeRoleWithWebIdentity`, keyless Secrets Manager), Azure (Entra `client_assertion`), GCP (Workload Identity Federation), and OpenBao/Vault (per-request JWT-auth login).
-- **Assertion shaping.** `warden_identity` assertions can pin a single downstream resource (`warden_resource`) and carry allowlisted login metadata (`assertion_metadata_claims` → nested `warden_metadata`) for verifier-side least privilege.
+- **Native identities** on every admission, and **entities** that claim them, managed with `warden identity entity` and `warden identity alias`; `entity list -ungoverned` shows the agents nobody answers for.
+- **Sponsors**: a virtual group of humans who accept an agent, and can read, suspend and hand it over with `warden identity sponsor` and no Warden role.
+- **`unknown_aliases`**: `observe` records why `deny` would refuse each request; `deny` refuses unclaimed and ungoverned agents.
+- **Static groups** and **`governed_only` roles**: a claimed agent holds only what its entity's static groups grant.
 
-**Credential chaining**
+**Roles, groups and people**
 
-- **Chain a spec's secret from another cred spec (`secret_spec`).** A secret-backed provider sources its standing secret from another spec at request time instead of storing it — keyless end-to-end, single-hop, nothing persisted. Includes a generic **`kv2_read` mint method + `key_value` credential type**, an opt-in source-scoped cache (`secret_cache_ttl`), and support for sourcing the **`token_exchange` client secret** this way.
+- **Namespace roles and virtual groups**, with mounts naming the facts they verify, and group writes that name their type.
+- **The `oidc` auth method, ticket tokens, and `warden login | logout | role use | print token`.**
+- **Built-in operator roles**, turned on per namespace by its parent with `enable_builtin_roles`, and **`request.data_plane`** in CEL.
 
-**User principal & acting on behalf of a human**
+**Discovery under policy**
 
-- **Per-user credential chaining via secondary transparent authentication.** A request can carry a second, per-request user credential (default header `X-Warden-User-Token`) that Warden resolves into a first-class user principal — identity-only today. A `warden_identity` spec can disclose the user under a nested `warden_user` claim, and a per-user `secret_path` / `credential_name` template (`{{user.<claim>}}`) selects a secret or OAuth token scoped to the verified user — so an agent acts as the human, even against upstreams with no native on-behalf-of flow.
+- **Built-in `default-cbp`, `default-mcp` and `default-sponsor` policies**, and policy compilation about 2.7 times cheaper.
+
+**Microsoft 365, Entra and credentials**
+
+- **The msgraph provider** and **Entra on-behalf-of**, with challenges MSAL understands.
+- **Azure certificate authentication**, with a local or KMS-held key.
+- **oauth2 `client_secret_basic`, `private_key_jwt` and `kms_private_key_jwt`**, and an issuer audience on oauth2 and token_exchange.
+- **Bedrock Runtime through the aws gateway**, bounded by the mount's `timeout`.
+- **`token_cache_megabytes` and `credential_cache_megabytes`**, and pooled copy buffers on every proxied response.
+
+### Fixed
+
+- **The chained-secret cache holds 10,000 secrets**; it held 175.
+- **A transit seal configured in HCL works** — it failed in every release up to v0.21.0.
+- **The root token is recognised after a restart.**
+- **Access backends authenticate agents implicitly**, without minting each other's credential.
+- **Credential lifetimes and leases are bounded in one place**, a create is never replayed after an ambiguous failure, and one caller's cancellation no longer fails the others.
 
 ### Upgrading
 
-Three changes need action; each is a small, mechanical migration. See the [Upgrading from v0.18.0](https://wardengateway.com/upgrade/from-v0-18/) guide for the full detail.
+Twelve changes need action. Work through [Upgrading from v0.21.0](https://wardengateway.com/upgrade/from-v0-21/) before rolling out the binary.
 
-- **CEL actor conditions:** rewrite `token.actors.all(a, a.verified)` → `size(token.actors) > 0` (note the empty-chain semantics flip from allow to deny — drop the condition entirely if you did not mean to require an actor).
-- **GitHub specs:** rename `-config=auth_method=<app|pat>` → `-config=mint_method=<app|pat>`.
-- **Token-exchange specs:** rename `subject_token_source=auth_token` → `agent_identity`; re-express a header-sourced delegation as `subject_token_source=user_identity` (+ `actor_token_source=warden_identity`) with a `user_auth_path` configured; drop the removed `header` source and `subject_*` trust keys.
+- **Export your auth roles before upgrading** — after it, their paths answer `410`. Convert each into a `warden role create` and a `warden identity group create` with one rule per mount, naming the claims it matched as mount `facts`.
+- **Agents holding v0.21.0 login tokens log in again**, and long-lived `cws.` service tokens should be rotated.
+- **Update the seeded `troubleshooting` skill** with `warden skill update troubleshooting -body-file <file>`: existing clusters keep their copy.
+- **Recreate nested namespaces** created, updated or deleted through an ancestor.
+- **Set `bound_audiences` on agent jwt and spiffe mounts**, add non-default Azure hosts to `allowed_host_suffixes`, and set `auth_method` on every `hvault` source.
+
+A ticket cannot be revoked before it expires; disabling its `oidc` mount ends every session it issued. Graph `$batch` is refused. A sponsor is always a group, never a single person.

@@ -42,6 +42,9 @@ var injections = []injection{
 	{env: dynatraceEnv, want: map[string]string{"Authorization": "Api-Token " + dynatraceAPIToken}},
 	// Minted live against the harness issuer, so only the scheme is a constant.
 	{env: dynatraceOAuthEnv, wantPrefix: map[string]string{"Authorization": "Bearer "}},
+	// Minted live against the harness Vault, so likewise. vault_test.go is where
+	// the token is checked against Vault itself.
+	{env: vaultEnv, wantPrefix: map[string]string{"X-Vault-Token": vaultServiceTokenPrefix}},
 }
 
 // TestFullChain_CertAgentWithUser is the reference shape the suite exists for:
@@ -364,6 +367,8 @@ func TestFullChain_PolicyDenialStopsBeforeUpstream(t *testing.T) {
 		Status:        403,
 		UpstreamCalls: 0,
 	})
+	// openai renders Warden's own failures in OpenAI's error shape.
+	assertOpenAIError(t, body, "warden_permission_denied")
 }
 
 // TestFullChain_UntrustedAgentCertIsRejected mints a well-formed certificate

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,6 +87,20 @@ func TestExtractFromAuthHeader(t *testing.T) {
 			wantAKID: "eyJhbGciOiJSUzI1NiJ9",
 		},
 		{
+			name:     "signing name with capitals",
+			header:   "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20231215/us-east-1/IoTSecuredTunneling/aws4_request",
+			wantSvc:  "IoTSecuredTunneling",
+			wantReg:  "us-east-1",
+			wantAKID: "AKIAIOSFODNN7EXAMPLE",
+		},
+		{
+			name:     "sovereign cloud region",
+			header:   "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20231215/eusc-de-east-1/bedrock/aws4_request",
+			wantSvc:  "bedrock",
+			wantReg:  "eusc-de-east-1",
+			wantAKID: "AKIAIOSFODNN7EXAMPLE",
+		},
+		{
 			name:    "empty header",
 			header:  "",
 			wantErr: true,
@@ -108,6 +123,31 @@ func TestExtractFromAuthHeader(t *testing.T) {
 				assert.Equal(t, tt.wantAKID, akid)
 			}
 		})
+	}
+}
+
+// The region and service become part of the upstream host, so a scope whose
+// region or service could move the request elsewhere does not parse: the
+// gateway answers it as it answers any scope that does not parse, before
+// building a host from it.
+func TestExtractFromAuthHeader_RefusesHostChangingScope(t *testing.T) {
+	for _, scope := range []string{
+		"x.attacker.example#/ec2", // '#' ends the host at the fragment
+		"us-east-1/ec2.attacker.example#",
+		"us-east-1@attacker.example/ec2", // '@' makes the rest userinfo
+		"attacker.example:443/ec2",
+		"us-east-1/ec2?x=",
+		"us-east-1.attacker.example/ec2",
+		"us-east-1/ec2%2F",
+		"us east 1/ec2",
+		"us_east_1/ec2",
+		"us-east-1/ec2․attacker", // one dot leader, not a hyphen
+		"us-east-1/" + strings.Repeat("a", 64) + ".attacker.example",
+	} {
+		header := "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20231215/" + scope + "/aws4_request, SignedHeaders=host, Signature=00"
+		if svc, reg, _, err := ExtractFromAuthHeader(header); err == nil {
+			t.Errorf("scope %q parsed as service %q, region %q", scope, svc, reg)
+		}
 	}
 }
 
@@ -357,6 +397,20 @@ func TestNormalizeRequest(t *testing.T) {
 		assert.Equal(t, "preserved", r.Header.Get("X-Custom"))
 	})
 
+	t.Run("strips the headers Connection names", func(t *testing.T) {
+		r, _ := http.NewRequest("GET", "/", nil)
+		r.Header.Set("Connection", "X-Hop, X-Other-Hop")
+		r.Header.Set("X-Hop", "hop-only")
+		r.Header.Set("X-Other-Hop", "hop-only")
+		r.Header.Set("X-Custom", "preserved")
+
+		NormalizeRequest(log, r, []byte{})
+
+		assert.Empty(t, r.Header.Get("X-Hop"))
+		assert.Empty(t, r.Header.Get("X-Other-Hop"))
+		assert.Equal(t, "preserved", r.Header.Get("X-Custom"))
+	})
+
 	t.Run("strips proxy headers", func(t *testing.T) {
 		r, _ := http.NewRequest("GET", "/", nil)
 		r.Header.Set("X-Forwarded-For", "1.2.3.4")
@@ -591,4 +645,139 @@ func TestForwardDirectFiltered_OversizeFailsClosed(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadGateway, rec.Code)
 	assert.False(t, called, "modify must not run when the body exceeds the cap")
+}
+
+// --- Failures the forward raises itself ---
+
+// roundTripFunc is an http.RoundTripper made of a function.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// untilDone is an upstream that never answers: it waits for the request's
+// context to end.
+var untilDone = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	<-r.Context().Done()
+	return nil, r.Context().Err()
+})
+
+// A mount's timeout passing before the upstream answers is a 504: the client
+// is still waiting, and written nothing it would read an empty 200.
+func TestForwardDirect_TimeoutAnswers504(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	r, _ := http.NewRequestWithContext(ctx, "GET", "http://upstream.test/", nil)
+
+	rec := httptest.NewRecorder()
+	ForwardDirect(createTestLogger(), rec, r, []byte{}, untilDone)
+
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code)
+	assert.Equal(t, "Gateway Timeout\n", rec.Body.String())
+}
+
+// A client that went away gets nothing written: no one is reading.
+func TestForwardDirect_ClientGoneWritesNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r, _ := http.NewRequestWithContext(ctx, "GET", "http://upstream.test/", nil)
+
+	rec := httptest.NewRecorder()
+	ForwardDirect(createTestLogger(), rec, r, []byte{}, untilDone)
+
+	assert.Empty(t, rec.Header())
+	assert.Zero(t, rec.Body.Len())
+}
+
+// forwardFailures are the failures the forward raises itself, each set up
+// for ForwardDirectOpts, with the status and text http.Error answers it with.
+func forwardFailures(t *testing.T) []struct {
+	name   string
+	run    func(w http.ResponseWriter, opts ForwardOptions)
+	status int
+	text   string
+} {
+	t.Helper()
+	ok := serveBody(t, http.StatusOK, "application/json", `{"tools":["a","b"]}`)
+	t.Cleanup(ok.Close)
+	// cut promises a longer body than it sends, so reading it fails.
+	cut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		_, _ = w.Write([]byte(`{"tools":`))
+	}))
+	t.Cleanup(cut.Close)
+	post := func(ctx context.Context, url string) *http.Request {
+		r, _ := http.NewRequestWithContext(ctx, "POST", url, nil)
+		return r
+	}
+	return []struct {
+		name   string
+		run    func(w http.ResponseWriter, opts ForwardOptions)
+		status int
+		text   string
+	}{
+		{"request cannot be built", func(w http.ResponseWriter, opts ForwardOptions) {
+			r := post(context.Background(), ok.URL)
+			r.Method = "BAD METHOD"
+			ForwardDirectOpts(createTestLogger(), w, r, []byte{}, ok.Client().Transport, opts)
+		}, http.StatusInternalServerError, "Internal server error"},
+		{"upstream unreachable", func(w http.ResponseWriter, opts ForwardOptions) {
+			ForwardDirectOpts(createTestLogger(), w, post(context.Background(), "http://127.0.0.1:1/"), []byte{}, http.DefaultTransport, opts)
+		}, http.StatusBadGateway, "Bad Gateway"},
+		{"upstream too slow", func(w http.ResponseWriter, opts ForwardOptions) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			defer cancel()
+			ForwardDirectOpts(createTestLogger(), w, post(ctx, "http://upstream.test/"), []byte{}, untilDone, opts)
+		}, http.StatusGatewayTimeout, "Gateway Timeout"},
+		{"filtered body over the cap", func(w http.ResponseWriter, opts ForwardOptions) {
+			opts.MaxBody = 5
+			opts.Modify = func(_ string, b []byte) ([]byte, error) { return b, nil }
+			ForwardDirectOpts(createTestLogger(), w, post(context.Background(), ok.URL), []byte{}, ok.Client().Transport, opts)
+		}, http.StatusBadGateway, "Bad Gateway"},
+		{"filtered body cut short", func(w http.ResponseWriter, opts ForwardOptions) {
+			opts.Modify = func(_ string, b []byte) ([]byte, error) { return b, nil }
+			ForwardDirectOpts(createTestLogger(), w, post(context.Background(), cut.URL), []byte{}, cut.Client().Transport, opts)
+		}, http.StatusBadGateway, "Bad Gateway"},
+		{"filtered body cannot be transformed", func(w http.ResponseWriter, opts ForwardOptions) {
+			opts.Modify = func(string, []byte) ([]byte, error) { return nil, assert.AnError }
+			ForwardDirectOpts(createTestLogger(), w, post(context.Background(), ok.URL), []byte{}, ok.Client().Transport, opts)
+		}, http.StatusBadGateway, "Bad Gateway"},
+	}
+}
+
+// Without OnError every failure is answered as it always was, by http.Error —
+// what every caller of ForwardDirect and ForwardDirectFiltered still gets.
+func TestForwardDirectOpts_NoOnErrorKeepsHTTPError(t *testing.T) {
+	for _, f := range forwardFailures(t) {
+		t.Run(f.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			f.run(rec, ForwardOptions{})
+
+			want := httptest.NewRecorder()
+			http.Error(want, f.text, f.status)
+			assert.Equal(t, want.Code, rec.Code)
+			assert.Equal(t, want.Header(), rec.Header())
+			assert.Equal(t, want.Body.String(), rec.Body.String())
+		})
+	}
+}
+
+// With OnError, every failure is handed to it instead, with the status and
+// text http.Error would have used, and the forward writes nothing itself.
+func TestForwardDirectOpts_OnError(t *testing.T) {
+	for _, f := range forwardFailures(t) {
+		t.Run(f.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			calls := 0
+			f.run(rec, ForwardOptions{OnError: func(w http.ResponseWriter, status int, text string) {
+				calls++
+				assert.Equal(t, f.status, status)
+				assert.Equal(t, f.text, text)
+				w.WriteHeader(http.StatusTeapot)
+			}})
+
+			assert.Equal(t, 1, calls)
+			assert.Equal(t, http.StatusTeapot, rec.Code)
+			assert.Zero(t, rec.Body.Len(), "the forward must not write the answer itself")
+		})
+	}
 }

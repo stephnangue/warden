@@ -16,6 +16,12 @@ import (
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
 
+// wardenHeadersToStrip are the Warden headers removed before re-signing
+// (logical.WardenRequestHeaders): each carries a caller credential, a routing
+// selector (role, provider, namespace) or a reserved name, none of which means
+// anything to AWS, and none may reach it.
+var wardenHeadersToStrip = logical.WardenRequestHeaders()
+
 func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	// Apply timeout if configured
 	if b.Timeout() > 0 {
@@ -52,7 +58,8 @@ func (b *awsBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
-	sigv4.ForwardDirect(b.Logger, req.ResponseWriter, r, body, transport)
+	sigv4.ForwardDirectOpts(b.Logger, req.ResponseWriter, r, body, transport,
+		sigv4.ForwardOptions{OnError: forwardError(req)})
 }
 
 // processRequest handles all request processing before forwarding.
@@ -61,7 +68,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// Step 1: Read and buffer request body
 	bodyBytes, err := sigv4.ReadRequestBody(req.HTTPRequest, b.MaxBodySize())
 	if err != nil {
-		http.Error(req.ResponseWriter, "Failed to read request body", http.StatusBadRequest)
+		writeAWSError(req.ResponseWriter, req, http.StatusBadRequest, codesBadRequest, "Failed to read request body")
 		return nil, nil, err
 	}
 	if bodyBytes == nil {
@@ -71,7 +78,9 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// Step 2: Extract service, region, and credentials from Authorization header
 	service, region, _, err := sigv4.ExtractFromAuthHeader(req.HTTPRequest.Header.Get("Authorization"))
 	if err != nil {
-		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
+		// Not SigV4 at all, or a SigV4 header whose credential scope does not
+		// parse, so its signature cannot be checked.
+		writeAWSError(req.ResponseWriter, req, http.StatusUnauthorized, codesSignature, "Unauthorized")
 		return nil, nil, err
 	}
 
@@ -101,12 +110,12 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	valid, err := b.verifyIncomingSignature(req.HTTPRequest, bodyBytes, verifyCreds, service, region)
 	if err != nil {
 		b.Logger.Warn("Signature verification failed", logger.Err(err))
-		http.Error(req.ResponseWriter, "Signature verification failed", http.StatusForbidden)
+		writeAWSError(req.ResponseWriter, req, http.StatusForbidden, codesSignature, "Signature verification failed")
 		return nil, nil, err
 	}
 	if !valid {
 		b.Logger.Warn("Signature does not match")
-		http.Error(req.ResponseWriter, "Signature does not match", http.StatusForbidden)
+		writeAWSError(req.ResponseWriter, req, http.StatusForbidden, codesSignature, "Signature does not match")
 		return nil, nil, fmt.Errorf("signature mismatch")
 	}
 
@@ -116,20 +125,13 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// The real AWS session token (if any) will be added by resignRequest when
 	// the minted credentials include a SessionToken.
 	//
-	// The X-Warden-* headers are stripped for the same reason: each carries a
-	// caller credential that has no meaning to AWS and must not reach it. AWS
-	// keeps its own list rather than sharing the httpproxy one because its
-	// requests are SigV4-signed — the strip has to happen here, after the
+	// The X-Warden-* headers (wardenHeadersToStrip) are stripped for the same
+	// reason. AWS keeps its own list rather than sharing the httpproxy one
+	// because its requests are SigV4-signed — the strip has to happen here, after the
 	// inbound signature has been verified against the original header set and
 	// before resignRequest computes a new signature over the modified one.
 	req.HTTPRequest.Header.Del("X-Amz-Security-Token")
-	for _, h := range []string{
-		"X-Warden-Token",
-		"X-Warden-Agent-Token",
-		"X-Warden-User-Token",
-		"X-Warden-Subject-Token",
-		"X-Warden-Actor-Token",
-	} {
+	for _, h := range wardenHeadersToStrip {
 		req.HTTPRequest.Header.Del(h)
 	}
 
@@ -137,7 +139,7 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	awsCreds, err := b.getCredentials(req)
 	if err != nil {
 		b.Logger.Warn("Fail to extract aws credentials", logger.Err(err))
-		http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
+		writeAWSError(req.ResponseWriter, req, http.StatusUnauthorized, codesAuth, "Unauthorized")
 		return nil, nil, err
 	}
 
@@ -160,9 +162,14 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 		logger.String("request_id", req.RequestID),
 	)
 
-	proc := b.processorRegistry.FindProcessor(processorCtx)
+	// Loaded once: a config write may replace it mid-request. A mount never
+	// configured has none, and so no processor for anything.
+	var proc processor.RequestProcessor
+	if registry := b.processorRegistry.Load(); registry != nil {
+		proc = registry.FindProcessor(processorCtx)
+	}
 	if proc == nil {
-		http.Error(req.ResponseWriter, "Service not supported", http.StatusBadRequest)
+		writeAWSError(req.ResponseWriter, req, http.StatusBadRequest, codesBadRequest, "Service not supported")
 		return nil, nil, fmt.Errorf("no processor found for service: %s", service)
 	}
 
@@ -174,7 +181,10 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// Step 8: Process the request
 	result, err := proc.Process(processorCtx)
 	if err != nil {
-		http.Error(req.ResponseWriter, "Failed to process request", http.StatusBadGateway)
+		// Every processor error is the request itself — an account id or
+		// access point that does not parse, a region with no endpoint — so it
+		// is a 400 the client must not retry.
+		writeAWSError(req.ResponseWriter, req, http.StatusBadRequest, codesBadRequest, "Failed to process request")
 		return nil, nil, err
 	}
 
@@ -190,8 +200,16 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	// Step 9: Apply the processor result to the request
 	target, err := url.Parse(result.TargetURL)
 	if err != nil {
-		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+		writeAWSError(req.ResponseWriter, req, http.StatusInternalServerError, codesInternal, "Internal server error")
 		return nil, nil, err
+	}
+	// Processors build the target from what the client sent — its credential
+	// scope, an ARN in the path, its Host — and the request leaves re-signed
+	// with the real credential. Whatever processor built it, only the AWS host
+	// the processor named is reached.
+	if !isAWSTarget(target, result.TargetHost) {
+		writeAWSError(req.ResponseWriter, req, http.StatusBadRequest, codesBadRequest, "Failed to process request")
+		return nil, nil, fmt.Errorf("processor %s built a target outside AWS: %q", proc.Name(), result.TargetURL)
 	}
 
 	req.HTTPRequest.URL.Scheme = target.Scheme
@@ -235,12 +253,40 @@ func (b *awsBackend) processRequest(ctx context.Context, req *logical.Request) (
 	bodyBytes = b.normalizeRequest(req.HTTPRequest, bodyBytes)
 
 	// Step 12: Re-sign the request with valid credentials
+	clientAuth := req.HTTPRequest.Header.Get("Authorization")
 	if err := b.resignRequest(ctx, req.HTTPRequest, awsCreds, signingService, signingRegion, bodyBytes); err != nil {
-		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+		// Re-signing drops the client's Authorization header before it signs;
+		// put it back, since the answer's format is read from it.
+		req.HTTPRequest.Header.Set("Authorization", clientAuth)
+		writeAWSError(req.ResponseWriter, req, http.StatusInternalServerError, codesInternal, "Internal server error")
 		return nil, nil, err
 	}
 
 	return req.HTTPRequest, bodyBytes, nil
+}
+
+// awsHostSuffixes are the DNS suffixes of the partitions the gateway serves.
+var awsHostSuffixes = []string{".amazonaws.com", ".amazonaws.com.cn"}
+
+// isAWSTarget reports whether target is exactly https://host, with host an
+// AWS hostname: nothing smuggled into it as userinfo, path or fragment, and a
+// name made of host characters under an AWS partition's suffix.
+func isAWSTarget(target *url.URL, host string) bool {
+	if target.Scheme != "https" || target.User != nil || target.Host != host ||
+		target.Path != "" || target.RawQuery != "" || target.Fragment != "" {
+		return false
+	}
+	for _, c := range host {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-') {
+			return false
+		}
+	}
+	for _, suffix := range awsHostSuffixes {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *awsBackend) getCredentials(req *logical.Request) (awssdk.Credentials, error) {
@@ -250,7 +296,9 @@ func (b *awsBackend) getCredentials(req *logical.Request) (awssdk.Credentials, e
 
 	switch req.Credential.Type {
 	case credential.TypeAWSAccessKeys:
-		if req.Credential.LeaseTTL == 0 {
+		// Long-term keys carry no session token; STS credentials always do. The
+		// lease cannot tell them apart: max_ttl gives a static key one too.
+		if req.Credential.Data["session_token"] == "" {
 			return awssdk.Credentials{
 				AccessKeyID:     req.Credential.Data["access_key_id"],
 				SecretAccessKey: req.Credential.Data["secret_access_key"],

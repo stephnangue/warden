@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 // maxJSONDepth bounds the recursion of the strict JSON-RPC body walker
@@ -23,10 +24,20 @@ const maxJSONDepth = 32
 //
 // Method is the verbatim string from the body — callers lowercase
 // before matching. Name is method-derived: tools/call → params.name,
-// resources/read → params.uri, prompts/get → params.name. It is empty
-// for other methods. Arguments is the parsed params.arguments map for
+// resources/read, resources/subscribe, resources/directory/read and
+// skills/get → params.uri, prompts/get → params.name. It is empty for
+// other methods. Arguments is the parsed params.arguments map for
 // tools/call only (raw bytes per argument key so callers can do their
 // own type discrimination); nil for any other method.
+//
+// URIs is populated for subscriptions/listen only, from
+// params.notifications.resourceSubscriptions — the resource URIs whose
+// update notifications the caller is asking to receive. nil for any other
+// method, and for a listen that subscribes only to list-changed events.
+//
+// RawID retains the id verbatim so an error response can echo it, and
+// IDPresent distinguishes a request from a notification — JSON-RPC allows
+// a null id, which is present-but-null and not the same as absent.
 //
 // RawParams retains the verbatim params bytes for matcher-internal use.
 // It is descriptor-only and MUST NOT be copied to MCPDecision, the
@@ -35,7 +46,20 @@ type JSONRPCRequest struct {
 	Method    string
 	Name      string
 	Arguments map[string]json.RawMessage
+	URIs      []string
+	RawID     json.RawMessage
+	IDPresent bool
 	RawParams json.RawMessage
+
+	// MetaProtocolVersion is the revision the body itself declares in
+	// params._meta, empty when it declares none.
+	MetaProtocolVersion string
+
+	// ClientInfoName and ClientInfoVersion are the client's self-description
+	// from params._meta. Unverified and unauthenticated — recorded for
+	// operators, never consulted by a gate.
+	ClientInfoName    string
+	ClientInfoVersion string
 }
 
 // ParseErrorKind enumerates structural-failure deny reasons. Each kind
@@ -85,8 +109,11 @@ func (e *ParseError) Error() string {
 //   - Unknown top-level keys outside {jsonrpc, method, params, id}.
 //   - Nesting deeper than maxJSONDepth inside params.
 //   - method-specific shape mismatches: tools/call without params.name
-//     or with non-object params.arguments, resources/read without
-//     params.uri, prompts/get without params.name.
+//     or with non-object params.arguments, resources/read,
+//     resources/subscribe, resources/directory/read or skills/get without
+//     params.uri, prompts/get without params.name,
+//     subscriptions/listen with a non-array or over-long
+//     params.notifications.resourceSubscriptions.
 //
 // Callers are responsible for bounding the input size (Content-Length
 // and io.LimitReader at the handler boundary) — this function does NOT
@@ -94,58 +121,72 @@ func (e *ParseError) Error() string {
 // callers that need to map their own size-cap failure into the same
 // rule_type vocabulary.
 func ParseJSONRPCStrict(body []byte) ([]JSONRPCRequest, *ParseError) {
+	reqs, _, perr := ParseJSONRPCStrictBody(body)
+	return reqs, perr
+}
+
+// ParseJSONRPCStrictBody is ParseJSONRPCStrict plus the body's outer shape:
+// isBatch reports whether the top-level value was an array.
+//
+// The shape is not recoverable from the returned slice — a one-element array
+// and a single object both yield one request — and callers that must
+// distinguish them need it. A batch is a legacy-only shape: it was dropped
+// from the spec in 2025-06-18, so a modern client sending one is
+// self-contradictory in a way only this flag can see.
+func ParseJSONRPCStrictBody(body []byte) ([]JSONRPCRequest, bool, *ParseError) {
 	if hasUTF8BOM(body) {
-		return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "body has UTF-8 BOM"}
+		return nil, false, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "body has UTF-8 BOM"}
 	}
 
 	first, ok := firstNonWS(body)
 	if !ok {
-		return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "empty body"}
+		return nil, false, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "empty body"}
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 
 	var requests []JSONRPCRequest
+	isBatch := first == '['
 
 	switch first {
 	case '{':
 		req, perr := parseJSONRPCRequest(dec)
 		if perr != nil {
-			return nil, perr
+			return nil, isBatch, perr
 		}
 		requests = []JSONRPCRequest{*req}
 	case '[':
 		// Consume the opening '['.
 		if _, err := dec.Token(); err != nil {
-			return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: err.Error()}
+			return nil, isBatch, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: err.Error()}
 		}
 		for dec.More() {
 			req, perr := parseJSONRPCRequest(dec)
 			if perr != nil {
-				return nil, perr
+				return nil, isBatch, perr
 			}
 			requests = append(requests, *req)
 		}
 		// Consume the closing ']'.
 		if _, err := dec.Token(); err != nil {
-			return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: err.Error()}
+			return nil, isBatch, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: err.Error()}
 		}
 		if len(requests) == 0 {
-			return nil, &ParseError{Kind: ErrKindBatchEmpty, Msg: "empty batch"}
+			return nil, isBatch, &ParseError{Kind: ErrKindBatchEmpty, Msg: "empty batch"}
 		}
 	default:
-		return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "top-level value must be object or array"}
+		return nil, isBatch, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "top-level value must be object or array"}
 	}
 
 	// No trailing data after the top-level value. dec.Token() returning
 	// io.EOF means clean end; anything else (including a successful
 	// token read) is trailing data.
 	if _, err := dec.Token(); err != io.EOF {
-		return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "trailing data after JSON-RPC payload"}
+		return nil, isBatch, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "trailing data after JSON-RPC payload"}
 	}
 
-	return requests, nil
+	return requests, isBatch, nil
 }
 
 // parseJSONRPCRequest parses one JSON-RPC request object from the
@@ -216,12 +257,13 @@ func parseJSONRPCRequest(dec *json.Decoder) (*JSONRPCRequest, *ParseError) {
 			}
 			req.RawParams = v
 		case "id":
-			// JSON-RPC 2.0 permits string, number, or null. We don't
-			// inspect the id; just consume the next value to advance
-			// the decoder. validateJSONValue ensures structural
-			// soundness if the id happens to be a complex value (some
-			// MCP clients have been seen wrapping ids in objects —
-			// reject those uniformly).
+			// JSON-RPC 2.0 permits string, number, or null. The value is
+			// retained verbatim rather than inspected: an error response
+			// must echo the id exactly as it arrived, and its presence is
+			// what separates a request from a notification.
+			// validateJSONValue ensures structural soundness if the id
+			// happens to be a complex value (some MCP clients have been
+			// seen wrapping ids in objects — reject those uniformly).
 			var v json.RawMessage
 			if err := dec.Decode(&v); err != nil {
 				return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: err.Error()}
@@ -229,6 +271,8 @@ func parseJSONRPCRequest(dec *json.Decoder) (*JSONRPCRequest, *ParseError) {
 			if perr := validateJSONValue(v, 1); perr != nil {
 				return nil, perr
 			}
+			req.RawID = v
+			req.IDPresent = true
 		default:
 			return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "unknown top-level key"}
 		}
@@ -246,11 +290,134 @@ func parseJSONRPCRequest(dec *json.Decoder) (*JSONRPCRequest, *ParseError) {
 		return nil, &ParseError{Kind: ErrKindMalformedJSONRPC, Msg: "missing method field"}
 	}
 
-	if perr := extractMethodShape(req); perr != nil {
+	// Decode params once and share the result. Every shape extractor below
+	// needs the same object, and the _meta peek cannot be gated on a
+	// cheap scan of the raw bytes: a key spelled "_meta" decodes to
+	// "_meta" while the wire bytes contain no such string, so any
+	// byte-level pre-check is a bypass rather than an optimisation.
+	paramsObj, paramsIsObject := decodeParamsObject(req.RawParams)
+
+	if perr := extractMetaProtocolVersion(req, paramsObj); perr != nil {
+		return nil, perr
+	}
+
+	if perr := extractMethodShape(req, paramsObj, paramsIsObject); perr != nil {
 		return nil, perr
 	}
 
 	return req, nil
+}
+
+// decodeParamsObject decodes params into a key/value map. Reports false when
+// params is absent or is not a JSON object — the shape extractors that
+// require an object raise their own error for that, since what counts as
+// malformed differs per method.
+func decodeParamsObject(raw json.RawMessage) (map[string]json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, false
+	}
+	return obj, true
+}
+
+// metaProtocolVersionKey is the reserved _meta key carrying the protocol
+// revision a client believes it is speaking. It lives inside params, so it
+// reaches the strict parser without tripping the unknown-top-level-key
+// rejection.
+const metaProtocolVersionKey = "io.modelcontextprotocol/protocolVersion"
+
+// metaClientInfoKey carries the client's self-description, which the
+// stateless protocol moved onto every request from the initialize handshake.
+const metaClientInfoKey = "io.modelcontextprotocol/clientInfo"
+
+// extractMetaProtocolVersion peeks params._meta for the client's declared
+// protocol revision, so the header validator can cross-check the transport
+// header against what the body itself claims.
+//
+// A shape that cannot carry a readable version — _meta not an object, or the
+// version not a string — is treated as declaring nothing rather than as an
+// error. Nothing downstream can read such a value as a version either, so
+// there is nothing to cross-check and no reason to start refusing legacy
+// bodies that the reference implementation silently ignores.
+func extractMetaProtocolVersion(req *JSONRPCRequest, top map[string]json.RawMessage) *ParseError {
+	if top == nil {
+		return nil
+	}
+	metaRaw, ok, perr := lookupParamKey(top, "_meta", req.Method)
+	if perr != nil {
+		return perr
+	}
+	if !ok || string(metaRaw) == "null" {
+		return nil
+	}
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(metaRaw, &meta); err != nil {
+		return nil
+	}
+	extractMetaClientInfo(req, meta)
+
+	verRaw, ok, perr := lookupParamKey(meta, metaProtocolVersionKey, req.Method)
+	if perr != nil {
+		return perr
+	}
+	if !ok || string(verRaw) == "null" {
+		return nil
+	}
+	var ver string
+	if err := json.Unmarshal(verRaw, &ver); err != nil {
+		return nil
+	}
+	req.MetaProtocolVersion = ver
+	return nil
+}
+
+// maxClientInfoField bounds each recorded clientInfo string. The value is
+// self-reported and unverified, so it is capped rather than trusted not to
+// arrive as a megabyte of text aimed at the audit log.
+const maxClientInfoField = 128
+
+// extractMetaClientInfo reads the client's self-description out of _meta.
+// Under the stateless protocol it rides every request, having previously come
+// from the initialize handshake.
+//
+// Never an error: this is decoration. A shape that will not decode simply
+// records nothing, because refusing a request over the contents of a field
+// nothing is authorised by would be trading a working call for a log line.
+func extractMetaClientInfo(req *JSONRPCRequest, meta map[string]json.RawMessage) {
+	infoRaw, ok, perr := lookupParamKey(meta, metaClientInfoKey, req.Method)
+	if perr != nil || !ok {
+		return
+	}
+	var info struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(infoRaw, &info); err != nil {
+		return
+	}
+	req.ClientInfoName = boundedField(info.Name)
+	req.ClientInfoVersion = boundedField(info.Version)
+}
+
+// boundedField strips ASCII control characters and truncates, so a
+// self-reported value cannot inject line breaks into an audit record or grow
+// it without limit.
+//
+// Truncation backs off to a rune boundary rather than cutting mid-sequence,
+// which would leave a dangling byte for stripCTL to substitute and put the
+// result over the cap it was just held to.
+func boundedField(s string) string {
+	if len(s) > maxClientInfoField {
+		cut := maxClientInfoField
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut]
+	}
+	return stripCTL(s)
 }
 
 // extractMethodShape populates Name and (for tools/call) Arguments
@@ -269,31 +436,134 @@ func parseJSONRPCRequest(dec *json.Decoder) (*JSONRPCRequest, *ParseError) {
 // its own case-sensitive method dispatch and will typically reject
 // the mixed-case form — so the request denies either at our policy
 // or at the upstream, never silently succeeding.
-func extractMethodShape(req *JSONRPCRequest) *ParseError {
+func extractMethodShape(req *JSONRPCRequest, top map[string]json.RawMessage, isObject bool) *ParseError {
 	switch strings.ToLower(req.Method) {
 	case "tools/call":
-		return extractToolsCall(req)
-	case "resources/read":
-		return extractByParamKey(req, "uri")
+		return extractToolsCall(req, top, isObject)
+	case "resources/read", "resources/subscribe", "resources/directory/read", "skills/get":
+		return extractByParamKey(req, top, isObject, "uri")
 	case "prompts/get":
-		return extractByParamKey(req, "name")
+		return extractByParamKey(req, top, isObject, "name")
+	case "subscriptions/listen":
+		return extractSubscriptionsListen(req, top, isObject)
 	}
 	return nil
+}
+
+// maxResourceSubscriptions caps how many URIs one subscriptions/listen may
+// name. Each one is matched against the resources family's deny- and
+// allow-lists, so an unbounded array is an unbounded amount of pattern
+// matching bought with a single request. Far above any real client: the
+// go-sdk opens one listen stream per session.
+const maxResourceSubscriptions = 256
+
+// extractSubscriptionsListen populates URIs from
+// params.notifications.resourceSubscriptions, the resource URIs whose update
+// notifications the caller wants pushed on the stream it is opening.
+//
+// Everything here is optional, because a listen has legitimate shapes that
+// name no resource at all — subscribing only to tools/prompts/resources
+// list-changed events. Absent params, absent notifications, or an absent
+// array all yield nil URIs, and the request is then governed by the method
+// gate alone. A present-but-wrong type is a different matter and fails
+// closed, matching extractToolsCall's strictness: the alternative is
+// silently ignoring a field that decides what the caller gets to watch.
+func extractSubscriptionsListen(req *JSONRPCRequest, top map[string]json.RawMessage, isObject bool) *ParseError {
+	if len(req.RawParams) == 0 {
+		return nil
+	}
+	if !isObject {
+		return &ParseError{Kind: ErrKindMalformedParams, Msg: "subscriptions/listen params must be an object"}
+	}
+
+	notifRaw, ok, perr := lookupParamKey(top, "notifications", "subscriptions/listen")
+	if perr != nil {
+		return perr
+	}
+	if !ok || string(notifRaw) == "null" {
+		return nil
+	}
+	var notif map[string]json.RawMessage
+	if err := json.Unmarshal(notifRaw, &notif); err != nil {
+		return &ParseError{Kind: ErrKindMalformedParams, Msg: "subscriptions/listen params.notifications must be an object"}
+	}
+
+	subsRaw, ok, perr := lookupParamKey(notif, "resourceSubscriptions", "subscriptions/listen")
+	if perr != nil {
+		return perr
+	}
+	if !ok || string(subsRaw) == "null" {
+		return nil
+	}
+	var uris []string
+	if err := json.Unmarshal(subsRaw, &uris); err != nil {
+		return &ParseError{Kind: ErrKindMalformedParams, Msg: "subscriptions/listen params.notifications.resourceSubscriptions must be an array of strings"}
+	}
+	// Checked after decoding rather than before: the array has already been
+	// tokenised by the duplicate-key walk and is bounded by the handler's body
+	// cap, so the allocation is not the cost this guards. What it bounds is the
+	// per-URI matching against every rule-set's resource patterns below.
+	if len(uris) > maxResourceSubscriptions {
+		return &ParseError{Kind: ErrKindMalformedParams, Msg: "subscriptions/listen names too many resource subscriptions"}
+	}
+	for _, u := range uris {
+		if u == "" {
+			return &ParseError{Kind: ErrKindMalformedParams, Msg: "subscriptions/listen resource subscription must be non-empty"}
+		}
+	}
+	req.URIs = uris
+	return nil
+}
+
+// lookupParamKey finds key in a decoded params object, accepting any casing,
+// and reports an ambiguity when more than one spelling is present.
+//
+// The reason is that Warden judges the body and then forwards it verbatim.
+// Go's encoding/json matches object keys to struct fields case-insensitively,
+// so an upstream built on it — the go-sdk included — honours "Arguments" and
+// "Notifications" exactly as it honours the canonical spelling. An
+// exact-match lookup here would read neither, and for the fields that are
+// optional that means the gate silently passes something the upstream then
+// acts on. Matching the same way the decoder downstream will is what closes
+// that; two spellings at once is unresolvable, since the decoder picks one by
+// map order, so it fails closed.
+//
+// This mirrors the reasoning already applied to method names above: be more
+// permissive in what is recognised, so a case-mismatch cannot route around
+// the policy.
+func lookupParamKey(obj map[string]json.RawMessage, key, method string) (json.RawMessage, bool, *ParseError) {
+	var found json.RawMessage
+	var seen bool
+	for k, v := range obj {
+		if !strings.EqualFold(k, key) {
+			continue
+		}
+		if seen {
+			return nil, false, &ParseError{
+				Kind: ErrKindMalformedParams,
+				Msg:  method + " params has more than one spelling of " + key,
+			}
+		}
+		found, seen = v, true
+	}
+	return found, seen, nil
 }
 
 // extractToolsCall populates Name from params.name (required, non-empty
 // string) and Arguments from params.arguments (optional, must be an
 // object when present).
-func extractToolsCall(req *JSONRPCRequest) *ParseError {
+func extractToolsCall(req *JSONRPCRequest, top map[string]json.RawMessage, isObject bool) *ParseError {
 	if len(req.RawParams) == 0 {
 		return &ParseError{Kind: ErrKindMalformedParams, Msg: "tools/call missing params"}
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(req.RawParams, &top); err != nil {
+	if !isObject {
 		return &ParseError{Kind: ErrKindMalformedParams, Msg: "tools/call params must be an object"}
 	}
 
-	nameRaw, ok := top["name"]
+	nameRaw, ok, perr := lookupParamKey(top, "name", "tools/call")
+	if perr != nil {
+		return perr
+	}
 	if !ok {
 		return &ParseError{Kind: ErrKindMalformedParams, Msg: "tools/call missing params.name"}
 	}
@@ -306,7 +576,15 @@ func extractToolsCall(req *JSONRPCRequest) *ParseError {
 	}
 	req.Name = name
 
-	if argsRaw, ok := top["arguments"]; ok {
+	// arguments is optional, which is what makes reading it case-insensitively
+	// load-bearing rather than cosmetic: MatchArgs feeds the CEL activation's
+	// call.args and the param gates, so a spelling Warden cannot see is a
+	// condition evaluated against arguments that were never there.
+	argsRaw, ok, perr := lookupParamKey(top, "arguments", "tools/call")
+	if perr != nil {
+		return perr
+	}
+	if ok {
 		var args map[string]json.RawMessage
 		if err := json.Unmarshal(argsRaw, &args); err != nil {
 			return &ParseError{Kind: ErrKindMalformedParams, Msg: "tools/call params.arguments must be an object"}
@@ -318,18 +596,21 @@ func extractToolsCall(req *JSONRPCRequest) *ParseError {
 }
 
 // extractByParamKey extracts Name from the named top-level params key
-// (required, non-empty string). Used for resources/read (key = "uri")
-// and prompts/get (key = "name").
-func extractByParamKey(req *JSONRPCRequest, key string) *ParseError {
+// (required, non-empty string). Used for the URI-bearing methods —
+// resources/read, resources/subscribe, resources/directory/read and
+// skills/get (key = "uri") — and for prompts/get (key = "name").
+func extractByParamKey(req *JSONRPCRequest, top map[string]json.RawMessage, isObject bool, key string) *ParseError {
 	if len(req.RawParams) == 0 {
 		return &ParseError{Kind: ErrKindMalformedParams, Msg: req.Method + " missing params"}
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(req.RawParams, &top); err != nil {
+	if !isObject {
 		return &ParseError{Kind: ErrKindMalformedParams, Msg: req.Method + " params must be an object"}
 	}
 
-	raw, ok := top[key]
+	raw, ok, perr := lookupParamKey(top, key, req.Method)
+	if perr != nil {
+		return perr
+	}
 	if !ok {
 		return &ParseError{Kind: ErrKindMalformedParams, Msg: req.Method + " missing params." + key}
 	}

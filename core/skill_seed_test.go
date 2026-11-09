@@ -474,12 +474,37 @@ func TestSkillStore_SeedProviderSkill_RejectsNameMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected name-mismatch error, got nil")
 	}
-	if !strings.Contains(err.Error(), "does not match provider type") {
+	if !strings.Contains(err.Error(), "for provider type") {
 		t.Errorf("error %q does not mention mismatch", err.Error())
 	}
 	// And no skill should have been persisted.
 	if _, err := store.Get(ctx, "testprov"); !errors.Is(err, ErrSkillNotFound) {
 		t.Errorf("Get after rejected seed: got %v, want ErrSkillNotFound", err)
+	}
+}
+
+// A provider type with an underscore ships a skill named with a hyphen:
+// mcp_aws seeds mcp-aws, which is what logical.SkillNameForProvider derives.
+func TestSkillStore_SeedProviderSkill_UnderscoreTypeSeedsHyphenatedName(t *testing.T) {
+	store, ctx := setupTestSkillStore(t)
+
+	md := strings.Replace(providerSkillMD, "name: testprov", "name: test-prov", 1)
+	md = strings.Replace(md, "provider: testprov", "provider: test_prov", 1)
+	if err := store.SeedProviderSkill(ctx, "test_prov", md); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	got, err := store.Get(ctx, "test-prov")
+	if err != nil {
+		t.Fatalf("Get test-prov: %v", err)
+	}
+	if got.Provider != "test_prov" {
+		t.Errorf("Provider = %q, want the raw type test_prov", got.Provider)
+	}
+
+	// The underscore spelling in the frontmatter is now a wiring error.
+	bad := strings.Replace(providerSkillMD, "name: testprov", "name: test_prov", 1)
+	if err := store.SeedProviderSkill(ctx, "test_prov", bad); err == nil {
+		t.Fatalf("expected an error for frontmatter name test_prov")
 	}
 }
 

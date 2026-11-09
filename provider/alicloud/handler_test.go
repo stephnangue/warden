@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logical"
@@ -253,6 +254,59 @@ func TestHandleGateway_ForwardsSignedRequest(t *testing.T) {
 	assert.NotContains(t, receivedAuth, "Credential=role-reader")
 	assert.Equal(t, "DescribeInstances", receivedAction, "x-acs-action must be preserved")
 	assert.Equal(t, body, receivedBody, "body must be forwarded unchanged")
+}
+
+// silentUpstream never answers: it waits for the request's context to end.
+var silentUpstream = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+	<-r.Context().Done()
+	return nil, r.Context().Err()
+})
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func signedGatewayRequest(t *testing.T, rec *httptest.ResponseRecorder) *logical.Request {
+	t.Helper()
+	return &logical.Request{
+		HTTPRequest:    signClientRequest(t, "POST", "https://ecs.cn-hangzhou.aliyuncs.com/", `{}`, "role-reader", "role-reader", ""),
+		ResponseWriter: rec,
+		Credential: &credential.Credential{
+			Type: credential.TypeAlicloudKeys,
+			Data: map[string]string{
+				"access_key_id":     "LTAI-real-id",
+				"access_key_secret": "real-secret",
+			},
+		},
+	}
+}
+
+// The mount's timeout passing before the upstream answers is a 504: the
+// client is still waiting.
+func TestHandleGateway_UpstreamTooSlowAnswers504(t *testing.T) {
+	b := setupBackend(t)
+	b.SetTimeout(20 * time.Millisecond)
+	b.SetTransport(silentUpstream)
+
+	rec := httptest.NewRecorder()
+	b.handleGateway(context.Background(), signedGatewayRequest(t, rec))
+
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code)
+	assert.Equal(t, "Gateway Timeout\n", rec.Body.String())
+}
+
+// A client that went away gets nothing written: no one is reading.
+func TestHandleGateway_ClientGoneWritesNothing(t *testing.T) {
+	b := setupBackend(t)
+	b.SetTransport(silentUpstream)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := httptest.NewRecorder()
+	b.handleGateway(ctx, signedGatewayRequest(t, rec))
+
+	assert.Empty(t, rec.Header())
+	assert.Zero(t, rec.Body.Len())
 }
 
 // TestHandleGateway_JWTSecurityToken covers the JWT transparent auth path

@@ -131,6 +131,34 @@ func TestOpenAICredentialExtractor_EmptyAPIKey(t *testing.T) {
 	assert.ErrorContains(t, err, "missing api_key")
 }
 
+// A federated token is bound to one service account, and so to its project and
+// organization: the bearer goes out alone, even when stray org/project values
+// sit in the credential.
+func TestOpenAICredentialExtractor_FederatedBearer(t *testing.T) {
+	headers, err := openaiCredentialExtractor(&logical.Request{
+		Credential: &credential.Credential{
+			Type: credential.TypeOAuthBearerToken,
+			Data: map[string]string{
+				"api_key":         "openai-federated-not-a-real-token",
+				"organization_id": "org-abc123",
+				"project_id":      "proj_abc123",
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"Authorization": "Bearer openai-federated-not-a-real-token"}, headers)
+}
+
+func TestOpenAICredentialExtractor_FederatedBearerMissing(t *testing.T) {
+	_, err := openaiCredentialExtractor(&logical.Request{
+		Credential: &credential.Credential{
+			Type: credential.TypeOAuthBearerToken,
+			Data: map[string]string{},
+		},
+	})
+	assert.ErrorContains(t, err, "credential missing bearer token")
+}
+
 // The optional headers are also the ones a caller could otherwise set for
 // itself, so the spec must list them for removal — the extractor injecting them
 // is only half of the guarantee.

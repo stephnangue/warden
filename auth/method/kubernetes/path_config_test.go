@@ -23,11 +23,12 @@ func TestPathConfig_FieldsPresent(t *testing.T) {
 	for _, name := range []string{
 		"kubernetes_host", "kubernetes_ca_cert", "token_reviewer_jwt",
 		"tls_skip_verify", "issuer", "disable_iss_validation",
-		"token_ttl", "default_role",
+		"token_ttl",
 	} {
 		_, ok := p.Fields[name]
 		assert.True(t, ok, "expected field %q", name)
 	}
+	assert.NotContains(t, p.Fields, "default_role", "default_role was removed")
 }
 
 func TestHandleConfigRead_EmptyConfigReturnsEmptyData(t *testing.T) {

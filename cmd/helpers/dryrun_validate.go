@@ -32,6 +32,7 @@ type bodySchema struct {
 
 type propertySchema struct {
 	typ           string // "string" | "integer" | "number" | "boolean" | "array" | "object"
+	format        string // e.g. "seconds" for a duration the server also takes as "10m"
 	allowedValues []any
 	description   string
 }
@@ -137,6 +138,14 @@ func extractBodySchema(doc map[string]any, method string) bodySchema {
 	}
 
 	op, _ := item[strings.ToLower(method)].(map[string]any)
+	// The server documents a path's create and update bodies once, under
+	// "post". A PUT finds its body there; the required list is not applied to
+	// it, since it is the create's and an update sends only what changes.
+	putFallback := false
+	if op == nil && strings.EqualFold(method, "PUT") {
+		op, _ = item["post"].(map[string]any)
+		putFallback = true
+	}
 	if op == nil {
 		return out
 	}
@@ -169,7 +178,7 @@ func extractBodySchema(doc map[string]any, method string) bodySchema {
 	out.notDocumented = false
 	out.properties = make(map[string]propertySchema, len(props))
 	out.required = map[string]bool{}
-	if reqd, ok := resolved["required"].([]any); ok {
+	if reqd, ok := resolved["required"].([]any); ok && !putFallback {
 		for _, r := range reqd {
 			if s, ok := r.(string); ok {
 				out.required[s] = true
@@ -185,6 +194,7 @@ func extractBodySchema(doc map[string]any, method string) bodySchema {
 		pm = resolveSchemaRef(pm, componentSchemas)
 		ps := propertySchema{}
 		ps.typ, _ = pm["type"].(string)
+		ps.format, _ = pm["format"].(string)
 		ps.description, _ = pm["description"].(string)
 		if enum, ok := pm["enum"].([]any); ok {
 			ps.allowedValues = enum
@@ -280,6 +290,11 @@ func checkType(name string, value any, ps propertySchema) string {
 	case "integer", "number":
 		switch value.(type) {
 		case int, int64, float64:
+		case string:
+			// A duration in seconds is also taken as a duration string ("10m").
+			if ps.format != "seconds" {
+				return fmt.Sprintf("field %q expects %s; got %T", name, ps.typ, value)
+			}
 		default:
 			return fmt.Sprintf("field %q expects %s; got %T", name, ps.typ, value)
 		}

@@ -13,8 +13,8 @@ a repo it has no role for, and Warden refuses it at the gateway.
 
 An agent authenticates to Warden with a JWT from **Ory Hydra**. It holds nothing else: no
 GitHub token (Warden injects that per request), and no standing GitHub access. Every call
-**names a role**, Warden resolves that role fresh, and only the roles the agent's identity is
-admitted to ever resolve.
+**names a role**, Warden resolves that role fresh, and only the roles a group grants to the
+agent's identity ever resolve.
 
 | | One broad token (ambient authority) | Per-call role assertion (this tutorial) |
 |---|---|---|
@@ -36,31 +36,34 @@ There is nothing per-request deciding *which* task is allowed to do *what*.
 ## The solution
 
 Give the agent one identity and put **roles** between it and GitHub. A role is a named,
-reusable definition — set by an operator — that Warden resolves **on every request** into
-three things: *who may assume it* (the identity binding), *what it may do* (its policy), and
-*what credential Warden mints* upstream. The agent asks Warden *"what may I do?"*
+reusable definition — set by an operator — of *what it may do* (its policies) and *what
+credential Warden mints* upstream. A **group** decides *who holds it*: its rules match the
+facts the auth mount verified about the caller. On every request Warden authenticates the
+caller, resolves the roles its groups grant, and authorizes the call under the role it names.
+The agent asks Warden *"what may I do?"*
 ([`list_roles`](/concepts/mcp/#warden-as-an-mcp-server-discovery-interface)), gets back only
-the roles its identity is admitted to, and **asserts one role per call** by pointing at that
-role's gateway. Authority rides on the call, never on the connection — so there is no ambient
-grant to reuse, and a task can only ever touch its own slice. See [Roles](/concepts/roles/)
+the roles its groups grant, and **asserts one role per call** by pointing at that role's
+gateway. Authority rides on the call, never on the connection — so there is no ambient
+grant to reuse, and a task can only ever touch its own slice. See [Roles](/identity/roles/)
 and [Runtime authorization](/use-cases/runtime-authorization/) for the full picture.
 
 ### The four roles
 
-All four front the same `github-mcp` mount; each projects a different slice of it. Three bind
-to the agent's identity; the fourth binds to a different one.
+All four front the same `github-mcp` mount; each projects a different slice of it. One group
+grants three of them to the agent's identity; another group grants the fourth to a different
+identity.
 
 | Role | What its policy grants | Scoped to repo | Agent can assume? |
 |------|------------------------|----------------|-------------------|
 | `repo-lifecycle` | create the repo, write & delete its files | `warden-role-assertion` | ✅ |
 | `issue-triage` | open & close issues | `warden-role-assertion` | ✅ |
 | `repo-reader` | read files | `warden-role-assertion` | ✅ |
-| `forbidden-repo-lifecycle` | create the repo, write & delete its files | `warden-forbidden` | ❌ — bound to another identity |
+| `forbidden-repo-lifecycle` | create the repo, write & delete its files | `warden-forbidden` | ❌ — granted to another identity |
 
 The fourth role is real and fully functional — it just belongs to a **different principal**
-(think: a human admin). The agent holds the wrong identity for it, so Warden never admits the
-agent to it: it is invisible in `list_roles` and rejected at the gateway. That is the whole
-lesson — the wall is the identity binding, checked on every request.
+(think: a human admin). No group grants it to the agent's identity, so it is invisible in
+`list_roles` and rejected at the gateway. That is the whole lesson — the wall is the group's
+rule, checked on every request.
 
 ### Prerequisites
 
@@ -72,7 +75,7 @@ lesson — the wall is the identity binding, checked on every request.
   whole point: no agent you launch from this shell (Claude included) ever sees it.
 - The **Warden CLI + server** binary. This installs the latest release for your platform:
   ```bash
-  curl -sL https://wardengateway.com/install | bash
+  curl -sL https://wardengateway.com/install.sh | bash
   warden --version      # confirm it's on your PATH
   ```
 
@@ -98,8 +101,8 @@ docker compose logs hydra-client-init | grep my-agent   # ->  [OK] my-agent
 
 This runs Ory Hydra with an in-memory database and one pre-created client, `my-agent` /
 `agent-secret`, that mints JWTs via the OAuth2 `client_credentials` grant. For that grant the
-JWT's `sub` claim is the client id — `my-agent` — which is exactly the identity our roles
-bind against.
+JWT's `sub` claim is the client id — `my-agent` — which is exactly the value our groups
+match on.
 
 ### Step 2 — start Warden (dev mode)
 
@@ -120,16 +123,21 @@ warden status          # sealed: false
 
 ### Step 3 — trust Hydra's JWTs
 
-Enable the [JWT auth method](/auth-methods/jwt/) and point it at Hydra via OIDC discovery.
-Warden runs on your host, so it reaches Hydra at `localhost:4444` for both discovery and key
-fetching:
+Enable the [JWT auth method](/auth-methods/jwt/) and point it at Hydra's signing keys.
+Warden runs on your host, so it reaches Hydra at `localhost:4444`:
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config \
-  oidc_discovery_url=http://localhost:4444 \
-  bound_issuer=http://localhost:4444
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
+
+The mount admits a token signed by Hydra, issued by it, and minted for the audience `warden`.
+It records the token's `sub` as a fact, and as the caller's native identity. It grants no
+role: groups do, in Step 5.
 
 ### Step 4 — front GitHub's MCP server
 
@@ -148,7 +156,6 @@ warden provider enable -path=github-mcp -description="GitHub Copilot MCP" mcp
 warden write github-mcp/config \
   mcp_url=https://api.githubcopilot.com/mcp \
   auto_auth_path=auth/jwt/ \
-  timeout=10m \
   max_body_size=10485760
 ```
 
@@ -169,12 +176,18 @@ warden cred spec create github-ops -source github-src \
   -config mint_method=pat -config token=ghp_your_token_here
 ```
 
-See [GitHub MCP](/provider-backends/mcp-github/) for App-based and OAuth credential options.
+Storing the PAT in Warden keeps the tutorial short. In production, keep the secret in your own
+secret store and let Warden fetch it per request with
+[credential chaining](/federation/credential-chaining/) (`secret_spec`), so Warden holds nothing
+at rest. [GitHub MCP](/provider-backends/mcp-github/) covers the other credential options.
 
 ### Step 5 — define the four roles
 
-Each role is a **policy** (what it may do, scoped to one repo) plus a **role binding** (who
-may assume it, which credential it mints). Run the blocks below one at a time.
+Each role is a **policy** (what it may do, scoped to one repo) plus a **role** that names its
+policies and the credential it mints. Each role also names the mount it is used with,
+`"provider_path": "github-mcp/"`, so the discovery server can list the role with its gateway
+URL and the `mcp` provider's skill. Two groups then decide who holds which role. Run the
+blocks below one at a time.
 
 **1. `repo-lifecycle` — create `warden-role-assertion` and write & delete its files.**
 GitHub's MCP server has no repo-*deletion* tool, so a repo's "lifecycle" here is creating it
@@ -190,24 +203,26 @@ the tool listing works with no special-case for the method:
 warden policy write pol-repo-lifecycle - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["create_repository", "create_or_update_file", "delete_file"]
-    condition = <<-CEL
-      (!has(call.args.name) || call.args.name == "warden-role-assertion") &&
-      (!has(call.args.repo) || call.args.repo == "warden-role-assertion")
-    CEL
-  }
 }
 EOF
 
-warden write auth/jwt/role/repo-lifecycle \
-  bound_subject=my-agent \
-  token_policies=pol-repo-lifecycle \
-  user_claim=sub \
-  cred_spec_name=github-ops \
-  description="create the warden-role-assertion repo and write & delete its files (skill: mcp)" \
-  token_ttl=1h
+warden policy write -type mcp pol-repo-lifecycle-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools   { allowed = ["create_repository", "create_or_update_file", "delete_file"] }
+  condition = <<-CEL
+    (!has(call.args.name) || call.args.name == "warden-role-assertion") &&
+    (!has(call.args.repo) || call.args.repo == "warden-role-assertion")
+  CEL
+}
+EOF
+
+warden role create repo-lifecycle -json '{
+  "description": "create the warden-role-assertion repo and write & delete its files",
+  "policies": ["pol-repo-lifecycle", "pol-repo-lifecycle-calls"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github-mcp/"
+}'
 ```
 
 **2. `issue-triage` — open & close issues on `warden-role-assertion`.** GitHub's MCP server
@@ -219,23 +234,25 @@ clause scopes it; a `tools/list`, which has no `repo`, passes untouched:
 warden policy write pol-issue-triage - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["issue_write"]
-    condition = <<-CEL
-      !has(call.args.repo) || call.args.repo == "warden-role-assertion"
-    CEL
-  }
 }
 EOF
 
-warden write auth/jwt/role/issue-triage \
-  bound_subject=my-agent \
-  token_policies=pol-issue-triage \
-  user_claim=sub \
-  cred_spec_name=github-ops \
-  description="open & close issues on warden-role-assertion (skill: mcp)" \
-  token_ttl=1h
+warden policy write -type mcp pol-issue-triage-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools   { allowed = ["issue_write"] }
+  condition = <<-CEL
+    !has(call.args.repo) || call.args.repo == "warden-role-assertion"
+  CEL
+}
+EOF
+
+warden role create issue-triage -json '{
+  "description": "open & close issues on warden-role-assertion",
+  "policies": ["pol-issue-triage", "pol-issue-triage-calls"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github-mcp/"
+}'
 ```
 
 **3. `repo-reader` — read files in `warden-role-assertion`:**
@@ -244,52 +261,95 @@ warden write auth/jwt/role/issue-triage \
 warden policy write pol-repo-reader - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["get_file_contents"]
-    condition = <<-CEL
-      !has(call.args.repo) || call.args.repo == "warden-role-assertion"
-    CEL
-  }
 }
 EOF
 
-warden write auth/jwt/role/repo-reader \
-  bound_subject=my-agent \
-  token_policies=pol-repo-reader \
-  user_claim=sub \
-  cred_spec_name=github-ops \
-  description="read files in warden-role-assertion (skill: mcp)" \
-  token_ttl=1h
+warden policy write -type mcp pol-repo-reader-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools   { allowed = ["get_file_contents"] }
+  condition = <<-CEL
+    !has(call.args.repo) || call.args.repo == "warden-role-assertion"
+  CEL
+}
+EOF
+
+warden role create repo-reader -json '{
+  "description": "read files in warden-role-assertion",
+  "policies": ["pol-repo-reader", "pol-repo-reader-calls"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github-mcp/"
+}'
 ```
 
-**4. `forbidden-repo-lifecycle` — create & delete `warden-forbidden`, bound to a different
-identity.** The policy is fully functional; the only difference that matters is
-`bound_subject=admin-agent` — an identity the agent does **not** hold:
+**4. `forbidden-repo-lifecycle` — create & delete `warden-forbidden`, granted to a different
+identity.** The policy is fully functional; the only difference that matters is the group
+that grants it in block 5, whose rule matches `admin-agent` — an identity the agent does
+**not** hold:
 
 ```bash
 warden policy write pol-forbidden - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["create_repository", "create_or_update_file", "delete_file"]
-    condition = <<-CEL
-      (!has(call.args.name) || call.args.name == "warden-forbidden") &&
-      (!has(call.args.repo) || call.args.repo == "warden-forbidden")
-    CEL
-  }
 }
 EOF
 
-warden write auth/jwt/role/forbidden-repo-lifecycle \
-  bound_subject=admin-agent \
-  token_policies=pol-forbidden \
-  user_claim=sub \
-  cred_spec_name=github-ops \
-  description="create the warden-forbidden repo and write & delete its files (skill: mcp)" \
-  token_ttl=1h
+warden policy write -type mcp pol-forbidden-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools   { allowed = ["create_repository", "create_or_update_file", "delete_file"] }
+  condition = <<-CEL
+    (!has(call.args.name) || call.args.name == "warden-forbidden") &&
+    (!has(call.args.repo) || call.args.repo == "warden-forbidden")
+  CEL
+}
+EOF
+
+warden role create forbidden-repo-lifecycle -json '{
+  "description": "create the warden-forbidden repo and write & delete its files",
+  "policies": ["pol-forbidden", "pol-forbidden-calls"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github-mcp/"
+}'
 ```
+
+**5. Grant the roles.** A virtual group grants its roles to every caller whose facts match one
+of its rules. The first grants the three task roles to the token whose `sub` is `my-agent`;
+the second grants the fourth role to `admin-agent` only:
+
+```bash
+warden identity group create my-agent-tasks -json '{
+  "type": "virtual",
+  "description": "The tasks my-agent may run on warden-role-assertion",
+  "roles": ["repo-lifecycle", "issue-triage", "repo-reader"],
+  "rules": [
+    {
+      "mount": ["auth/jwt/"],
+      "sub": ["my-agent"]
+    }
+  ]
+}'
+
+warden identity group create admin-agent-tasks -json '{
+  "type": "virtual",
+  "description": "The admin identity that owns warden-forbidden",
+  "roles": ["forbidden-repo-lifecycle"],
+  "rules": [
+    {
+      "mount": ["auth/jwt/"],
+      "sub": ["admin-agent"]
+    }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The groups above grant roles to any caller their rules match: fine for this tutorial, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant its roles through a [static group](/identity/groups/) that lists the entity. Mark the roles `governed_only` so no virtual group can grant them. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+One identity, three roles. The agent picks one per request through the `role/<role>/` segment
+of the URL, and Warden checks on each request that a group grants it. See
+[Groups](/identity/groups/) for the rule syntax.
 
 Finally, turn on an audit log so you can watch every decision — which role carried each call,
 and why each was allowed or denied:
@@ -306,7 +366,7 @@ GitHub PAT, it's meant for Claude to present, so exporting it is fine:
 ```bash
 export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
+  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write&audience=warden" \
   | jq -r '.access_token')
 ```
 
@@ -362,9 +422,9 @@ gh-forbidden: ✗ Failed to connect
 ```
 
 The first proof, before Claude does anything: **`gh-forbidden` never connects.** Even the MCP
-handshake on that role fails, because the agent's identity (`sub=my-agent`) doesn't satisfy
-the role's `bound_subject=admin-agent`. The agent can't open a door it was never admitted to —
-there is no ambient authority to fall back on.
+handshake on that role fails, because no group grants it to the agent's identity
+(`sub` `my-agent`): the only group listing it matches `admin-agent`. The agent can't open a
+door no group opened for it — there is no ambient authority to fall back on.
 
 ### Step 7 — discover: what roles can I assume?
 
@@ -373,8 +433,9 @@ Open a `claude` session and ask, in plain language:
 > **use the warden mcp server to list the roles I can assume**
 
 Claude calls Warden's `list_roles` tool and reports exactly three: `repo-lifecycle`,
-`issue-triage`, and `repo-reader`, each with the description you set. `forbidden-repo-lifecycle`
-is **not on the list** — Warden only returns roles the presented identity is admitted to, so
+`issue-triage`, and `repo-reader`, each with the description you set, provider `mcp`, the skill
+`skill://mcp/SKILL.md`, and the gateway `url` you attached in Step 6. `forbidden-repo-lifecycle`
+is **not on the list** — Warden only returns roles a group grants to the presented identity, so
 the forbidden role doesn't exist as far as this agent is concerned. The menu the agent plans
 against is already scoped to its identity.
 
@@ -422,11 +483,12 @@ Now ask for the one thing no assumable role permits:
 It fails, and it fails at **two** independent walls — neither of which is the prompt:
 
 1. The role built for this, `forbidden-repo-lifecycle`, is unreachable: its gateway never
-   connected (Step 6), because the agent isn't admitted to it.
+   connected (Step 6), because no group grants it to the agent.
 2. The role the agent *does* hold for creating repos, `repo-lifecycle`, refuses:
    its policy's condition allows `create_repository` **only** when
    `name == "warden-role-assertion"`. A call with `name="warden-forbidden"` is denied at the
-   gateway before it reaches GitHub.
+   gateway before it reaches GitHub. Claude gets a JSON-RPC error for that one call — code
+   `-32090`, *"Warden: …"* — and its session to the gateway stays open.
 
 Claude has no path to `warden-forbidden` and tells you so. The agent could be confused,
 hallucinating, or actively manipulated — the answer is the same, because the boundary lives at
@@ -470,9 +532,12 @@ task. The injected GitHub token never appears in the clear — the audit layer s
 
 ## Troubleshooting
 
-- **`gh-forbidden` shows `✗`** — that's the expected result, not a setup error. The agent's
-  `sub` (`my-agent`) doesn't match the role's `bound_subject` (`admin-agent`), so Warden
-  refuses to admit it to that role at all.
+- **`gh-forbidden` shows `✗`** — that's the expected result, not a setup error. The only
+  group granting `forbidden-repo-lifecycle` matches `sub` `admin-agent`, and the agent's is
+  `my-agent`. A direct call answers `403` with `role "forbidden-repo-lifecycle" is not
+  assumable through auth/jwt/: no group grants it to this caller`.
+- **Every gateway shows `✗`, with `authentication failed`** — the token was not minted for the
+  audience `warden`. Mint it again with `&audience=warden` (Step 6).
 - **A gateway shows `✗` that should connect** — the JWT expired (1h TTL) or wasn't pasted
   literally. Mint a fresh one (Step 6), then `claude mcp remove <name>` and re-add. Quick
   connectivity check for one role:
@@ -487,6 +552,9 @@ task. The injected GitHub token never appears in the clear — the audit layer s
   an invalid PAT — Warden verifies it on creation). Re-run that command with a valid token.
 - **`404` from GitHub on a tool call** — trailing-slash mismatch. The gateway URL must end
   `…/gateway/`; the suffix after `gateway` is forwarded verbatim to GitHub's `…/mcp/`.
+- **`list_roles` shows a role with no `url`** — its `warnings` line says why. Check the role's
+  `"provider_path": "github-mcp/"` and that the mount's `auto_auth_path` is `auth/jwt/`, trailing
+  slash included.
 - **A task ran under the wrong role, or a role's tools look stale** — Claude fetches an MCP
   server's tool list once when a session starts and caches it for the session. After changing
   a policy or role, exit Claude (`/exit`) and start a fresh session so it re-fetches.

@@ -227,19 +227,19 @@ func (a *jwtAuthority) sign(t *testing.T, sub string, aud []string, exp time.Tim
 
 // --- login helpers ---
 
-func x509Login(t *testing.T, b *spiffeAuthBackend, ctx context.Context, role string, svid *x509.Certificate) *logical.Response {
+func x509Login(t *testing.T, b *spiffeAuthBackend, ctx context.Context, svid *x509.Certificate) *logical.Response {
 	t.Helper()
 	req := &logical.Request{HTTPRequest: newSVIDHTTPRequest(t, svid), ClientIP: "10.0.0.1"}
-	d := &framework.FieldData{Raw: map[string]any{"role": role}, Schema: b.pathLogin().Fields}
+	d := &framework.FieldData{Raw: map[string]any{}, Schema: b.pathLogin().Fields}
 	resp, err := b.handleLogin(ctx, req, d)
 	require.NoError(t, err)
 	return resp
 }
 
-func jwtLogin(t *testing.T, b *spiffeAuthBackend, ctx context.Context, role, token string) *logical.Response {
+func jwtLogin(t *testing.T, b *spiffeAuthBackend, ctx context.Context, token string) *logical.Response {
 	t.Helper()
 	req := &logical.Request{ClientIP: "10.0.0.1"}
-	d := &framework.FieldData{Raw: map[string]any{"role": role, "jwt": token}, Schema: b.pathLogin().Fields}
+	d := &framework.FieldData{Raw: map[string]any{"jwt": token}, Schema: b.pathLogin().Fields}
 	resp, err := b.handleLogin(ctx, req, d)
 	require.NoError(t, err)
 	return resp

@@ -105,6 +105,25 @@ func TestMCPFilter_DeniedToolIsRemovedFromTheListing(t *testing.T) {
 	}
 }
 
+// TestMCPFilter_ToolDeniedByAnotherContractIsHidden: a wildcard contract would
+// keep the whole listing and skip the filter, but a denied list in another
+// contract is final, so the tool it names leaves the listing.
+func TestMCPFilter_ToolDeniedByAnotherContractIsHidden(t *testing.T) {
+	ensureEnv(t)
+	env := mcpMountGovernedBy(t, "fc-mcp-denied-list", h.MCPUnrestricted)
+	attachMCPContract(t, env, "fc-mcp-denied-list-guard", "*", mcpDeniesTheDeniedTool)
+	upstream.SetHandler(t, mcpToolsListUpstream(mcpToolsListBody(), "application/json"))
+
+	status, body := callMCP(t, env, "", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body: %s)", status, body)
+	}
+	assertUpstreamServed(t)
+	if got := toolNames(t, body); len(got) != 1 || got[0] != mcpAllowedTool {
+		t.Errorf("advertised tools: got %v, want only %q", got, mcpAllowedTool)
+	}
+}
+
 // assertUpstreamServed confirms the request reached the upstream exactly once.
 //
 // Worth stating explicitly on these rows because the response path and the
@@ -222,4 +241,218 @@ func tryToolNames(body []byte) []string {
 		names = append(names, tool.Name)
 	}
 	return names
+}
+
+// TestMCPFilter_NoContractDeniesTheListing is the absence deny proven end to
+// end, and it is the row that changed direction. A mount with a capability
+// grant and no tool contract used to return the upstream's whole catalog; it
+// now refuses, and the upstream is never reached at all.
+//
+// That inversion is the point of the contract being a separate document: the
+// state an operator lands in by forgetting to attach one is no longer
+// indistinguishable from deliberately opening the mount.
+func TestMCPFilter_NoContractDeniesTheListing(t *testing.T) {
+	ensureEnv(t)
+	upstream.SetHandler(t, mcpToolsListUpstream(mcpToolsListBody(), "application/json"))
+
+	status, body, _ := h.ChainRequest(t, leaderPort, mcpNoContractEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         mcpNoContractEnv.CertRole(),
+		Body:         `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+	})
+
+	if status != http.StatusForbidden {
+		t.Fatalf("status: got %d, want 403 (body: %s)", status, body)
+	}
+	// The status alone would also be satisfied by a contract that exists and
+	// refuses, or by an auth failure. The description is what says the refusal
+	// was the *absence* — and it is the sentence pointing the operator at the
+	// missing contract rather than at the call they made.
+	if !strings.Contains(string(body), "No MCP policy permits this request") {
+		t.Errorf("body: got %s, want the absence-deny description — a bare 403 does not "+
+			"distinguish a missing contract from a restrictive one", body)
+	}
+	if names := tryToolNames(body); len(names) != 0 {
+		t.Errorf("a refused listing advertised %v — nothing may be disclosed", names)
+	}
+	if n := len(upstream.Requests()); n != 0 {
+		t.Errorf("upstream served %d requests, want 0 — the denial must precede the proxy", n)
+	}
+}
+
+// TestMCPFilter_UnrestrictedContractServesTheWholeListing is the escape hatch.
+// A wildcard contract must be equivalent to the ungoverned mount it replaces:
+// the caller sees every tool the upstream advertises, unmodified.
+func TestMCPFilter_UnrestrictedContractServesTheWholeListing(t *testing.T) {
+	ensureEnv(t)
+	upstream.SetHandler(t, mcpToolsListUpstream(mcpToolsListBody(), "application/json"))
+
+	status, body, _ := h.ChainRequest(t, leaderPort, mcpGitHubEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         mcpGitHubEnv.CertRole(),
+		Body:         `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+	})
+
+	if status != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body: %s)", status, body)
+	}
+	got := toolNames(t, body)
+	if len(got) != 2 {
+		t.Errorf("advertised tools: got %v, want both — a wildcard contract must not prune", got)
+	}
+	assertUpstreamServed(t)
+}
+
+// TestMCPFilter_UnrestrictedContractDoesNotBufferLargeListings is the guard on
+// the no-op short-circuit, and the row most likely to be found in production
+// rather than in CI without it.
+//
+// Attaching a keep-everything filter is not free: the gateway buffers the whole
+// upstream response to rewrite it, and fails closed above max_body_size. So a
+// wildcard contract — the sanctioned way to open a mount — would be *more*
+// brittle than the ungoverned mount it replaces, on exactly the catalogs a real
+// MCP server serves.
+//
+// The mount caps bodies deliberately low and the listing is sized well past it,
+// because the two outcomes are otherwise indistinguishable: a filter that keeps
+// everything and no filter at all produce the same bytes. Only the cap
+// separates them. Remove the short-circuit and this row answers 502.
+func TestMCPFilter_UnrestrictedContractDoesNotBufferLargeListings(t *testing.T) {
+	ensureEnv(t)
+
+	// Built from tools the wildcard contract permits, so nothing but the
+	// buffering could refuse it.
+	var sb strings.Builder
+	sb.WriteString(`{"jsonrpc":"2.0","id":1,"result":{"tools":[`)
+	for i := 0; sb.Len() < 4*mcpBodyCapBytes; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, `{"name":"tool_%d","description":"a tool"}`, i)
+	}
+	sb.WriteString(`]}}`)
+	listing := sb.String()
+	if len(listing) <= mcpBodyCapBytes {
+		t.Fatalf("fixture is %d bytes, which does not exceed the mount's %d-byte cap — "+
+			"this row would pass whether or not the filter was skipped",
+			len(listing), mcpBodyCapBytes)
+	}
+	upstream.SetHandler(t, mcpToolsListUpstream(listing, "application/json"))
+
+	env := mcpUnrestrictedSmallCapEnv
+	status, body, _ := h.ChainRequest(t, leaderPort, env, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         env.CertRole(),
+		Body:         `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+	})
+
+	if status != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body: %.200s) — an unrestricted contract must "+
+			"stream rather than buffer, or a large catalog fails above max_body_size",
+			status, body)
+	}
+	assertUpstreamServed(t)
+	if got := len(toolNames(t, body)); got == 0 {
+		t.Errorf("the caller received no tools from a listing the contract permits in full")
+	}
+}
+
+// mcpSkillsListBody is a skills/list page offering the skill the policy grants
+// and one it does not. Each entry is complete, as SEP-2640 requires.
+func mcpSkillsListBody() string {
+	entry := func(root, name string) string {
+		return fmt.Sprintf(`{"uri":%q,"frontmatter":{"name":%q,"description":"d"},`+
+			`"resources":[{"uri":%q,"digest":"sha256:00","size":1}]}`,
+			root+"/SKILL.md", name, root+"/SKILL.md")
+	}
+	return `{"jsonrpc":"2.0","id":1,"result":{"skills":[` +
+		entry(mcpAllowedSkill, "fc-allowed-skill") + `,` +
+		entry(mcpDeniedSkill, "fc-denied-skill") + `]}}`
+}
+
+// skillURIs pulls the advertised skill URIs out of a skills/list body.
+func skillURIs(t *testing.T, body []byte) []string {
+	t.Helper()
+	var env struct {
+		Result struct {
+			Skills []struct {
+				URI string `json:"uri"`
+			} `json:"skills"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("parsing the skills/list response %q: %v", body, err)
+	}
+	uris := make([]string, 0, len(env.Result.Skills))
+	for _, s := range env.Result.Skills {
+		uris = append(uris, s.URI)
+	}
+	return uris
+}
+
+// TestMCPFilter_DeniedSkillIsRemovedFromTheListing is the Skills-extension
+// twin of the tools row: an upstream advertising two skills, a contract
+// granting one, and a caller who receives only that one. Skills answer to the
+// resources family, so it is allowed_resources that decides, by the skill's
+// SKILL.md URI.
+//
+// These rows send no MCP-Protocol-Version, so they run in the legacy era; the
+// transport-header checks are covered in-process.
+func TestMCPFilter_DeniedSkillIsRemovedFromTheListing(t *testing.T) {
+	ensureEnv(t)
+	upstream.SetHandler(t, mcpToolsListUpstream(mcpSkillsListBody(), "application/json"))
+
+	status, body, _ := h.ChainRequest(t, leaderPort, mcpSkillsEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         mcpSkillsEnv.CertRole(),
+		Body:         `{"jsonrpc":"2.0","id":1,"method":"skills/list"}`,
+	})
+
+	if status != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body: %s)", status, body)
+	}
+
+	want := mcpAllowedSkill + "/SKILL.md"
+	if got := skillURIs(t, body); len(got) != 1 || got[0] != want {
+		t.Errorf("advertised skills: got %v, want only %q — the denied skill was listed to a "+
+			"caller who cannot fetch it", got, want)
+	}
+
+	assertUpstreamServed(t)
+	if offered := skillURIs(t, []byte(mcpSkillsListBody())); len(offered) != 2 {
+		t.Fatalf("the fixture advertised %v; it must offer both skills for this row to mean "+
+			"anything", offered)
+	}
+}
+
+// TestMCPFilter_SkillsGetOutsideGrantIsRefused covers the request side. skills/get
+// names its skill by URI, so a skill outside the grant is refused before the
+// upstream is asked to describe it. The description is what shows the resources
+// gate fired: the method is open on this mount, so a method refusal is ruled out.
+func TestMCPFilter_SkillsGetOutsideGrantIsRefused(t *testing.T) {
+	ensureEnv(t)
+	upstream.SetHandler(t, mcpToolsListUpstream(`{"jsonrpc":"2.0","id":1,"result":{}}`, "application/json"))
+
+	denied := mcpDeniedSkill + "/SKILL.md"
+	status, body, _ := h.ChainRequest(t, leaderPort, mcpSkillsEnv, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         mcpSkillsEnv.CertRole(),
+		Body:         `{"jsonrpc":"2.0","id":1,"method":"skills/get","params":{"uri":"` + denied + `"}}`,
+	})
+
+	if status != http.StatusForbidden {
+		t.Fatalf("status: got %d, want 403 (body: %s)", status, body)
+	}
+	// The decision carries the name lowercased, as the gate compared it.
+	if want := "Resource '" + strings.ToLower(denied) + "' not allowed."; !strings.Contains(string(body), want) {
+		t.Errorf("body: got %s, want %q — the refusal must come from the resources gate", body, want)
+	}
+	if n := len(upstream.Requests()); n != 0 {
+		t.Errorf("upstream served %d requests, want 0 — the denial must precede the proxy", n)
+	}
 }

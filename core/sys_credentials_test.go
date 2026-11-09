@@ -2,12 +2,22 @@ package core
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
+	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -19,11 +29,13 @@ func createHVaultSource(t *testing.T, backend *SystemBackend, ctx context.Contex
 	t.Helper()
 	sourceSchema := backend.pathCredentials()[0].Fields
 	sourceRaw := map[string]interface{}{
-		"name":            name,
-		"type":            "hvault",
-		"rotation_period": 86400, // 24 hours
+		"name": name,
+		"type": "hvault",
 		"config": map[string]interface{}{
-			"vault_address": "http://localhost:8200",
+			"vault_address":   "http://localhost:8200",
+			"tls_skip_verify": true,
+			"auth_method":     "oidc_federation",
+			"jwt_role":        "warden",
 		},
 	}
 	sourceReq := createTestRequest(logical.CreateOperation, "cred/sources/"+name, sourceRaw)
@@ -43,7 +55,7 @@ func TestSystemBackend_PathCredentials(t *testing.T) {
 	backend, _, _ := setupTestSystemBackend(t)
 
 	paths := backend.pathCredentials()
-	require.Len(t, paths, 6) // sources CRUD, sources list, specs CRUD, specs list, specs authorize, specs connect
+	require.Len(t, paths, 8) // sources CRUD, sources list, specs CRUD, specs list, specs authorize, specs connect, keyless plans
 
 	// Check sources/{name} path
 	assert.Equal(t, "cred/sources/"+framework.GenericNameRegex("name"), paths[0].Pattern)
@@ -60,6 +72,10 @@ func TestSystemBackend_PathCredentials(t *testing.T) {
 	// Check specs connect-flow paths
 	assert.Equal(t, "cred/specs/"+framework.GenericNameRegex("name")+"/authorize", paths[4].Pattern)
 	assert.Equal(t, "cred/specs/"+framework.GenericNameRegex("name")+"/connect", paths[5].Pattern)
+
+	// Check keyless-plan paths
+	assert.Equal(t, "cred/sources/"+framework.GenericNameRegex("name")+"/keyless-plan", paths[6].Pattern)
+	assert.Equal(t, "cred/specs/"+framework.GenericNameRegex("name")+"/keyless-plan", paths[7].Pattern)
 }
 
 func TestSystemBackend_HandleCredentialSourceCreate(t *testing.T) {
@@ -105,6 +121,78 @@ func TestSystemBackend_HandleCredentialSourceRead(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "test-source", resp.Data["name"])
+}
+
+// A source holding a certificate shows its expiry and thumbprints on read, while
+// its private key stays masked.
+func TestSystemBackend_HandleCredentialSourceRead_CertificateInfo(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	notAfter := time.Now().Add(10 * 24 * time.Hour).Truncate(time.Second)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(7), Subject: pkix.Name{CommonName: "warden-entra"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: notAfter}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+
+	// The source's connection test reaches this, never the real Entra ID.
+	entra := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"t","expires_in":3600}`))
+	}))
+	defer entra.Close()
+
+	require.NoError(t, backend.core.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "entra-cert", Type: credential.SourceTypeAzure,
+		Config: credential.NewConfig(map[string]string{
+			"auth_method":    "certificate",
+			"tenant_id":      "00000000-0000-0000-0000-000000000001",
+			"client_id":      "11111111-1111-1111-1111-111111111111",
+			"certificate":    certPEM,
+			"private_key":    keyPEM,
+			"login_endpoint": entra.URL,
+		}),
+	}))
+
+	schema := backend.pathCredentials()[0].Fields
+	raw := map[string]interface{}{"name": "entra-cert"}
+	resp, err := backend.handleCredentialSourceRead(ctx,
+		createTestRequest(logical.ReadOperation, "cred/sources/entra-cert", raw), createFieldData(schema, raw))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	info, ok := resp.Data["certificate_info"].(map[string]any)
+	require.True(t, ok, "certificate_info is shown: %+v", resp.Data)
+	assert.Equal(t, "CN=warden-entra", info["subject"])
+	assert.Equal(t, notAfter.UTC().Format(time.RFC3339), info["not_after"])
+	assert.Equal(t, 9, info["days_remaining"])
+	s256 := sha256.Sum256(der)
+	assert.Equal(t, base64.RawURLEncoding.EncodeToString(s256[:]), info["x5t_s256"])
+	assert.Len(t, info["thumbprint_sha1"], 40)
+
+	cfg := resp.Data["config"].(map[string]string)
+	assert.Equal(t, certPEM, cfg["certificate"], "the certificate is public")
+	assert.NotContains(t, cfg["private_key"], "PRIVATE KEY", "the private key is masked")
+	assert.NotContains(t, info, "private_key")
+	assert.Equal(t, []string{"private_key"}, resp.Data["stored_secrets"], "a local key is a stored secret")
+
+	// So keyless enforcement refuses a certificate source as it does a static one.
+	backend.core.keylessEnforcement = KeylessEnforcementEnforce
+	createRaw := map[string]interface{}{
+		"name": "entra-cert-2", "type": "azure",
+		"config": map[string]interface{}{
+			"auth_method": "certificate", "tenant_id": "00000000-0000-0000-0000-000000000001",
+			"client_id": "11111111-1111-1111-1111-111111111111", "certificate": certPEM,
+			"private_key": keyPEM, "login_endpoint": entra.URL,
+		},
+	}
+	createResp, err := backend.handleCredentialSourceCreate(ctx,
+		createTestRequest(logical.CreateOperation, "cred/sources/entra-cert-2", createRaw), createFieldData(schema, createRaw))
+	require.NoError(t, err)
+	assert.NotEqual(t, http.StatusCreated, createResp.StatusCode, "enforce refuses a stored private key")
 }
 
 func TestSystemBackend_HandleCredentialSourceRead_NotFound(t *testing.T) {
@@ -171,6 +259,69 @@ func TestSystemBackend_HandleCredentialSourceUpdate(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Data["message"], "Successfully updated")
+}
+
+// A config-only update must not disturb the rotation period — that is what lets an
+// ordinary edit leave rotation alone — but a caller that names it must be able to
+// change it, including to zero. Without the second half, a rotating source can
+// never be converted to draw its secret from a referenced spec: such a source is
+// refused a rotation_period, and delete-and-recreate is blocked while specs
+// reference it.
+func TestSystemBackend_HandleCredentialSourceUpdate_RotationPeriod(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	schema := backend.pathCredentials()[0].Fields
+
+	createRaw := map[string]interface{}{
+		"name":   "rotating-source",
+		"type":   "local",
+		"config": map[string]interface{}{"key": "value1"},
+		// Above DefaultMinCredSourceRotationPeriod; a shorter one is refused, and the
+		// handler reports that as a response rather than an error.
+		"rotation_period": int(48 * time.Hour / time.Second),
+	}
+	req := createTestRequest(logical.CreateOperation, "cred/sources/rotating-source", createRaw)
+	createResp, err := backend.handleCredentialSourceCreate(ctx, req, createFieldData(schema, createRaw))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, createResp.StatusCode, "create failed: %v", createResp.Data)
+
+	readBack := func(t *testing.T) time.Duration {
+		t.Helper()
+		src, err := backend.core.credConfigStore.GetSource(ctx, "rotating-source")
+		require.NoError(t, err)
+		return src.RotationPeriod
+	}
+	require.Equal(t, 48*time.Hour, readBack(t))
+
+	t.Run("absent leaves it alone", func(t *testing.T) {
+		raw := map[string]interface{}{
+			"name":   "rotating-source",
+			"config": map[string]interface{}{"key": "value2"},
+		}
+		_, err := backend.handleCredentialSourceUpdate(ctx, req, createFieldData(schema, raw))
+		require.NoError(t, err)
+		assert.Equal(t, 48*time.Hour, readBack(t))
+	})
+
+	t.Run("supplied changes it", func(t *testing.T) {
+		raw := map[string]interface{}{
+			"name":            "rotating-source",
+			"rotation_period": int(72 * time.Hour / time.Second),
+		}
+		_, err := backend.handleCredentialSourceUpdate(ctx, req, createFieldData(schema, raw))
+		require.NoError(t, err)
+		assert.Equal(t, 72*time.Hour, readBack(t))
+	})
+
+	// The case the chaining migration needs.
+	t.Run("zero clears it", func(t *testing.T) {
+		raw := map[string]interface{}{
+			"name":            "rotating-source",
+			"rotation_period": 0,
+		}
+		_, err := backend.handleCredentialSourceUpdate(ctx, req, createFieldData(schema, raw))
+		require.NoError(t, err)
+		assert.Zero(t, readBack(t))
+	})
 }
 
 func TestSystemBackend_HandleCredentialSourceDelete(t *testing.T) {
@@ -340,6 +491,91 @@ func TestSystemBackend_HandleCredentialSpecCreate_InvalidTTL(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestSystemBackend_HandleCredentialSpec_AssertionTTLWarning pins that a spec
+// requesting a longer assertion_ttl than the issuer's is ACCEPTED (the issuer caps it
+// at mint, and a rejection would go stale once the issuer's value changes) but is
+// told so, in the response data where the operator will actually see it.
+func TestSystemBackend_HandleCredentialSpec_AssertionTTLWarning(t *testing.T) {
+	backend, ctx, core := setupTestSystemBackend(t)
+	core.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.Equal(t, defaultAssertionTTL, core.OIDCIssuer().AssertionTTL(), "precondition: 5m ceiling")
+	require.NoError(t, core.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-fed", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"}),
+	}))
+
+	schema := backend.pathCredentials()[2].Fields
+	specRaw := func(name, ttl string) map[string]interface{} {
+		return map[string]interface{}{
+			"name":   name,
+			"type":   "aws_access_keys",
+			"source": "aws-fed",
+			"config": map[string]interface{}{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+				credential.ConfigAssertionTTL:       ttl,
+				"mint_method":                       "sts_assume_role",
+				"role_arn":                          "arn:aws:iam::123456789012:role/OrdersReader",
+			},
+		}
+	}
+	create := func(name, ttl string) *logical.Response {
+		raw := specRaw(name, ttl)
+		resp, err := backend.handleCredentialSpecCreate(ctx,
+			createTestRequest(logical.CreateOperation, "cred/specs/"+name, raw), createFieldData(schema, raw))
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		require.Nil(t, resp.Err, "an above-ceiling assertion_ttl is accepted, not rejected")
+		require.Equal(t, http.StatusCreated, resp.StatusCode)
+		return resp
+	}
+
+	// Above the ceiling: accepted, with a warning naming both values.
+	resp := create("ttl-long", "2h")
+	warnings, ok := resp.Data["warnings"].([]string)
+	require.True(t, ok, "an above-ceiling request must carry warnings in the response data")
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "2h0m0s exceeds the issuer's assertion_ttl 5m0s")
+	assert.Contains(t, warnings[0], "minted with 5m0s")
+
+	// Within the ceiling: no warnings key at all, so every other response is unchanged.
+	resp = create("ttl-short", "90s")
+	_, present := resp.Data["warnings"]
+	assert.False(t, present, "a request the issuer honours must not warn")
+
+	// Update raises the ceiling-crossing the same way.
+	upRaw := map[string]interface{}{
+		"name":   "ttl-short",
+		"config": specRaw("ttl-short", "3h")["config"],
+	}
+	upResp, err := backend.handleCredentialSpecUpdate(ctx,
+		createTestRequest(logical.UpdateOperation, "cred/specs/ttl-short", upRaw), createFieldData(schema, upRaw))
+	require.NoError(t, err)
+	require.NotNil(t, upResp)
+	require.Nil(t, upResp.Err)
+	upWarnings, ok := upResp.Data["warnings"].([]string)
+	require.True(t, ok, "update must carry the warning too")
+	assert.Contains(t, upWarnings[0], "3h0m0s exceeds")
+}
+
+func TestCore_AssertionTTLWarnings(t *testing.T) {
+	cfg := func(ttl string) credential.Config {
+		return credential.NewConfig(map[string]string{credential.ConfigAssertionTTL: ttl})
+	}
+
+	// No issuer configured: nothing to compare against, so no warning.
+	noIssuer := &Core{}
+	assert.Nil(t, noIssuer.assertionTTLWarnings(cfg("2h")))
+
+	c := &Core{}
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+
+	assert.Nil(t, c.assertionTTLWarnings(credential.Config{}), "unset: nothing requested")
+	assert.Nil(t, c.assertionTTLWarnings(cfg("90s")), "below the ceiling")
+	assert.Nil(t, c.assertionTTLWarnings(cfg("5m")), "at the ceiling is not capped")
+	assert.Len(t, c.assertionTTLWarnings(cfg("5m1s")), 1, "just above the ceiling is capped")
 }
 
 func TestSystemBackend_HandleCredentialSpecRead(t *testing.T) {
@@ -516,8 +752,74 @@ func TestSystemBackend_HandleCredentialSpecUpdate_MaskedValueIsNotPersisted(t *t
 	// The stored secret must survive; the edited field must land.
 	stored, err := backend.core.credConfigStore.GetSpec(ctx, "masked-spec")
 	require.NoError(t, err)
-	assert.Equal(t, "sk-real-secret", stored.Config["api_key"], "resending the mask destroyed the stored secret")
-	assert.Equal(t, "org-2", stored.Config["organization_id"])
+	assert.Equal(t, "sk-real-secret", stored.Config.Get("api_key"), "resending the mask destroyed the stored secret")
+	assert.Equal(t, "org-2", stored.Config.Get("organization_id"))
+}
+
+// An aws_access_keys spec on a local source holds the IAM user's secret key
+// inline. Reads and lists mask it, and a read sent back keeps it: before, both
+// returned it in clear.
+func TestSystemBackend_InlineAWSKeysAreMasked(t *testing.T) {
+	backend, ctx, _ := setupTestSystemBackend(t)
+	const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+	sourceSchema := backend.pathCredentials()[0].Fields
+	sourceRaw := map[string]interface{}{"name": "inline-aws", "type": "local"}
+	_, err := backend.handleCredentialSourceCreate(ctx,
+		createTestRequest(logical.CreateOperation, "cred/sources/inline-aws", sourceRaw), createFieldData(sourceSchema, sourceRaw))
+	require.NoError(t, err)
+
+	specSchema := backend.pathCredentials()[2].Fields
+	specRaw := map[string]interface{}{
+		"name":   "inline-keys",
+		"type":   "aws_access_keys",
+		"source": "inline-aws",
+		"config": map[string]interface{}{
+			"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+			"secret_access_key": secret,
+		},
+	}
+	resp, err := backend.handleCredentialSpecCreate(ctx,
+		createTestRequest(logical.CreateOperation, "cred/specs/inline-keys", specRaw), createFieldData(specSchema, specRaw))
+	require.NoError(t, err)
+	require.False(t, resp.IsError(), "create: %v", resp.Data)
+	// The create response shows the config as a read does.
+	assert.Equal(t, maskValue, resp.Data["config"].(map[string]string)["secret_access_key"])
+
+	readRaw := map[string]interface{}{"name": "inline-keys"}
+	readResp, err := backend.handleCredentialSpecRead(ctx,
+		createTestRequest(logical.ReadOperation, "cred/specs/inline-keys", readRaw), createFieldData(specSchema, readRaw))
+	require.NoError(t, err)
+	readConfig := readResp.Data["config"].(map[string]string)
+	assert.Equal(t, maskValue, readConfig["secret_access_key"])
+	assert.Equal(t, "AKIAIOSFODNN7EXAMPLE", readConfig["access_key_id"], "the key id is an identifier, not a secret")
+
+	listResp, err := backend.handleCredentialSpecList(ctx,
+		createTestRequest(logical.ListOperation, "cred/specs", nil), createFieldData(specSchema, map[string]interface{}{}))
+	require.NoError(t, err)
+	listed := false
+	for _, spec := range listResp.Data["specs"].([]map[string]any) {
+		if spec["name"] != "inline-keys" {
+			continue
+		}
+		listed = true
+		assert.Equal(t, maskValue, spec["config"].(map[string]string)["secret_access_key"], "list returned the secret key")
+	}
+	require.True(t, listed, "the spec is not in the list")
+
+	// Send the read back: the secret survives.
+	resend := map[string]interface{}{}
+	for k, v := range readConfig {
+		resend[k] = v
+	}
+	updateRaw := map[string]interface{}{"name": "inline-keys", "config": resend}
+	updateResp, err := backend.handleCredentialSpecUpdate(ctx,
+		createTestRequest(logical.UpdateOperation, "cred/specs/inline-keys", updateRaw), createFieldData(specSchema, updateRaw))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, updateResp.StatusCode)
+	stored, err := backend.core.credConfigStore.GetSpec(ctx, "inline-keys")
+	require.NoError(t, err)
+	assert.Equal(t, secret, stored.Config.Get("secret_access_key"))
 }
 
 // TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted is the
@@ -530,10 +832,7 @@ func TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted(t 
 		"name":            "vault-src",
 		"type":            "hvault",
 		"rotation_period": 86400,
-		"config": map[string]interface{}{
-			"vault_address": "http://localhost:8200",
-			"secret_id":     "real-secret-id",
-		},
+		"config":          keyedHvaultConfig(),
 	}
 	_, err := backend.handleCredentialSourceCreate(ctx,
 		createTestRequest(logical.CreateOperation, "cred/sources/vault-src", sourceRaw),
@@ -553,7 +852,7 @@ func TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted(t 
 	for k, v := range readConfig {
 		resend[k] = v
 	}
-	resend["vault_address"] = "http://localhost:8300"
+	resend["role_name"] = "renamed-role"
 
 	updateRaw := map[string]interface{}{"name": "vault-src", "config": resend}
 	_, err = backend.handleCredentialSourceUpdate(ctx,
@@ -563,23 +862,19 @@ func TestSystemBackend_HandleCredentialSourceUpdate_MaskedValueIsNotPersisted(t 
 
 	stored, err := backend.core.credConfigStore.GetSource(ctx, "vault-src")
 	require.NoError(t, err)
-	assert.Equal(t, "real-secret-id", stored.Config["secret_id"], "resending the mask destroyed the stored secret")
-	assert.Equal(t, "http://localhost:8300", stored.Config["vault_address"])
+	assert.Equal(t, "real-secret-id", stored.Config.Get("secret_id"), "resending the mask destroyed the stored secret")
+	assert.Equal(t, "renamed-role", stored.Config.Get("role_name"))
 }
 
 func TestSystemBackend_HandleCredentialSpecDelete(t *testing.T) {
 	backend, ctx, _ := setupTestSystemBackend(t)
 
-	// Create source and spec
-	sourceSchema := backend.pathCredentials()[0].Fields
-	sourceRaw := map[string]interface{}{
-		"name": "test-source",
-		"type": "local",
-	}
-	sourceReq := createTestRequest(logical.CreateOperation, "cred/sources/test-source", sourceRaw)
-	sourceFieldData := createFieldData(sourceSchema, sourceRaw)
-	_, err := backend.handleCredentialSourceCreate(ctx, sourceReq, sourceFieldData)
-	require.NoError(t, err)
+	// A vault_token spec needs an hvault source; a local one is rejected. This used
+	// to be a "local" source, and the spec creation below failed 400 without the
+	// test noticing — the handler reports that in the response, not as a Go error.
+	// The delete then succeeded against a spec that had never been created, because
+	// deleting something absent returned 200.
+	createHVaultSource(t, backend, ctx, "test-source")
 
 	specSchema := backend.pathCredentials()[2].Fields
 	specRaw := map[string]interface{}{
@@ -593,8 +888,11 @@ func TestSystemBackend_HandleCredentialSpecDelete(t *testing.T) {
 	}
 	specReq := createTestRequest(logical.CreateOperation, "cred/specs/test-spec", specRaw)
 	specFieldData := createFieldData(specSchema, specRaw)
-	_, err = backend.handleCredentialSpecCreate(ctx, specReq, specFieldData)
+	createResp, err := backend.handleCredentialSpecCreate(ctx, specReq, specFieldData)
 	require.NoError(t, err)
+	require.NotNil(t, createResp)
+	require.Equal(t, http.StatusCreated, createResp.StatusCode,
+		"spec creation must succeed before the delete is meaningful: %+v", createResp.Data)
 
 	// Delete spec
 	resp, err := backend.handleCredentialSpecDelete(ctx, specReq, specFieldData)
@@ -602,6 +900,12 @@ func TestSystemBackend_HandleCredentialSpecDelete(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Data["message"], "Successfully deleted")
+
+	// Deleting it again must now report not-found rather than success.
+	resp, err = backend.handleCredentialSpecDelete(ctx, specReq, specFieldData)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
 func TestSystemBackend_HandleCredentialSpecList(t *testing.T) {
@@ -768,7 +1072,7 @@ func TestSystemBackend_HandleCredentialSpecConnect(t *testing.T) {
 	// The refresh token is sealed into the spec.
 	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
 	require.NoError(t, err)
-	assert.Equal(t, "rt-sealed", spec.Config["refresh_token"])
+	assert.Equal(t, "rt-sealed", spec.Config.Get("refresh_token"))
 
 	// Re-running reports reconnected=true.
 	resp2, err := backend.handleCredentialSpecConnect(ctx, createTestRequest(logical.CreateOperation, "cred/specs/gh/connect", raw), createFieldData(schema, raw))
@@ -811,7 +1115,7 @@ func TestSystemBackend_HandleCredentialSpecConnect_ExchangeError(t *testing.T) {
 	// The spec must NOT be marked connected after a failed exchange.
 	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
 	require.NoError(t, err)
-	assert.Empty(t, spec.Config["refresh_token"])
+	assert.Empty(t, spec.Config.Get("refresh_token"))
 }
 
 func TestSystemBackend_HandleCredentialSpecAuthorize_PinnedRedirectURI(t *testing.T) {
@@ -922,7 +1226,7 @@ func TestSystemBackend_HandleCredentialSpecUpdate_RejectsSealedKeys(t *testing.T
 	// The sealed value is untouched.
 	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
 	require.NoError(t, err)
-	assert.Equal(t, "rt-sealed", spec.Config["refresh_token"])
+	assert.Equal(t, "rt-sealed", spec.Config.Get("refresh_token"))
 }
 
 // TestSystemBackend_HandleCredentialSpecUpdate_SealedKeysSurviveResend is the
@@ -958,8 +1262,8 @@ func TestSystemBackend_HandleCredentialSpecUpdate_SealedKeysSurviveResend(t *tes
 
 	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
 	require.NoError(t, err)
-	assert.Equal(t, "rt-sealed", spec.Config["refresh_token"], "the secret must survive the round trip")
-	assert.Equal(t, "read:everything", spec.Config["scope"])
+	assert.Equal(t, "rt-sealed", spec.Config.Get("refresh_token"), "the secret must survive the round trip")
+	assert.Equal(t, "read:everything", spec.Config.Get("scope"))
 }
 
 // TestSystemBackend_HandleCredentialSpecUpdate_SealedKeyCanBeCleared keeps the
@@ -982,5 +1286,5 @@ func TestSystemBackend_HandleCredentialSpecUpdate_SealedKeyCanBeCleared(t *testi
 
 	spec, err := backend.core.credConfigStore.GetSpec(ctx, "gh")
 	require.NoError(t, err)
-	assert.Empty(t, spec.Config["refresh_token"])
+	assert.Empty(t, spec.Config.Get("refresh_token"))
 }

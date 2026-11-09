@@ -2,8 +2,10 @@
 // SPIFFE relying party. It holds the per-trust-domain bundle store, the
 // federation client + refresh loop, the trust-domain management paths, and the
 // SVID verification helpers. An auth method embeds a Manager, splices in its
-// trust-domain paths, and validates credentials with VerifyX509SVID (X.509-SVID)
-// or VerifyJWTSVID (JWT-SVID) against the same store.
+// trust-domain paths, and validates credentials with VerifyX509SVIDChain
+// (X.509-SVID) or VerifyJWTSVIDToken (JWT-SVID) against the same store; which
+// trust domains and IDs a verified SVID may stand for is decided by whoever
+// reads its facts, not here.
 package spiffe
 
 import (

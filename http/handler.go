@@ -14,17 +14,34 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-chi/chi/middleware"
 	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/stephnangue/warden/core"
+	"github.com/stephnangue/warden/helper/copybuf"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 )
 
 const (
 	// defaultForwardingTimeout is the maximum time for a forwarded request to
 	// the active node before timing out, when not explicitly configured.
 	defaultForwardingTimeout = 60 * time.Second
+
+	// sysMCPPath is Warden's own MCP discovery endpoint, served through the
+	// /v1/sys/ catch-all like every system path. It is the one control-plane
+	// path that can answer with an open-ended SSE stream
+	// (subscriptions/listen), so the standby forwarder treats it specially
+	// (isSysMCPPath), in every namespace.
+	sysMCPPath = "/v1/sys/mcp"
 )
+
+// isSysMCPPath reports whether path names the discovery endpoint: in the root
+// namespace, or in a child one by path ("/v1/team/sys/mcp"). The header-named
+// namespace uses the root form.
+func isSysMCPPath(path string) bool {
+	return path == sysMCPPath || (strings.HasPrefix(path, "/v1/") && strings.HasSuffix(path, "/sys/mcp"))
+}
 
 // HandlerProperties contains configuration for the HTTP handler
 type HandlerProperties struct {
@@ -47,10 +64,6 @@ type HandlerProperties struct {
 
 // Handler creates and returns the main HTTP handler for Warden.
 func Handler(props *HandlerProperties) http.Handler {
-	mux := http.NewServeMux()
-	core := props.Core
-	log := props.Logger
-
 	// Create a shared forwarder for standby-to-active request forwarding.
 	// Used both by the generic handler (pre-check) and the logical handler
 	// (mid-request standby transition race).
@@ -58,53 +71,87 @@ func Handler(props *HandlerProperties) http.Handler {
 	if fwdTimeout == 0 {
 		fwdTimeout = defaultForwardingTimeout
 	}
-	forwarder := newStandbyForwarder(log, props.ClusterTLSConfigFunc, fwdTimeout)
-	forwarder.core = core
-
-	// HA endpoints — must work on standby and sealed nodes.
-	// Register before the /v1/sys/ catch-all.
-	mux.Handle("/v1/sys/health", handleSysHealth(core, log, props.Version))
-	mux.Handle("/v1/sys/ready", handleSysReady(core, log))
-	mux.Handle("/v1/sys/leader", handleSysLeader(core, log))
-	mux.Handle("/v1/sys/step-down", handleSysStepDown(core, log))
-	mux.Handle("/v1/sys/seal-status", handleSysSealStatus(core, log))
-
-	// System init endpoint - handles initialization before system is ready
-	mux.Handle("/v1/sys/init", handleSysInit(core, log))
-
-	// OIDC issuer discovery + JWKS (Workload Identity Federation). Served at the
-	// origin root — not under /v1/ — so an upstream STS fetches them at the
-	// standard well-known path. Unauthenticated; wrapGenericHandler exempts these
-	// from the /v1/ prefix check. Deliberately NOT in standbyAllowedPaths: only
-	// the active node holds the signing key/config, so standbys forward.
-	mux.Handle(oidcDiscoveryPath, handleOIDCDiscovery(core, log))
-	mux.Handle(oidcJWKSPath, handleOIDCJWKS(core, log))
-
-	// RFC 9728 protected resource metadata. Also origin-root and
-	// unauthenticated — a client fetches it precisely because it has no user
-	// credential yet. Registered twice: the bare path, and the subtree, because
-	// the resource's own path is appended to the well-known prefix.
-	mux.Handle(prmPath, handlePRM(core, log))
-	mux.Handle(prmPath+"/", handlePRM(core, log))
-
-	// MCP discovery interface — Warden answering MCP for its own
-	// capabilities (list_roles, get_skill). Registered before the /v1/sys/
-	// catch-all. Not in standbyAllowedPaths: it reads live mount/skill/
-	// introspection state, so standby nodes forward it to the active node.
-	mux.Handle("/v1/sys/mcp", handleSysMCP(core, log))
-
-	// System backend endpoints - catch-all for /v1/sys/
-	// Handles providers, auth, namespaces, credentials, etc.
-	mux.Handle("/v1/sys/", handleLogical(core, log, forwarder))
-
-	// Logical backend endpoints - catch-all for /v1/
-	// Handles provider-specific operations (e.g., /v1/aws/, /v1/provider/)
-	mux.Handle("/v1/", handleLogical(core, log, forwarder))
+	forwarder := newStandbyForwarder(props.Logger, props.ClusterTLSConfigFunc, fwdTimeout)
+	forwarder.core = props.Core
 
 	// Wrap with generic handler middleware
-	handler := wrapGenericHandler(core, mux, log, forwarder)
+	return wrapGenericHandler(props.Core, newMux(props, forwarder), props.Logger, forwarder)
+}
 
-	return handler
+// routeKind says how a route reaches the core.
+type routeKind int
+
+const (
+	// routeLogical routes through handleLogical into Core.HandleRequest: the
+	// request path, which authenticates, authorizes and audits every request.
+	routeLogical routeKind = iota
+
+	// routeInfra is served before the request path, unauthenticated and
+	// unaudited by design: cluster health and seal state, initialization, and
+	// the origin-root discovery documents a client fetches before it holds a
+	// credential. Nothing else may be one (TestRoutes_NoBypass).
+	routeInfra
+)
+
+// route is one registration on Warden's mux.
+type route struct {
+	pattern string
+	kind    routeKind
+	handler http.Handler
+}
+
+// newMux registers routes on a new mux.
+func newMux(props *HandlerProperties, forwarder *standbyForwarder) *http.ServeMux {
+	mux := http.NewServeMux()
+	for _, r := range routes(props, forwarder) {
+		mux.Handle(r.pattern, r.handler)
+	}
+	return mux
+}
+
+// routes is every registration on Warden's mux, each marked with how it
+// reaches the core. Everything under /v1/ is the request path except the
+// infrastructure endpoints, which must answer on standby and sealed nodes.
+func routes(props *HandlerProperties, forwarder *standbyForwarder) []route {
+	core := props.Core
+	log := props.Logger
+	logical := handleLogical(core, log, forwarder)
+	return []route{
+		// HA endpoints — must work on standby and sealed nodes.
+		// Registered before the /v1/sys/ catch-all.
+		{"/v1/sys/health", routeInfra, handleSysHealth(core, log, props.Version)},
+		{"/v1/sys/ready", routeInfra, handleSysReady(core, log)},
+		{"/v1/sys/leader", routeInfra, handleSysLeader(core, log)},
+		{"/v1/sys/seal-status", routeInfra, handleSysSealStatus(core, log)},
+
+		// System init endpoint - handles initialization before system is ready
+		{"/v1/sys/init", routeInfra, handleSysInit(core, log)},
+
+		// OIDC issuer discovery + JWKS (Workload Identity Federation). Served
+		// at the origin root — not under /v1/ — so an upstream STS fetches
+		// them at the standard well-known path. Unauthenticated;
+		// wrapGenericHandler exempts these from the /v1/ prefix check.
+		// Deliberately NOT in standbyAllowedPaths: only the active node holds
+		// the signing key/config, so standbys forward.
+		{oidcDiscoveryPath, routeInfra, handleOIDCDiscovery(core, log)},
+		{oidcJWKSPath, routeInfra, handleOIDCJWKS(core, log)},
+
+		// RFC 9728 protected resource metadata. Also origin-root and
+		// unauthenticated — a client fetches it precisely because it has no
+		// user credential yet. Registered twice: the bare path, and the
+		// subtree, because the resource's own path is appended to the
+		// well-known prefix.
+		{prmPath, routeInfra, handlePRM(core, log)},
+		{prmPath + "/", routeInfra, handlePRM(core, log)},
+
+		// System backend endpoints - catch-all for /v1/sys/
+		// Handles providers, auth, namespaces, credentials, etc.
+		{"/v1/sys/", routeLogical, logical},
+
+		// Logical backend endpoints - catch-all for /v1/
+		// Handles provider-specific operations (e.g., /v1/aws/, /v1/provider/)
+		{"/v1/", routeLogical, logical},
+	}
 }
 
 // standbyAllowedPaths are paths that can be served directly by standby nodes
@@ -211,9 +258,13 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 	}
 
 	f.proxy = &httputil.ReverseProxy{
+		// Every forwarded response is copied through a buffer; pooled, it is
+		// not allocated per response.
+		BufferPool: copybuf.ProxyPool,
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
+			restoreClientPath(req)
 			// Do NOT rewrite req.Host — preserve the original Host header
 			// so signature-sensitive protocols (e.g., AWS SigV4) that sign
 			// the Host header are not broken by forwarding. req.URL.Host
@@ -223,23 +274,25 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 			// Standard proxy header: original Host for backend awareness.
 			req.Header.Set("X-Forwarded-Host", req.Host)
 
-			// Set forwarding headers from the direct client connection.
-			// Append to X-Forwarded-For to preserve the chain from
-			// upstream proxies (load balancers, etc.).
-			clientIP, _, err := net.SplitHostPort(req.RemoteAddr)
-			if err != nil {
-				// RemoteAddr may be a bare IP (no port) after middleware.RealIP
+			// The active node takes the client's address from the rightmost
+			// X-Forwarded-For entry: the address this node resolved, which
+			// must therefore always be the last one added, or the chain
+			// dropped — otherwise the rightmost entry would be whatever the
+			// client sent. ReverseProxy appends it itself, after this
+			// Director, when RemoteAddr is host:port, as the listener leaves
+			// it; only a bare address has to be appended here.
+			if _, _, err := net.SplitHostPort(req.RemoteAddr); err != nil {
 				if ip := net.ParseIP(req.RemoteAddr); ip != nil {
-					clientIP = req.RemoteAddr
-				}
-			}
-			if clientIP != "" {
-				if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
-					req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
+					chain := append(req.Header.Values("X-Forwarded-For"), ip.String())
+					req.Header.Set("X-Forwarded-For", strings.Join(chain, ", "))
 				} else {
-					req.Header.Set("X-Forwarded-For", clientIP)
+					req.Header.Del("X-Forwarded-For")
 				}
 			}
+			// X-Real-IP is the client's own, never this node's view: a node
+			// from before the address was resolved at the listener would
+			// read it first.
+			req.Header.Del("X-Real-IP")
 			if req.TLS != nil {
 				req.Header.Set("X-Forwarded-Proto", "https")
 			} else if req.Header.Get("X-Forwarded-Proto") == "" {
@@ -247,14 +300,31 @@ func (f *standbyForwarder) getProxy(clusterAddr, redirectAddr string) *httputil.
 			}
 
 			// Re-inject any forwarded client certificate that the API
-			// middleware extracted and stripped. The cluster listener
-			// needs it as a header to pass the cert to the leader.
+			// middleware extracted and stripped: the active node's cluster
+			// listener reads it from a header. The cert headers and the
+			// handshake marker are cleared first: the marker vouches for
+			// the certificate set here, and only for it.
+			listener.StripCertHeaders(req)
+			req.Header.Del(listener.ForwardedCertHandshakeHeader)
 			if cert := listener.ForwardedClientCert(req.Context()); cert != nil {
 				pemBytes := pem.EncodeToMemory(&pem.Block{
 					Type:  "CERTIFICATE",
 					Bytes: cert.Raw,
 				})
 				req.Header.Set("X-SSL-Client-Cert", url.QueryEscape(string(pemBytes)))
+				if listener.ClientCertFromHandshake(req.Context()) {
+					req.Header.Set(listener.ForwardedCertHandshakeHeader, listener.ForwardedCertHandshakeTrue)
+				}
+			}
+
+			// Carry the request id this node assigned, so the active node
+			// audits and answers the request under the same id rather than
+			// none. It travels in an internal header, which the cluster
+			// listener consumes: the client's own X-Request-Id is left as
+			// sent. A client-sent copy of the internal header never goes on.
+			req.Header.Del(listener.ForwardedRequestIDHeader)
+			if id := middleware.GetReqID(req.Context()); id != "" {
+				req.Header.Set(listener.ForwardedRequestIDHeader, id)
 			}
 		},
 		Transport: transport,
@@ -364,6 +434,15 @@ func wrapGenericHandler(c *core.Core, handler http.Handler, log *logger.GatedLog
 			return
 		}
 
+		// Whether the path arrived percent-encoded, read before the
+		// X-Warden-Provider rewrite clears RawPath. Only such a path is
+		// checked for dot and empty segments below: a literal one is
+		// redirected to the clean path by the router behind this wrapper,
+		// except under CONNECT, which the router does not clean and
+		// handleLogical refuses before building a request from the path.
+		// TestHandler_NoDotSegmentReachesALogicalRequest pins all three.
+		encodedPath := r.URL.RawPath != ""
+
 		// X-Warden-Provider /v1/ exemption. Only rewrites when the
 		// header is non-empty AND the path is missing /v1/. Empty
 		// header values (Header.Get returns "" for both absent and
@@ -393,6 +472,10 @@ func wrapGenericHandler(c *core.Core, handler http.Handler, log *logger.GatedLog
 			respondError(w, http.StatusNotFound, "path must begin with /v1/")
 			return
 		}
+		if encodedPath && !canonicalRequestPath(r.URL.Path) {
+			respondError(w, http.StatusBadRequest, errNonCanonicalPath)
+			return
+		}
 
 		// On standby nodes, forward requests to the active node
 		// unless the path is explicitly allowed on standby.
@@ -403,6 +486,65 @@ func wrapGenericHandler(c *core.Core, handler http.Handler, log *logger.GatedLog
 
 		handler.ServeHTTP(w, r)
 	})
+}
+
+// isForwardedGatewayRequest reports whether r is provider gateway traffic —
+// what Warden proxies to an upstream, as opposed to its own control plane.
+//
+// Two shapes qualify, because a standby sees the request before core has
+// canonicalised it. The path shape matches the segment rule the providers'
+// own patterns use ("gateway" and "gateway/..."), so "/v1/mcp/gateway" and
+// "/v1/mcp/role/agent/gateway/foo" qualify while a mount named
+// "gateway-config" does not. The header shape catches header-routed clients:
+// wrapGenericHandler only prepends "/v1" to those, and the
+// "<mount>/role/<role>/gateway/<api>" path is synthesised later, on the
+// active node — so a header-routed request reaches here carrying the bare
+// upstream path and no gateway segment at all.
+//
+// sys/ is excluded outright: it is control plane whatever its last segment
+// happens to be, and X-Warden-Provider is rejected on it upstream of here.
+func isForwardedGatewayRequest(r *http.Request) bool {
+	// The origin-root well-known documents are resolved and forwarded ahead
+	// of the X-Warden-Provider rewrite, so they are the one shape that
+	// reaches here carrying the header without having been through it. A
+	// client that sets the header as a connection-wide default would
+	// otherwise have its discovery fetch classified as gateway traffic.
+	if isOIDCIssuerPath(r.URL.Path) || isPRMPath(r.URL.Path) {
+		return false
+	}
+	if strings.HasPrefix(r.URL.Path, "/v1/sys/") || r.URL.Path == "/v1/sys" {
+		return false
+	}
+	if r.Header.Get("X-Warden-Provider") != "" {
+		return true
+	}
+	for rest := r.URL.Path; rest != ""; {
+		i := strings.Index(rest, "/gateway")
+		if i < 0 {
+			return false
+		}
+		rest = rest[i+len("/gateway"):]
+		if rest == "" || rest[0] == '/' {
+			return true
+		}
+	}
+	return false
+}
+
+// restoreClientPath puts back the path req's request line carried, which this
+// node may have rewritten (the X-Warden-Provider prefix here, a role header in
+// core). The active node serves the same handler, so it rewrites the path again
+// itself; and a DPoP proof signs the path the client sent, which the active
+// node must therefore see.
+func restoreClientPath(req *http.Request) {
+	if req.RequestURI == "" {
+		return
+	}
+	u, err := url.ParseRequestURI(req.RequestURI)
+	if err != nil || !strings.HasPrefix(u.Path, "/") {
+		return
+	}
+	req.URL.Path, req.URL.RawPath = u.Path, u.RawPath
 }
 
 // forwardToActive forwards a request to the active node via the shared
@@ -418,6 +560,27 @@ func forwardToActive(c *core.Core, forwarder *standbyForwarder, w http.ResponseW
 
 	if clusterAddr != "" {
 		if proxy := forwarder.getProxy(clusterAddr, leaderAddr); proxy != nil {
+			// Traffic proxied from a standby is written on the standby's own
+			// listener, with the standby's deadlines armed. The active node
+			// clears its own when it takes the streaming branch, but that says
+			// nothing about this connection — without the same clear here an
+			// HA stream still dies at the standby's http_write_timeout.
+			//
+			// Gateway traffic and the MCP discovery endpoint both qualify:
+			// whatever the former proxies may run long, streaming or not, and
+			// the latter answers subscriptions/listen with an open-ended SSE
+			// stream. Both deadlines go, not just the write one — once the
+			// body is forwarded, an armed read deadline cancels the request
+			// context and tears down an idle stream. Everything else forwards
+			// under the standby's caps.
+			if isForwardedGatewayRequest(r) || isSysMCPPath(r.URL.Path) {
+				if err := logical.ClearStreamDeadlines(w); err != nil {
+					c.Logger().Warn("could not clear connection deadlines for forwarded request",
+						logger.Err(err),
+						logger.String("path", r.URL.Path),
+					)
+				}
+			}
 			proxy.ServeHTTP(w, r)
 			metrics.MeasureSince([]string{"ha", "forward", "duration"}, start)
 			metrics.IncrCounter([]string{"ha", "forward", "success"}, 1)
@@ -438,6 +601,10 @@ func respondStandby(w http.ResponseWriter, r *http.Request, leaderAddr string) {
 		return
 	}
 	target.Path = r.URL.Path
+	// The client's own encoding, so an encoded slash inside a segment (an ARN
+	// in a model path) reaches the leader as one segment, not two. Empty after
+	// the X-Warden-Provider rewrite, which is right for the rewritten path.
+	target.RawPath = r.URL.RawPath
 	target.RawQuery = r.URL.RawQuery
 	http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
 }

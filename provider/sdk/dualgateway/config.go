@@ -30,6 +30,8 @@ func parseConfig(spec *ProviderSpec, conf map[string]any) providerConfig {
 func validateConfig(spec *ProviderSpec, config map[string]any) error {
 	allowedKeys := []string{
 		spec.URLConfigKey, "max_body_size", "timeout", "auto_auth_path", "default_role",
+		// user_auth_role was removed; a mount enabled with it still loads and
+		// fails closed on user credentials (framework.HasUserAuthRole).
 		"user_auth_path", "user_auth_role",
 		"tls_skip_verify", "ca_data",
 	}
@@ -41,6 +43,12 @@ func validateConfig(spec *ProviderSpec, config map[string]any) error {
 	skipVerify, _ := framework.ParseTLSConfig(config)
 	if addr, ok := config[spec.URLConfigKey].(string); ok && addr != "" {
 		if err := framework.ValidateURL(addr, spec.URLConfigKey, skipVerify); err != nil {
+			return err
+		}
+	}
+
+	if spec.ValidateExtraConfig != nil {
+		if err := spec.ValidateExtraConfig(config); err != nil {
 			return err
 		}
 	}

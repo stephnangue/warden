@@ -86,14 +86,14 @@ func (t *GitLabAccessTokenCredType) ConfigSchema() []*credential.FieldValidator 
 			Example("30"),
 
 		// Optional fields
-		credential.DurationField("expires_in").
-			Describe("Token expiration duration from now").
-			Example("720h"),
+		credential.DurationField("ttl").
+			Describe("Minimum token lifetime. Expiry is a date, so the token lives until the first UTC midnight at or after this").
+			Example("24h"),
 	}
 }
 
 // ValidateConfig validates the Config for a GitLab access token credential spec
-func (t *GitLabAccessTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *GitLabAccessTokenCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	if sourceType != credential.SourceTypeGitLab {
 		return fmt.Errorf("gitlab_access_token credentials require a gitlab source, got: %s", sourceType)
@@ -106,14 +106,14 @@ func (t *GitLabAccessTokenCredType) ValidateConfig(config map[string]string, sou
 	}
 
 	// Step 3: Conditional validation based on mint_method
-	mintMethod := config["mint_method"]
+	mintMethod := config.Get("mint_method")
 	switch mintMethod {
 	case "project_access_token":
-		if config["project_id"] == "" {
+		if config.Get("project_id") == "" {
 			return fmt.Errorf("'project_id' is required when mint_method is project_access_token")
 		}
 	case "group_access_token":
-		if config["group_id"] == "" {
+		if config.Get("group_id") == "" {
 			return fmt.Errorf("'group_id' is required when mint_method is group_access_token")
 		}
 	}
@@ -129,5 +129,10 @@ func (t *GitLabAccessTokenCredType) RequiresSpecRotation() bool {
 
 // SensitiveConfigFields returns spec config keys that should be masked in output
 func (t *GitLabAccessTokenCredType) SensitiveConfigFields() []string {
+	return nil
+}
+
+// StoredSecrets reports nothing: its config holds only scopes and token settings.
+func (t *GitLabAccessTokenCredType) StoredSecrets(_ credential.Config) []string {
 	return nil
 }

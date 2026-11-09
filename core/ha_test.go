@@ -56,7 +56,7 @@ func TestHA_LeaderEndpoint(t *testing.T) {
 func TestHA_StepDown_NoHA(t *testing.T) {
 	c := createTestCore(t)
 
-	err := c.StepDown(nil)
+	err := c.StepDown()
 	assert.ErrorIs(t, err, ErrHANotEnabled)
 }
 
@@ -91,7 +91,7 @@ func TestHA_StepDown_Sealed(t *testing.T) {
 	defer c.Shutdown()
 
 	// StepDown on a sealed node should return ErrSealed
-	err := c.StepDown(nil)
+	err := c.StepDown()
 	assert.ErrorIs(t, err, consts.ErrSealed)
 }
 

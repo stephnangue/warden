@@ -12,10 +12,13 @@ import (
 var (
 	// Regex to match S3 Access Point ARN in path
 	// Format: arn:aws:s3:region:account-id:accesspoint/access-point-name
-	accessPointARNRegex = regexp.MustCompile(`arn:aws:s3:([^:]*):(\d{12}):accesspoint/([^/]+)`)
+	// The region and name become part of the upstream host, so they are held
+	// to the characters a host label may carry: a '/', '@' or '#' would move
+	// the request to a host of the client's choosing.
+	accessPointARNRegex = regexp.MustCompile(`arn:aws:s3:([A-Za-z0-9-]*):(\d{12}):accesspoint/([A-Za-z0-9.-]+)`)
 	// Regex to match Multi-Region Access Point ARN in path
 	// Format: arn:aws:s3::account-id:accesspoint/mrap-alias.mrap
-	mrapARNRegex = regexp.MustCompile(`arn:aws:s3::(\d{12}):accesspoint/([^/]+)`)
+	mrapARNRegex = regexp.MustCompile(`arn:aws:s3::(\d{12}):accesspoint/([A-Za-z0-9.-]+)`)
 )
 
 // S3AccessPointProcessor handles S3 Access Point requests

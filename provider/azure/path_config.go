@@ -47,9 +47,9 @@ func (b *azureBackend) pathConfig() *framework.Path {
 				Type:        framework.TypeString,
 				Description: "Auth mount that authenticates the secondary (user) principal, marking this mount a protected resource (bearer/JWT format required)",
 			},
-			"user_auth_role": {
-				Type:        framework.TypeString,
-				Description: "Role used to authenticate the user credential (default: the user auth mount's own default_role)",
+			framework.HostAllowlistKey: {
+				Type:        framework.TypeCommaStringSlice,
+				Description: "Hosts the gateway forwards to, each with a leading dot: '.example.com' allows example.com and every host under it (default: the public cloud's Resource Manager, Graph, Key Vault, Storage, OpenAI, AI services and AI Foundry endpoints; an empty list restores the default)",
 			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -70,78 +70,93 @@ func (b *azureBackend) pathConfig() *framework.Path {
 // handleConfigRead handles reading the Azure provider configuration
 func (b *azureBackend) handleConfigRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	tc := b.TransparentConfig()
+	skipVerify, caData := b.tlsSettings()
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Data: map[string]any{
 			"max_body_size":   b.MaxBodySize(),
 			"timeout":         b.Timeout().String(),
-			"tls_skip_verify": b.tlsSkipVerify,
-			"ca_data":         b.caData,
+			"tls_skip_verify": skipVerify,
+			"ca_data":         caData,
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
-			"user_auth_role":  tc.UserAuthRole,
+
+			framework.HostAllowlistKey: b.hostAllowlist(),
 		},
 	}, nil
 }
 
-// handleConfigWrite handles writing the Azure provider configuration
+// handleConfigWrite handles writing the Azure provider configuration.
+//
+// A write changes nothing until it has succeeded: every value is validated and
+// built — the transport included — into locals, persisted, and only then
+// applied, so a rejected write leaves the running configuration exactly as it
+// was, and a storage failure leaves it matching storage.
 func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
 	// For max_body_size: use provided value, or apply default if not yet set
+	maxBodySize := b.MaxBodySize()
 	if val, ok := d.GetOk("max_body_size"); ok {
-		b.SetMaxBodySize(val.(int64))
-	} else if b.MaxBodySize() == 0 {
-		b.SetMaxBodySize(framework.DefaultMaxBodySize)
+		maxBodySize = val.(int64)
+	} else if maxBodySize == 0 {
+		maxBodySize = framework.DefaultMaxBodySize
 	}
 
-	// For timeout: use provided value, or apply default if not yet set
+	// For timeout: use provided value, or apply default if not yet set. It is
+	// the only bound on how long an upstream may take, so zero is refused.
+	timeout := b.Timeout()
 	if val, ok := d.GetOk("timeout"); ok {
 		// TypeDurationSecond returns int (seconds)
-		b.SetTimeout(time.Duration(val.(int)) * time.Second)
-	} else if b.Timeout() == 0 {
-		b.SetTimeout(framework.DefaultTimeout)
+		timeout = time.Duration(val.(int)) * time.Second
+		if timeout <= 0 {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        logical.ErrBadRequest("timeout must be at least 1s"),
+			}, nil
+		}
+	} else if timeout == 0 {
+		timeout = framework.DefaultTimeout
 	}
 
-	// Handle TLS settings
-	tlsChanged := false
+	// Handle TLS settings, compared against what is running
+	skipVerify, caData := b.tlsSettings()
+	oldSkipVerify, oldCAData := skipVerify, caData
 	if val, ok := d.GetOk("tls_skip_verify"); ok {
-		newVal := val.(bool)
-		if b.tlsSkipVerify != newVal {
-			tlsChanged = true
-		}
-		b.tlsSkipVerify = newVal
+		skipVerify = val.(bool)
 	}
 	if val, ok := d.GetOk("ca_data"); ok {
-		newVal := val.(string)
-		if b.caData != newVal {
-			tlsChanged = true
-		}
-		b.caData = newVal
+		caData = val.(string)
 	}
 
-	// Update transport if TLS settings changed
+	// Build the transport now if TLS settings changed; it is installed only
+	// once the whole write has succeeded.
+	tlsChanged := skipVerify != oldSkipVerify || caData != oldCAData
+	var transport http.RoundTripper
 	if tlsChanged {
-		if b.tlsSkipVerify || b.caData != "" {
-			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
+		if skipVerify || caData != "" {
+			custom, err := newTransportWithTLS(caData, skipVerify)
 			if err != nil {
 				return &logical.Response{
 					StatusCode: http.StatusBadRequest,
 					Err:        logical.ErrBadRequest(err.Error()),
 				}, nil
 			}
-			b.SetTransport(transport)
+			transport = custom
 		} else {
 			initTransport()
-			b.SetTransport(sharedTransport)
+			transport = sharedTransport
 		}
 	}
 
 	// Transparent mode settings — build new config from current values + overrides
+	current := b.TransparentConfig()
 	tc := &framework.TransparentConfig{
-		AutoAuthPath:    b.TransparentConfig().AutoAuthPath,
-		DefaultAuthRole: b.TransparentConfig().DefaultAuthRole,
-		UserAuthPath:    b.TransparentConfig().UserAuthPath,
-		UserAuthRole:    b.TransparentConfig().UserAuthRole,
+		AutoAuthPath:    current.AutoAuthPath,
+		DefaultAuthRole: current.DefaultAuthRole,
+		UserAuthPath:    current.UserAuthPath,
 	}
 	if val, ok := d.GetOk("auto_auth_path"); ok {
 		tc.AutoAuthPath = val.(string)
@@ -152,9 +167,6 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 	if val, ok := d.GetOk("user_auth_path"); ok {
 		tc.UserAuthPath = val.(string)
 	}
-	if val, ok := d.GetOk("user_auth_role"); ok {
-		tc.UserAuthRole = val.(string)
-	}
 
 	// Validate: auto_auth_path required
 	if tc.AutoAuthPath == "" {
@@ -164,32 +176,40 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 		}, nil
 	}
 
-	// Validate the secondary (user) auth config: types and the
-	// user_auth_role -> user_auth_path dependency. The bearer-format check on
-	// the referenced mount is enforced at runtime (fail closed).
-	if err := framework.ValidateUserAuthConfig(map[string]any{
-		"user_auth_path": tc.UserAuthPath,
-		"user_auth_role": tc.UserAuthRole,
-	}); err != nil {
+	// Refuse the removed user_auth_role. The bearer-format check on the user
+	// auth mount is enforced at runtime (fail closed). The write stores no
+	// user_auth_role, so it also removes one a stored config still names.
+	if err := framework.RefuseUserAuthRole(d.Raw); err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        logical.ErrBadRequest(err.Error()),
 		}, nil
 	}
 
-	b.StreamingBackend.SetTransparentConfig(tc)
+	allowedHosts := b.configuredHostAllowlist()
+	if val, ok := d.GetOk(framework.HostAllowlistKey); ok {
+		parsed, err := framework.ParseHostAllowlist(val)
+		if err != nil {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        logical.ErrBadRequest(err.Error()),
+			}, nil
+		}
+		allowedHosts = parsed
+	}
 
 	// Persist config to storage
 	if b.StorageView != nil {
 		entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
-			"max_body_size":   b.MaxBodySize(),
-			"timeout":         b.Timeout().String(),
-			"tls_skip_verify": b.tlsSkipVerify,
-			"ca_data":         b.caData,
+			"max_body_size":   maxBodySize,
+			"timeout":         timeout.String(),
+			"tls_skip_verify": skipVerify,
+			"ca_data":         caData,
 			"auto_auth_path":  tc.AutoAuthPath,
 			"default_role":    tc.DefaultAuthRole,
 			"user_auth_path":  tc.UserAuthPath,
-			"user_auth_role":  tc.UserAuthRole,
+
+			framework.HostAllowlistKey: allowedHosts,
 		})
 		if err != nil {
 			return &logical.Response{
@@ -204,6 +224,16 @@ func (b *azureBackend) handleConfigWrite(ctx context.Context, req *logical.Reque
 			}, nil
 		}
 	}
+
+	// Apply. Nothing below can fail.
+	b.SetMaxBodySize(maxBodySize)
+	b.SetTimeout(timeout)
+	b.setTLSSettings(skipVerify, caData)
+	b.setHostAllowlist(allowedHosts)
+	if tlsChanged {
+		b.SetTransport(transport)
+	}
+	b.StreamingBackend.SetTransparentConfig(tc)
 
 	return &logical.Response{
 		StatusCode: http.StatusOK,

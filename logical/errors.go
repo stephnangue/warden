@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/hashicorp/go-multierror"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
 )
@@ -62,6 +63,11 @@ func ErrNotFoundf(format string, args ...any) *CodedError {
 // ErrRequestEntityTooLargef creates a formatted 413 Request Entity Too Large error.
 func ErrRequestEntityTooLargef(format string, args ...any) *CodedError {
 	return &CodedError{Status: http.StatusRequestEntityTooLarge, Message: fmt.Sprintf(format, args...)}
+}
+
+// ErrGone creates a 410 Gone error: the path named something that was removed.
+func ErrGone(message string) *CodedError {
+	return &CodedError{Status: http.StatusGone, Message: message}
 }
 
 // ErrConflict creates a 409 Conflict error.
@@ -152,6 +158,21 @@ func GetErrorCode(err error) int {
 	// challenge naming where to go.
 	case errors.Is(err, credential.ErrUserRequired):
 		return http.StatusUnauthorized
+	// The upstream refused to act for the user until the user re-authenticates
+	// (a claims challenge, an expired or wrong-audience user token). Checked
+	// before the credential-issue rule below, which would make the upstream's
+	// 400 a 403 that no client acts on; core pairs this with the challenge.
+	case errors.Is(err, credential.ErrUserChallenge):
+		return http.StatusUnauthorized
+	}
+	// A credential that could not be issued answers with the status its
+	// cause calls for: a refusal by the upstream is not the server error it
+	// would otherwise fall through to.
+	var issue *CredentialIssueError
+	if errors.As(err, &issue) {
+		if status := issue.Status(); status != 0 {
+			return status
+		}
 	}
 	// Check if the error wraps a CodedError. Only recurse when there is an inner
 	// error: an error that implements Unwrap() but returns nil (e.g. a token
@@ -168,6 +189,34 @@ func GetErrorCode(err error) int {
 // IsNotFound returns true if the error is a 404 Not Found CodedError.
 func IsNotFound(err error) bool {
 	return GetErrorCode(err) == http.StatusNotFound
+}
+
+// ErrorMessages is err as the messages a response carries, one per error.
+//
+// Request handling gathers some failures in a multierror, whose own text is a
+// bulleted list ("1 error occurred:\n\t* permission denied\n\n") meant for a
+// log line, not a client. Each gathered error is kept as a message of its own,
+// so none is lost and a single one reads as itself. Only err itself is
+// unpacked: an error that wraps a multierror keeps its full text, context and
+// all. Returns nil for a nil err.
+func ErrorMessages(err error) []string {
+	if err == nil {
+		return nil
+	}
+	merr, ok := err.(*multierror.Error)
+	if !ok || len(merr.Errors) == 0 {
+		return []string{err.Error()}
+	}
+	msgs := make([]string, 0, len(merr.Errors))
+	for _, e := range merr.Errors {
+		if e != nil {
+			msgs = append(msgs, ErrorMessages(e)...)
+		}
+	}
+	if len(msgs) == 0 {
+		return []string{err.Error()}
+	}
+	return msgs
 }
 
 // ErrorResponse creates a Response from a CodedError.

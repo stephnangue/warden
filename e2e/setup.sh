@@ -65,9 +65,22 @@ fi
 
 if [ ! -f "$NGINX_CERT_DIR/server.crt" ]; then
   echo "Generating nginx server certificate..."
+  # SANs matter: a client that verifies rejects a certificate carrying only a CN,
+  # so without them this certificate is usable only with -k. The issuer documents
+  # are served through this listener, and a verifier fetching them (a Kubernetes
+  # API server, say) does verify. e2e-nginx/nginx are the container name and
+  # service alias, for a verifier inside the compose network.
   openssl ecparam -genkey -name prime256v1 -noout -out "$NGINX_CERT_DIR/server.key" 2>/dev/null
-  openssl req -x509 -new -key "$NGINX_CERT_DIR/server.key" -out "$NGINX_CERT_DIR/server.crt" \
-    -days 365 -subj "/CN=e2e-nginx-lb" 2>/dev/null
+  openssl req -new -key "$NGINX_CERT_DIR/server.key" -out "$NGINX_CERT_DIR/server.csr" \
+    -subj "/CN=e2e-nginx-lb" 2>/dev/null
+  openssl x509 -req -sha256 -in "$NGINX_CERT_DIR/server.csr" -signkey "$NGINX_CERT_DIR/server.key" \
+    -out "$NGINX_CERT_DIR/server.crt" -days 365 \
+    -extfile <(printf "subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:e2e-nginx,DNS:nginx") 2>/dev/null
+  rm -f "$NGINX_CERT_DIR/server.csr"
+  if [ ! -s "$NGINX_CERT_DIR/server.crt" ]; then
+    echo "ERROR: failed to generate nginx server certificate"
+    exit 1
+  fi
 fi
 
 # Step 1: Start infrastructure (PostgreSQL + Vault + Hydra + Nginx)
@@ -152,7 +165,9 @@ echo ""
 echo "[3/10] Building Warden..."
 cd "$PROJECT_ROOT"
 mkdir -p "$BIN_DIR"
-go build -o "$BIN_DIR/warden" .
+# warden_e2e_graph_hosts lets the msgraph provider's graph_url name a local stub
+# (provider/msgraph/hosts_e2e.go), so Graph link rewriting runs end to end.
+go build -tags warden_e2e_graph_hosts -o "$BIN_DIR/warden" .
 echo "Warden built at $BIN_DIR/warden"
 
 # Generate seal key (32 bytes for AES-256-GCM-96) if it doesn't exist
@@ -316,6 +331,146 @@ vault_api POST "secret/data/e2e/database" \
 vault_api POST "secret/data/e2e/datadog-keys" \
   '{"data":{"api_key":"e2e-dd-chained-not-a-real-key","application_key":"e2e-dd-chained-not-a-real-app-key","owner":"e2e-undeclared-field"}}'
 
+# The personal access token a keyless gitlab source mints with. Chained the same
+# way as the datadog keys above, but consumed by a driver that calls an API with
+# it rather than one that passes it through — so what the gitlab row in
+# e2e/fullchain/gitlab_test.go proves is that this value authenticated a real
+# mint, having reached the driver from here and nowhere else.
+vault_api POST "secret/data/e2e/gitlab-pat" \
+  '{"data":{"pat":"e2e-gl-chained-not-a-real-pat"}}'
+
+# The same arrangement for a gitlab source authenticating as an OAuth application
+# instead. What is chained here is the whole client credential, which the driver
+# spends on a token grant rather than on the mint itself — so the oauth2 rows prove
+# the chain reached one call earlier than the pat rows do.
+#
+# Both halves, because they authenticate as a pair: a chained oauth2 source is
+# refused an inline application_id precisely so an id cannot name one application
+# while the secret beside it belongs to another.
+vault_api POST "secret/data/e2e/gitlab-app-secret" \
+  '{"data":{"application_id":"e2e-gl-app-id","application_secret":"e2e-gl-app-secret-not-a-real-secret"}}'
+
+# The management secret key a keyless scaleway source creates dynamic API keys
+# with. Chained like the gitlab pat above and spent the same way — on a header of
+# the driver's own mint call, X-Auth-Token on POST /iam/v1alpha1/api-keys — so
+# the dynamic row in e2e/fullchain/scaleway_test.go proves this value
+# authenticated a real key-create, having reached the driver from here and
+# nowhere else.
+vault_api POST "secret/data/e2e/scaleway-mgmt-key" \
+  '{"data":{"management_secret_key":"e2e-scw-mgmt-not-a-real-secret-key"}}'
+
+# A whole scaleway key pair, for the chain that hangs off a SPEC rather than a
+# source. Scaleway is the one provider whose two mint methods chain different
+# secrets: dynamic_keys chains the management key above, which authenticates the
+# source's own calls, while static_keys chains this pair, which IS the
+# credential and authenticates nothing of the source's.
+#
+# Both halves travel for that reason, and the access key carries the SCW prefix
+# because the credential type refuses anything else at parse — chained or not.
+vault_api POST "secret/data/e2e/scaleway-static-pair" \
+  '{"data":{"access_key":"SCWE2ECHAINEDPAIR000","secret_key":"e2e-scw-chained-pair-not-a-real-secret"}}'
+
+# The OAuth2 client credential a keyless ovh source performs its grant with.
+# Both halves, because they authenticate as a pair — a chained source is refused
+# an inline client_id precisely so an id cannot name one service account while
+# the secret beside it belongs to another.
+#
+# A real Hydra client, so the chained mint performs a REAL grant against a
+# validating token endpoint: the row passes only if the pair fetched from here
+# satisfies Hydra. Every other chained row in this suite spends its secret
+# against a stand-in that would accept anything.
+#
+# Deliberately NOT e2e-agent, which every other source in the suite holds
+# inline: the minted token carries this client's id, so the row can tell the
+# chain from a routing regression that fell back to an inline credential.
+vault_api POST "secret/data/e2e/ovh-client-credential" \
+  '{"data":{"client_id":"e2e-ovh-chain","client_secret":"ovh-chain-secret"}}'
+
+# An object-storage key pair for ovh's access_keys method, which serves a pair
+# held elsewhere and calls OVH for nothing. Like the scaleway pair above this is
+# a SPEC-level chain, for the same reason: the pair IS the credential.
+vault_api POST "secret/data/e2e/ovh-access-keys" \
+  '{"data":{"access_key":"E2EOVHACCESSKEY00000","secret_key":"e2e-ovh-access-not-a-real-secret"}}'
+
+# The API token a keyless cloudflare source serves, for the chain that hangs off
+# a SPEC: the source holds nothing, and each spec names where its credential is.
+# Deliberately not the token the local cloudflare row holds inline, so the row
+# can tell the chain from a routing regression that fell back to that spec.
+vault_api POST "secret/data/e2e/cloudflare-token" \
+  '{"data":{"api_token":"fc-cloudflare-chained-not-a-real-api-token"}}'
+
+# The IBM api key an ibm source fetches per request instead of storing. IBM has no
+# assertion grant to federate against, so this SOURCE-level chain is what keyless
+# means there. Stored under a name that is neither of the driver's conventional
+# ones, so the row has to project it with json_key_map to be read at all — which is
+# also what pins that unnamed fields are dropped, since the companion key below
+# must not reach the driver.
+vault_api POST "secret/data/e2e/ibm-api-key" \
+  '{"data":{"ibmcloud_api_key":"e2e-ibm-chained-api-key","unrelated_field":"must-not-be-vended"}}'
+
+# A COS HMAC pair for ibm's access_keys method, which serves a pair held elsewhere
+# and calls IBM for nothing. A SPEC-level chain, like the ovh and scaleway pairs
+# above and for the same reason: the pair IS the credential.
+vault_api POST "secret/data/e2e/ibm-cos-hmac" \
+  '{"data":{"access_key_id":"E2EIBMCOSACCESSKEY00","secret_access_key":"e2e-ibm-cos-not-a-real-secret"}}'
+
+# The Elasticsearch cluster key an elastic source fetches per request instead of
+# storing. Two secrets, because the driver accepts the two shapes a vault holds
+# such a key in and chooses between them by whether an id travels alongside — a
+# branch worth driving through a real chain rather than only in unit tests.
+#
+# Pre-encoded: the base64 of "id:api_key" the cluster hands out as `encoded`,
+# which is what an operator copying from a create-key response will have.
+# Assembled with base64 rather than written out, for the reason elastic_test.go
+# gives: a literal blob of this length reads as a real credential to a secret
+# scanner however synthetic its contents.
+vault_api POST "secret/data/e2e/elastic-cluster-key" \
+  "{\"data\":{\"encoded\":\"$(printf 'e2e-es-cluster-id:e2e-es-cluster-not-a-real-secret' | base64)\"}}"
+
+# The pair shape: the raw key half beside its id, which is how a vault holds it
+# when the two were filed as separate fields.
+vault_api POST "secret/data/e2e/elastic-cluster-pair" \
+  '{"data":{"api_key":"e2e-es-cluster-not-a-real-secret","id":"e2e-es-cluster-id"}}'
+
+# The same pair under names the driver does not look for, plus a companion field
+# that must never be vended. The driver reads the id by name and secret_field
+# renames only the single secret, so a payload shaped like this is unusable until
+# the referenced spec projects it with json_key_map — which is the one way to
+# rename the id, and the reason this fixture exists.
+vault_api POST "secret/data/e2e/elastic-cluster-odd" \
+  '{"data":{"key":"e2e-es-cluster-not-a-real-secret","key_id":"e2e-es-cluster-id","unrelated_field":"must-not-be-vended"}}'
+
+# The privileged token a keyless grafana source fetches instead of storing. Under
+# its conventional name, so the chaining rows can drive both the secret_field path
+# and the fallback the driver takes when no field is set. Assembled rather than
+# written out, for the reason the elastic fixtures above give.
+vault_api POST "secret/data/e2e/grafana-admin-token" \
+  "{\"data\":{\"admin_token\":\"glsa_$(printf 'e2e-grafana-not-a-real-admin-token')\"}}"
+
+# The three Honeycomb keys a keyless apikey source fetches per request. Honeycomb
+# has no dynamic-key source of its own: the operator provisions a key and files it
+# here, and what the mount does with it is decided by the payload's shape.
+#
+# An ingest key, as Honeycomb hands one over: its ID and secret already
+# concatenated, which is the only form X-Honeycomb-Team accepts. Assembled rather
+# than written out, for the reason the elastic fixtures above give.
+vault_api POST "secret/data/e2e/honeycomb-ingest-key" \
+  "{\"data\":{\"api_key\":\"hcxik_$(printf 'e2e-honeycomb-not-a-real-ingest-key')\"}}"
+
+# A management key: the two halves apart, since the Bearer form joins them with a
+# colon. key_id travelling beside the secret is what flips the mount to management
+# mode, so this payload and the one above differ by exactly the field that decides
+# the header.
+vault_api POST "secret/data/e2e/honeycomb-mgmt-key" \
+  "{\"data\":{\"api_key\":\"$(printf 'e2e-honeycomb-not-a-real-key-secret')\",\"key_id\":\"hcxmk_e2e-key-id\"}}"
+
+# The same kind of key under a name nothing looks for, plus a companion field that
+# must never be vended. Unusable until a spec names it with secret_field, which is
+# what this fixture exists to drive — and what makes the row where the field names
+# nothing mean something.
+vault_api POST "secret/data/e2e/honeycomb-odd-key" \
+  "{\"data\":{\"hc_key\":\"hcxik_$(printf 'e2e-honeycomb-odd-not-a-real-key')\",\"unrelated_field\":\"must-not-be-vended\"}}"
+
 # Create policy for Warden-minted service tokens (read-only secrets access)
 echo "  Creating Vault policies..."
 vault_api PUT "sys/policies/acl/e2e-secrets-reader" \
@@ -366,29 +521,65 @@ fi
 echo ""
 echo "[8/10] Creating Hydra OAuth2 clients..."
 
+# Every client may ask for the warden-e2e audience, and the suites always do:
+# Warden's agent auth mounts admit only tokens issued for an audience they
+# bind, and a token issued for none carries an empty aud.
+
 # Client for AI agent (transparent mode testing)
 curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -H "Content-Type: application/json" \
-  -d '{"client_id":"e2e-agent","client_name":"E2E Agent","client_secret":"agent-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+  -d '{"client_id":"e2e-agent","client_name":"E2E Agent","client_secret":"agent-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post"}' \
   >/dev/null 2>&1 && echo "  [OK] e2e-agent" || echo "  [SKIP] e2e-agent (already exists?)"
 
 # Client for CI/CD pipeline
 curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -H "Content-Type: application/json" \
-  -d '{"client_id":"e2e-pipeline","client_name":"E2E Pipeline","client_secret":"pipeline-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post"}' \
+  -d '{"client_id":"e2e-pipeline","client_name":"E2E Pipeline","client_secret":"pipeline-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post"}' \
   >/dev/null 2>&1 && echo "  [OK] e2e-pipeline" || echo "  [SKIP] e2e-pipeline (already exists?)"
 
 # Client with 2s token TTL for expired JWT testing
 curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -H "Content-Type: application/json" \
-  -d '{"client_id":"e2e-ephemeral","client_name":"E2E Ephemeral","client_secret":"ephemeral-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","token_endpoint_auth_method":"client_secret_post","client_credentials_grant_access_token_lifespan":"2s"}' \
+  -d '{"client_id":"e2e-ephemeral","client_name":"E2E Ephemeral","client_secret":"ephemeral-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post","client_credentials_grant_access_token_lifespan":"2s"}' \
   >/dev/null 2>&1 && echo "  [OK] e2e-ephemeral (2s TTL)" || echo "  [SKIP] e2e-ephemeral (already exists?)"
+
+# A client of its own for the ovh chained row, so that row can prove WHICH
+# credential was spent. The chained source fetches its service account from the
+# secret store; every other source in this suite holds e2e-agent inline, so a
+# chain seeded with e2e-agent would look identical to a routing regression that
+# fell back to one of them. This client exists nowhere but the secret store, and
+# the minted token names it in its client_id claim.
+curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
+  -H "Content-Type: application/json" \
+  -d '{"client_id":"e2e-ovh-chain","client_name":"E2E OVH Chained Service Account","client_secret":"ovh-chain-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post"}' \
+  >/dev/null 2>&1 && echo "  [OK] e2e-ovh-chain" || echo "  [SKIP] e2e-ovh-chain (already exists?)"
+
+# A user whose subject is an upstream profile id, for the anthropic attribution
+# rows. A client_credentials token's sub is its client_id, so naming the client
+# uprof_... gives the user leg a claim shaped like a real profile id, which the
+# user auth role can then map into verified token metadata. No other client's
+# subject has that shape, which is what lets a row prove the value came from
+# this user and not from somewhere else.
+curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
+  -H "Content-Type: application/json" \
+  -d '{"client_id":"uprof_e2e-anthropic-user","client_name":"E2E Anthropic Profiled User","client_secret":"anthropic-user-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post"}' \
+  >/dev/null 2>&1 && echo "  [OK] uprof_e2e-anthropic-user" || echo "  [SKIP] uprof_e2e-anthropic-user (already exists?)"
+
+# A user whose subject is shaped like a Warden agent subject, for the reserved
+# prefix row. A client_credentials token's sub is its client_id, and the user
+# auth role binds no claim, so this is the token a user who controls their own
+# IdP subject would present: Warden must refuse it rather than let it stand in
+# for the agent it names.
+curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
+  -H "Content-Type: application/json" \
+  -d '{"client_id":"wid:root:e2e:impersonated-agent","client_name":"E2E Agent-Shaped User","client_secret":"agent-shaped-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post"}' \
+  >/dev/null 2>&1 && echo "  [OK] wid:root:e2e:impersonated-agent" || echo "  [SKIP] wid:root:e2e:impersonated-agent (already exists?)"
 
 # Verify JWT issuance works
 echo "  Verifying JWT issuance..."
 JWT_RESPONSE=$(curl -s -X POST "$HYDRA_PUBLIC/oauth2/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=e2e-agent&client_secret=agent-secret&scope=api:read api:write" 2>/dev/null)
+  -d "grant_type=client_credentials&client_id=e2e-agent&client_secret=agent-secret&scope=api:read api:write&audience=warden-e2e" 2>/dev/null)
 if echo "$JWT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('access_token','').startswith('eyJ')" 2>/dev/null; then
   echo "  JWT issuance verified."
 else
@@ -414,10 +605,19 @@ vault_api POST "sys/auth/jwt" '{"type":"jwt"}' || true
 vault_api POST "auth/jwt/config" \
   '{"jwks_url":"http://hydra:4444/.well-known/jwks.json","bound_issuer":"http://localhost:4444"}'
 
-# Hydra client-credentials tokens carry an empty aud, so the role binds the
-# subject instead — which for those tokens is the client id.
+# The suites' Hydra tokens are issued for warden-e2e, the audience Warden's
+# auth mounts bind; a token federated as the calling agent reaches Vault with
+# that same audience, so the role binds it, and the subject — which for those
+# tokens is the client id.
+#
+# A list rather than one subject, because a chained secret fetched with
+# agent_identity federates as the calling agent: a row proving two agents resolve
+# different secrets needs both of them able to log in here. Still a closed list —
+# an unknown client is refused exactly as before. bound_subject is cleared in the
+# same write on purpose: a role write merges, so leaving it set would silently keep
+# the single-subject restriction in force.
 vault_api POST "auth/jwt/role/warden-e2e-fed" \
-  '{"role_type":"jwt","bound_subject":"e2e-agent","user_claim":"sub","bound_issuer":"http://localhost:4444","token_policies":["e2e-secrets-reader"],"token_ttl":"1h"}'
+  '{"role_type":"jwt","bound_subject":"","bound_audiences":["warden-e2e"],"bound_claims":{"sub":["e2e-agent","e2e-pipeline"]},"user_claim":"sub","bound_issuer":"http://localhost:4444","token_policies":["e2e-secrets-reader"],"token_ttl":"1h"}'
 
 # Verify the federation login works, so a later gateway 401 is not mistaken for
 # a chaining bug.
@@ -449,15 +649,17 @@ warden_api POST "sys/providers/vault" '{"type":"vault"}'
 
 sleep 1
 
-# 9b. Configure Vault provider address
+# 9b. Configure Vault provider, transparent mode included. One write: the
+# provider refuses a config without auto_auth_path, and a refused write
+# applies nothing. The auth mount it names is enabled in 9f.
 echo "  Configuring Vault provider..."
 warden_api PUT "vault/config" \
-  "{\"vault_address\":\"$VAULT_ADDR\",\"tls_skip_verify\":true,\"timeout\":\"30s\"}"
+  "{\"vault_address\":\"$VAULT_ADDR\",\"tls_skip_verify\":true,\"timeout\":\"30s\",\"auto_auth_path\":\"auth/jwt/\"}"
 
 # 9c. Create credential source (AppRole auth to Vault dev server)
 echo "  Creating credential source 'vault-e2e'..."
 warden_api POST "sys/cred/sources/vault-e2e" \
-  "{\"type\":\"hvault\",\"rotation_period\":300,\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"auth_method\":\"approle\",\"role_id\":\"$VAULT_APPROLE_ROLE_ID\",\"secret_id\":\"$VAULT_APPROLE_SECRET_ID\",\"approle_mount\":\"e2e_approle\",\"role_name\":\"warden-e2e-role\"}}"
+  "{\"type\":\"hvault\",\"rotation_period\":300,\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"tls_skip_verify\":true,\"auth_method\":\"approle\",\"role_id\":\"$VAULT_APPROLE_ROLE_ID\",\"secret_id\":\"$VAULT_APPROLE_SECRET_ID\",\"approle_mount\":\"e2e_approle\",\"role_name\":\"warden-e2e-role\"}}"
 
 # 9c-bis. Keyless federation source, for credential chaining.
 #
@@ -465,7 +667,7 @@ warden_api POST "sys/cred/sources/vault-e2e" \
 # session to rotate, and the driver rejects the AppRole fields outright.
 echo "  Creating credential source 'vault-fed-e2e' (OIDC federation)..."
 warden_api POST "sys/cred/sources/vault-fed-e2e" \
-  "{\"type\":\"hvault\",\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"auth_method\":\"oidc_federation\",\"jwt_role\":\"warden-e2e-fed\",\"jwt_mount\":\"jwt\"}}"
+  "{\"type\":\"hvault\",\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"tls_skip_verify\":true,\"auth_method\":\"oidc_federation\",\"jwt_role\":\"warden-e2e-fed\",\"jwt_mount\":\"jwt\"}}"
 
 # 9d. Create credential spec (mint Vault tokens via token role)
 echo "  Creating credential spec 'vault-token-reader'..."
@@ -485,18 +687,105 @@ sleep 1
 
 # 9g. Configure JWT auth with Hydra OIDC discovery
 echo "  Configuring JWT auth with Hydra OIDC..."
+# An agent mount must bind an audience: the suites' Hydra tokens are issued
+# for warden-e2e.
 warden_api PUT "auth/jwt/config" \
-  "{\"mode\":\"oidc\",\"oidc_discovery_url\":\"$HYDRA_PUBLIC\",\"bound_issuer\":\"$HYDRA_PUBLIC\"}"
+  "{\"mode\":\"oidc\",\"oidc_discovery_url\":\"$HYDRA_PUBLIC\",\"bound_issuer\":\"$HYDRA_PUBLIC\",\"bound_audiences\":[\"warden-e2e\"],\"user_claim\":\"sub\",\"token_ttl\":\"1h\"}"
 
-# 9h. Create JWT role linking to credential spec
-echo "  Creating JWT role 'e2e-reader'..."
-warden_api POST "auth/jwt/role/e2e-reader" \
-  '{"token_policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","user_claim":"sub","token_ttl":3600}'
+# 9h. Create the role linking to the credential spec, and the group granting
+# it to every agent the JWT mount admits. The role names the vault provider,
+# whose auto_auth_path is where discovery evaluates it.
+echo "  Creating role 'e2e-reader' and its group..."
+warden_api POST "sys/roles/e2e-reader" \
+  '{"policies":["vault-gateway-access"],"cred_spec_name":"vault-token-reader","provider_path":"vault/"}'
+warden_api POST "sys/identity/group/e2e-reader--jwt" \
+  '{"type":"virtual","roles":["e2e-reader"],"rules":[{"mount":["auth/jwt/"]}]}'
 
-# 9i. Enable transparent mode on Vault provider
-echo "  Enabling transparent mode..."
-warden_api POST "vault/config" \
-  '{"auto_auth_path":"auth/jwt/"}'
+# 9i. (Transparent mode is configured with the provider, in 9b.)
+
+# 9j. Enable Warden's own OIDC issuer (workload identity federation).
+#
+# Suites minting Warden-signed identity assertions (subject_token_source=
+# warden_identity) need the issuer enabled and ready. With the signer "transit"
+# stanza in every node's config, this write provisions the signing keys IN
+# transit — the private key is created there and never enters Warden. The write
+# is a partial update and idempotent: re-applying it regenerates no keys, so the
+# JWKS kids stay stable across setup re-runs.
+#
+# issuer_url is the `iss` claim and the origin verifiers fetch discovery/JWKS
+# from, so it must outlive any single node: the load balancer fronts all three
+# and proxies every path, whereas a node origin goes dark whenever that node is
+# killed — which the HA suites do deliberately.
+#
+# Unlike the checks above this one aborts rather than warns. The issuer is part
+# of the harness contract now, and a silent failure here surfaces far from its
+# cause: suites that re-apply the config without an issuer_url would fail with
+# "issuer_url is required", saying nothing about setup having skipped this step.
+echo "  Enabling Warden OIDC issuer..."
+ISSUER_RESULT=$(warden_api POST "sys/oidc-issuer/config" \
+  '{"enabled":true,"issuer_url":"https://127.0.0.1:8000"}')
+if echo "$ISSUER_RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['data']['ready'] is True" 2>/dev/null; then
+  echo "  OIDC issuer enabled and ready."
+else
+  echo "ERROR: OIDC issuer enable failed or not ready"
+  echo "  $ISSUER_RESULT"
+  exit 1
+fi
+
+# 9k. A second Vault JWT auth mount, trusting WARDEN'S OWN issuer.
+#
+# Until now every chained suite has had to use subject_token_source=
+# agent_identity, because the only Vault JWT mount trusts Hydra: a Warden-minted
+# assertion fails its signature, its iss, its sub and its aud. warden_identity —
+# the mode for a spec with no inbound agent JWT to forward — went untested.
+#
+# Static keys rather than a jwks_url, on purpose. Vault would otherwise have to
+# fetch the JWKS from a Warden node, and no compose-network path to one exists:
+# only nginx carries a host-gateway mapping. But the issuer's signing keys live
+# in THIS Vault's transit engine already (the signer stanza in every node's
+# config), so the public halves are readable right here with no network hop and
+# no certificate to pin.
+#
+# Every transit version is pinned, not just the newest: enabling the issuer
+# pre-publishes the next key alongside the active one, so pinning one would
+# start rejecting assertions the moment a cutover happened.
+#
+# This must follow 9j — the transit keys exist only once that write has run.
+echo "  Enabling Vault JWT auth for Warden-issued assertions..."
+vault_api POST "sys/auth/jwt-warden" '{"type":"jwt"}' >/dev/null
+
+WARDEN_JWT_CONFIG=$(vault_api GET "transit/keys/warden-oidc-rs256" | python3 -c "
+import sys, json
+keys = json.load(sys.stdin)['data']['keys']
+pems = [v['public_key'] for _, v in sorted(keys.items(), key=lambda kv: int(kv[0]))]
+if not pems:
+    raise SystemExit(1)
+print(json.dumps({
+    'jwt_validation_pubkeys': pems,
+    'bound_issuer': 'https://127.0.0.1:8000',
+    'jwt_supported_algs': ['RS256'],
+}))
+" 2>/dev/null || true)
+if [ -z "$WARDEN_JWT_CONFIG" ]; then
+  echo "ERROR: could not read the OIDC issuer's public keys from Vault transit"
+  exit 1
+fi
+vault_api POST "auth/jwt-warden/config" "$WARDEN_JWT_CONFIG" >/dev/null
+
+# bound_audiences is mandatory here where the Hydra role binds sub instead: a
+# Warden assertion always carries an aud, and Vault refuses a JWT whose aud the
+# role does not bind. The subject is the agent's composite
+# wid:<namespace>:<mount_accessor>:<principal>; the accessor is regenerated on
+# every setup run, so it is globbed, while the namespace and the closed client
+# list (the same as the Hydra role's) are pinned.
+vault_api POST "auth/jwt-warden/role/warden-e2e-warden-fed" \
+  '{"role_type":"jwt","bound_audiences":["https://vault.e2e.warden"],"bound_claims_type":"glob","bound_claims":{"sub":["wid:root:*:e2e-agent","wid:root:*:e2e-pipeline"]},"user_claim":"sub","token_policies":["e2e-secrets-reader"],"token_ttl":"1h"}' >/dev/null
+
+# The federation source that logs in there. audience sits on the SOURCE so a
+# spec need not repeat assertion_audience: the driver derives it from here.
+echo "  Creating credential source 'vault-warden-fed-e2e' (Warden-identity federation)..."
+warden_api POST "sys/cred/sources/vault-warden-fed-e2e" \
+  "{\"type\":\"hvault\",\"config\":{\"vault_address\":\"$VAULT_ADDR\",\"tls_skip_verify\":true,\"auth_method\":\"oidc_federation\",\"jwt_role\":\"warden-e2e-warden-fed\",\"jwt_mount\":\"jwt-warden\",\"audience\":\"https://vault.e2e.warden\"}}"
 
 # Step 10: Verify Vault integration
 echo ""

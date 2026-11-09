@@ -8,9 +8,9 @@ title: "AWS"
 This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (OIDC federation)](#keyless-oidc-federation).
 :::
 
-The AWS driver brokers credentials from **Amazon Web Services**. The **source** holds a long-lived IAM **access key** (`access_key_id` / `secret_access_key`) and a region; it can optionally chain into an elevated session by assuming a role. From that authenticated base, each **spec** picks a `mint_method` to produce one of several credential shapes — temporary STS session credentials, a secret pulled from Secrets Manager, or a short-lived database IAM auth token for RDS or Redshift.
+The AWS driver brokers credentials from **Amazon Web Services**. The **source** authenticates to AWS — keylessly, by exchanging a Warden identity assertion for an STS session, or with a stored IAM **access key** (`access_key_id` / `secret_access_key`). With a stored key, the source can optionally chain into an elevated session by assuming a role. From that authenticated base, each **spec** picks a `mint_method` to produce one of several credential shapes — temporary STS session credentials, a secret pulled from Secrets Manager, or a short-lived database IAM auth token for RDS or Redshift.
 
-Reach for this driver when workloads need scoped, time-bounded access to AWS APIs or to IAM-authenticated databases without ever handling the operator's standing IAM key. The privileged key lives only in the source config; specs carry the per-request details (which role, which secret, which database).
+Reach for this driver when workloads need scoped, time-bounded access to AWS APIs or to IAM-authenticated databases without ever handling a standing IAM key. Keyless, there is no key at all; with a stored key, it lives only in the source config. Specs carry the per-request details (which role, which secret, which database).
 
 ## Keyless (OIDC federation)
 
@@ -18,10 +18,16 @@ Set `auth_method = "oidc_federation"` on the source to hold **no AWS secret**: i
 of `access_key_id`/`secret_access_key`, Warden mints an
 [identity assertion](/federation/oidc-issuer/) and exchanges it via
 `sts:AssumeRoleWithWebIdentity` for a short-lived session. The IAM role's trust policy
-federates Warden's issuer. Works for `sts_assume_role` and for keyless
-`secrets_manager` reads. The spec sets `subject_token_source` (`warden_identity` or
-`agent_identity`). See [Keyless credential sources](/federation/keyless-credentials/)
-for the full model.
+federates Warden's issuer. Works for `sts_assume_role`, and for keyless
+`secrets_manager` and `secret_read` reads. The spec sets `subject_token_source`
+(`warden_identity` or `agent_identity`). See
+[Keyless credential sources](/federation/keyless-credentials/) for the full model.
+
+A new spec that mints a Warden assertion on an AWS source is written with
+[`assertion_profile=aws`](/federation/assertion-claims/#the-aws-profile): the agent's role
+and projected metadata travel as **session tags**, so the role's trust policy must allow
+**`sts:TagSession`** as well as `sts:AssumeRoleWithWebIdentity`, or STS refuses the token.
+Set `assertion_profile=default` on the spec to mint without tags.
 
 ## Credential issued
 
@@ -43,22 +49,32 @@ No spec verification.
 The source stores no AWS secret; the IAM role's trust policy federates Warden's issuer.
 
 ```bash
-warden cred source create prod-aws-keyless \
-  -type=aws \
-  -config=auth_method=oidc_federation \
-  -config=region=us-east-1
+warden cred source create prod-aws-keyless -json '{
+  "type": "aws",
+  "config": {
+    "auth_method": "oidc_federation",
+    "region": "us-east-1"
+  }
+}'
 
-warden cred spec create deploy-role \
-  -source=prod-aws-keyless \
-  -config=mint_method=sts_assume_role \
-  -config=subject_token_source=warden_identity \
-  -config=role_arn=arn:aws:iam::123456789012:role/DeployRole \
-  -config=ttl=1h
+warden cred spec create deploy-role -json '{
+  "source": "prod-aws-keyless",
+  "config": {
+    "mint_method": "sts_assume_role",
+    "subject_token_source": "warden_identity",
+    "role_arn": "arn:aws:iam::123456789012:role/DeployRole",
+    "ttl": "1h"
+  }
+}'
 ```
+
+The spec is stored with `assertion_profile=aws`, so `DeployRole`'s trust policy allows
+`sts:AssumeRoleWithWebIdentity` and `sts:TagSession` for Warden's issuer.
 
 ### Inline secret (discouraged)
 
-One source holds the standing IAM key; each spec below picks a `mint_method`.
+With a stored key, one source holds the standing IAM key; each spec below picks a
+`mint_method`.
 
 ```bash
 warden cred source create prod-aws \
@@ -120,6 +136,8 @@ Keys for `warden cred source create <name> -type=aws -config=key=value ...`:
 | `access_key_id` | For `static` | — | AWS IAM access key ID for the source. Omit for keyless. |
 | `secret_access_key` | For `static` | — | AWS IAM secret access key (masked). Omit for keyless. |
 | `region` | Yes | — | AWS region for API calls (e.g. `us-east-1`). |
+| `sts_endpoint` | No | *(SDK default)* | Override the STS endpoint. |
+| `secretsmanager_endpoint` | No | *(SDK default)* | Override the Secrets Manager endpoint. |
 | `audience` | For keyless | — | Audience minted into the `warden_identity` assertion for this source (`oidc_federation` only; default `sts.amazonaws.com`). Rejected on a `static` source. |
 | `assume_role_arn` | No | — | Optional IAM role ARN to assume for elevated permissions. **Static sources only** — not supported for `oidc_federation`. |
 | `session_name` | No | `warden-source-session` | Session name for AssumeRole operations (with `assume_role_arn`). |
@@ -132,14 +150,33 @@ Keys for `warden cred source create <name> -type=aws -config=key=value ...`:
 |---------------|--------|---------------------|
 | `sts_assume_role` | `aws_access_keys` | `role_arn` (required), `ttl` (default `1h`), `session_name`, `external_id`, `policy` |
 | `secrets_manager` | `aws_access_keys` | `secret_id` (required), `version_stage`, `version_id`, `json_key_map` |
+| `secret_read` | `key_value` | The same Secrets Manager read, vended **verbatim** for [chaining](/federation/credential-chaining/). Same spec config as `secrets_manager`, plus `role_arn` when keyless. |
 | `rds_iam_token` | `db_auth_token` | `db_endpoint` (required), `db_user` (required), `db_engine` (default `postgres`), `db_port`, `region` |
 | `redshift_iam_token` | `db_auth_token` | `db_endpoint` (required), plus exactly one of `cluster_identifier` or `workgroup_name`, `db_name`, `db_port` (default `5439`), `duration_seconds` (900–3600, default `900`), `region` |
+
+`secret_read` is what makes AWS a chaining **producer**: the payload is preserved as
+stored, so a consuming spec can name its fields directly. A **keyless** `secret_read`
+spec must also set `role_arn` — the federated session assumes that role first, and reads
+the secret as it. `sts_assume_role`,
+`secrets_manager` and `secret_read` all work over `auth_method=oidc_federation`, so
+the producer itself can be keyless.
+
+`secret_id` accepts `{{user.<claim>}}` and `{{agent.<claim>}}` templating, so one spec
+can resolve to a per-caller secret. The claims come from the exchange on that request,
+which scopes the fetch to the principals actually present.
+
+:::caution[Endpoint overrides and rotation are mutually exclusive]
+A source that sets `sts_endpoint` or `secretsmanager_endpoint` cannot also set
+`rotation_period`, and the combination is rejected. Rotation manages IAM keys in the
+real account, which those overrides do not redirect — so it would rotate keys that
+exist somewhere else and fail on a loop with no indication why.
+:::
 
 Spec-config keys set with `warden cred spec create ... -config=key=value`:
 
 | Key | Required | Default | Meaning |
 |-----|----------|---------|---------|
-| `mint_method` | Yes | — | Which minting path to use — one of the four values above. Must be set explicitly; there is no default. |
+| `mint_method` | Yes | — | Which minting path to use — one of the five values above. Must be set explicitly; there is no default. |
 | `subject_token_source` | For keyless | — | On an `oidc_federation` source: the federated subject — `warden_identity` or `agent_identity`. |
 | `credential_type` | No | `aws_access_keys` | Shape a Secrets Manager read vends: `aws_access_keys` or `api_key`. **Valid only with `mint_method=secrets_manager`** — rejected on any other mint method. |
 | `role_arn` | Yes (`sts_assume_role`) | — | Role the session assumes. |
@@ -162,9 +199,12 @@ Spec-config keys set with `warden cred spec create ... -config=key=value`:
 | `region` | No | source `region` | Overrides the source region for the DB token. |
 
 A `subject_token_source=warden_identity` spec also accepts the assertion-shaping keys —
-`assertion_audience`, `assertion_resource`, `assertion_metadata_claims`,
-`assertion_user_claims`, `assertion_algorithm` — documented on
-[Assertion claims](/federation/assertion-claims/).
+`assertion_profile` (`aws` by default on a new spec), `assertion_audience`,
+`assertion_resource`, `assertion_metadata_claims`, `assertion_user_claims`,
+`assertion_algorithm` and `assertion_ttl` — documented on
+[Assertion claims](/federation/assertion-claims/). Under the `aws` profile,
+`assertion_resource` is refused and each `assertion_metadata_claims` key must be a valid
+session-tag key.
 
 ## See Also
 

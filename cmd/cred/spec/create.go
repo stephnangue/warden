@@ -103,6 +103,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			"name":    name,
 			"created": true,
 		})
+		helpers.PrintWarnings(helpers.WarningsFromData(resData))
 		return helpers.RenderMap(data, func() {
 			fmt.Printf("Success! Created credential spec: %s\n", name)
 		})
@@ -193,6 +194,10 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if output.RotationPeriod > 0 {
 		data["rotation_period"] = output.RotationPeriod.String()
 	}
+	if len(output.Warnings) > 0 {
+		data["warnings"] = output.Warnings
+	}
+	helpers.PrintWarnings(output.Warnings)
 
 	return helpers.RenderMap(data, func() {
 		fmt.Printf("Success! Created credential spec: %s\n", output.Name)

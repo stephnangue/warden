@@ -69,8 +69,9 @@ func runList(cmd *cobra.Command, args []string) error {
 	items := make([]map[string]any, 0, len(namespaces))
 	for _, ns := range namespaces {
 		item := map[string]any{
-			"path": ns.Path,
-			"id":   ns.ID,
+			"path":                 ns.Path,
+			"id":                   ns.ID,
+			"enable_builtin_roles": ns.EnableBuiltinRoles,
 		}
 		if len(ns.CustomMetadata) > 0 {
 			meta := make(map[string]any, len(ns.CustomMetadata))
@@ -84,14 +85,18 @@ func runList(cmd *cobra.Command, args []string) error {
 
 	return helpers.RenderList(items, func() {
 		fmt.Printf("Found %d namespace(s):\n\n", len(namespaces))
-		headers := []string{"Path", "ID", "Metadata"}
+		headers := []string{"Path", "ID", "Built-in Roles", "Metadata"}
 		data := make([][]any, 0, len(namespaces))
 		for _, ns := range namespaces {
 			metadata := ""
 			if len(ns.CustomMetadata) > 0 {
 				metadata = fmt.Sprintf("%d key(s)", len(ns.CustomMetadata))
 			}
-			data = append(data, []any{ns.Path, ns.ID, metadata})
+			builtin := ""
+			if ns.EnableBuiltinRoles {
+				builtin = "enabled"
+			}
+			data = append(data, []any{ns.Path, ns.ID, builtin, metadata})
 		}
 		helpers.PrintTable(headers, data)
 	})

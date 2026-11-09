@@ -75,7 +75,7 @@ func (t *KubernetesTokenCredType) ConfigSchema() []*credential.FieldValidator {
 }
 
 // ValidateConfig validates the Config for a Kubernetes token credential spec
-func (t *KubernetesTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *KubernetesTokenCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	if sourceType != credential.SourceTypeKubernetes {
 		return fmt.Errorf("kubernetes_token credentials require a kubernetes source, got: %s", sourceType)
 	}
@@ -86,7 +86,7 @@ func (t *KubernetesTokenCredType) ValidateConfig(config map[string]string, sourc
 	}
 
 	// Validate TTL range if provided
-	if ttlStr, ok := config["ttl"]; ok && ttlStr != "" {
+	if ttlStr, ok := config.Lookup("ttl"); ok && ttlStr != "" {
 		ttl, err := time.ParseDuration(ttlStr)
 		if err != nil {
 			return fmt.Errorf("invalid ttl: %w", err)
@@ -111,4 +111,9 @@ func (t *KubernetesTokenCredType) RequiresSpecRotation() bool {
 // SensitiveConfigFields returns spec config keys that should be masked in output
 func (t *KubernetesTokenCredType) SensitiveConfigFields() []string {
 	return []string{}
+}
+
+// StoredSecrets reports nothing: its config holds only service account and audience fields.
+func (t *KubernetesTokenCredType) StoredSecrets(_ credential.Config) []string {
+	return nil
 }

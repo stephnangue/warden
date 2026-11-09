@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/stephnangue/warden/logical"
 
+	multierror "github.com/hashicorp/go-multierror"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -102,41 +104,17 @@ func TestOperationFromHTTPMethod_OPTIONS(t *testing.T) {
 // extractClientIP Tests
 // =============================================================================
 
-func TestExtractClientIP_FromXRealIP(t *testing.T) {
+// Forwarding headers are not read here: the listener honours them only from a
+// trusted proxy or a forwarding node, and resolves the result into RemoteAddr.
+// A header that reaches this point was sent by the caller, so it proves
+// nothing about where the request came from.
+func TestExtractClientIP_IgnoresForwardingHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
 	req.Header.Set("X-Real-IP", "10.0.0.1")
+	req.Header.Set("X-Forwarded-For", "10.0.0.2, 10.0.0.3")
 	req.RemoteAddr = "192.168.1.1:12345"
 
-	ip := extractClientIP(req)
-	assert.Equal(t, "10.0.0.1", ip)
-}
-
-func TestExtractClientIP_FromXForwardedFor_Single(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
-	req.Header.Set("X-Forwarded-For", "10.0.0.2")
-	req.RemoteAddr = "192.168.1.1:12345"
-
-	ip := extractClientIP(req)
-	assert.Equal(t, "10.0.0.2", ip)
-}
-
-func TestExtractClientIP_FromXForwardedFor_Multiple(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
-	req.Header.Set("X-Forwarded-For", "10.0.0.3, 10.0.0.4, 10.0.0.5")
-	req.RemoteAddr = "192.168.1.1:12345"
-
-	ip := extractClientIP(req)
-	// Should return the first IP in the list
-	assert.Equal(t, "10.0.0.3", ip)
-}
-
-func TestExtractClientIP_FromXForwardedFor_WithSpaces(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
-	req.Header.Set("X-Forwarded-For", "  10.0.0.6  ")
-	req.RemoteAddr = "192.168.1.1:12345"
-
-	ip := extractClientIP(req)
-	assert.Equal(t, "10.0.0.6", ip)
+	assert.Equal(t, "192.168.1.1", extractClientIP(req))
 }
 
 func TestExtractClientIP_FromRemoteAddr_WithPort(t *testing.T) {
@@ -164,27 +142,6 @@ func TestExtractClientIP_FromRemoteAddr_NoPort(t *testing.T) {
 	assert.Equal(t, "192.168.1.200", ip)
 }
 
-func TestExtractClientIP_Priority(t *testing.T) {
-	// X-Real-IP takes priority over X-Forwarded-For and RemoteAddr
-	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
-	req.Header.Set("X-Real-IP", "1.1.1.1")
-	req.Header.Set("X-Forwarded-For", "2.2.2.2")
-	req.RemoteAddr = "3.3.3.3:12345"
-
-	ip := extractClientIP(req)
-	assert.Equal(t, "1.1.1.1", ip)
-}
-
-func TestExtractClientIP_XForwardedForPriority(t *testing.T) {
-	// X-Forwarded-For takes priority over RemoteAddr when X-Real-IP is not set
-	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
-	req.Header.Set("X-Forwarded-For", "2.2.2.2")
-	req.RemoteAddr = "3.3.3.3:12345"
-
-	ip := extractClientIP(req)
-	assert.Equal(t, "2.2.2.2", ip)
-}
-
 // =============================================================================
 // buildLogicalRequest Tests
 // =============================================================================
@@ -194,12 +151,15 @@ func TestBuildLogicalRequest_BasicGET(t *testing.T) {
 	req.RemoteAddr = "192.168.1.1:12345"
 	w := httptest.NewRecorder()
 
+	before := time.Now()
 	logicalReq := buildLogicalRequest(w, req)
 
 	assert.Equal(t, logical.ReadOperation, logicalReq.Operation)
 	assert.Equal(t, "secret/data/mykey", logicalReq.Path)
 	assert.Equal(t, "192.168.1.1", logicalReq.ClientIP)
 	assert.Equal(t, req, logicalReq.HTTPRequest)
+	assert.False(t, logicalReq.ReceivedAt.Before(before), "ReceivedAt is when the request was built")
+	assert.False(t, logicalReq.ReceivedAt.After(time.Now()))
 	// ResponseWriter is wrapped in StatusRecordingWriter for status code capture
 	srw, ok := logicalReq.ResponseWriter.(*logical.StatusRecordingWriter)
 	assert.True(t, ok, "ResponseWriter should be wrapped in StatusRecordingWriter")
@@ -240,7 +200,7 @@ func TestBuildLogicalRequest_SysPath(t *testing.T) {
 	assert.Equal(t, "sys/providers", logicalReq.Path)
 }
 
-func TestBuildLogicalRequest_WithXRealIP(t *testing.T) {
+func TestBuildLogicalRequest_ClientIPIsTheResolvedAddress(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
 	req.Header.Set("X-Real-IP", "10.10.10.10")
 	req.RemoteAddr = "192.168.1.1:12345"
@@ -248,7 +208,7 @@ func TestBuildLogicalRequest_WithXRealIP(t *testing.T) {
 
 	logicalReq := buildLogicalRequest(w, req)
 
-	assert.Equal(t, "10.10.10.10", logicalReq.ClientIP)
+	assert.Equal(t, "192.168.1.1", logicalReq.ClientIP)
 }
 
 func TestBuildLogicalRequest_NestedPath(t *testing.T) {
@@ -455,13 +415,12 @@ func TestExtractClientIP_TableDriven(t *testing.T) {
 		remoteAddr    string
 		expected      string
 	}{
-		{"X-Real-IP takes priority", "1.1.1.1", "2.2.2.2", "3.3.3.3:1234", "1.1.1.1"},
-		{"X-Forwarded-For when no X-Real-IP", "", "2.2.2.2", "3.3.3.3:1234", "2.2.2.2"},
-		{"First IP from X-Forwarded-For chain", "", "1.1.1.1, 2.2.2.2, 3.3.3.3", "4.4.4.4:1234", "1.1.1.1"},
+		{"X-Real-IP ignored", "1.1.1.1", "", "3.3.3.3:1234", "3.3.3.3"},
+		{"X-Forwarded-For ignored", "", "2.2.2.2", "3.3.3.3:1234", "3.3.3.3"},
+		{"X-Forwarded-For chain ignored", "", "1.1.1.1, 2.2.2.2", "4.4.4.4:1234", "4.4.4.4"},
 		{"RemoteAddr when no headers", "", "", "192.168.1.1:5000", "192.168.1.1"},
 		{"IPv6 RemoteAddr", "", "", "[::1]:5000", "::1"},
 		{"RemoteAddr without port", "", "", "10.0.0.1", "10.0.0.1"},
-		{"Trimmed X-Forwarded-For", "", "  10.0.0.1  ", "1.1.1.1:1234", "10.0.0.1"},
 	}
 
 	for _, tc := range tests {
@@ -885,4 +844,48 @@ func TestHandleLogical_ErrorToStatusCode_Integration(t *testing.T) {
 
 	// Sealed core -> error response with "sealed" message
 	assert.Contains(t, w.Body.String(), "sealed")
+}
+
+// refusalError reads as its message and unwraps to the permission denial, the
+// shape of core's role refusal.
+type refusalError string
+
+func (e refusalError) Error() string { return string(e) }
+
+func (e refusalError) Unwrap() error { return sdklogical.ErrPermissionDenied }
+
+// A refusal core gathers in a multierror reaches the client as its message
+// alone, whether it is returned as the error or carried on the response, and
+// keeps its status. Several gathered errors stay several messages.
+func TestErrorBody_GatheredErrorsRenderAsMessages(t *testing.T) {
+	const refusal = `role "ops-reader" is not assumable through auth/agent/: no group grants it to this caller`
+	single := multierror.Append(nil, refusalError(refusal))
+	several := multierror.Append(errors.New("first"), errors.New("second"))
+
+	render := map[string]func(err error) *httptest.ResponseRecorder{
+		"returned error": func(err error) *httptest.ResponseRecorder {
+			w := httptest.NewRecorder()
+			respondErr(w, errorToStatusCode(err), err)
+			return w
+		},
+		"response error": func(err error) *httptest.ResponseRecorder {
+			w := httptest.NewRecorder()
+			writeLogicalResponse(w, logical.ErrorResponse(err))
+			return w
+		},
+	}
+	for name, do := range render {
+		t.Run(name, func(t *testing.T) {
+			w := do(single)
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+			var body ErrorResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, []string{refusal}, body.Errors)
+
+			w = do(several)
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, []string{"first", "second"}, body.Errors)
+		})
+	}
 }

@@ -2,6 +2,7 @@ package logical
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 )
@@ -55,6 +56,14 @@ type Request struct {
 
 	MountClass string `json:"mount_class" structs:"mount_class" mapstructure:"mount_class"`
 
+	// DataPlane is true when the request is on a provider's data plane: a
+	// streaming gateway path, or a path the provider authenticates implicitly
+	// (IsTransparentPath, an access backend's access/ paths among them),
+	// whether or not the provider has an auto_auth_path. False on every
+	// control path, on help requests and on every non-provider mount. Set
+	// before CheckToken, so policy conditions read it as request.data_plane.
+	DataPlane bool `json:"data_plane" structs:"data_plane" mapstructure:"data_plane"`
+
 	// MountAccessor is provided so that identities returned by the authentication
 	// backends can be tied to the mount it belongs to.
 	MountAccessor string `json:"mount_accessor" structs:"mount_accessor" mapstructure:"mount_accessor"`
@@ -86,7 +95,7 @@ type Request struct {
 	// request header when the provider/namespace configures user_auth_path. It is
 	// IDENTITY-ONLY: it never authorizes the request (the primary/agent token entry
 	// alone does that) and is never SetTokenEntry'd. It scopes per-user credential
-	// chaining: the warden_user assertion claim, the per-user credential-cache
+	// chaining: the assertion's user level, the per-user credential-cache
 	// dimension, and audit attribution. Nil when the feature is unconfigured, which
 	// keeps the request byte-identical to before.
 	User *UserPrincipal `json:"-"`
@@ -96,11 +105,62 @@ type Request struct {
 	// against it. Set from the token entry at the policy-check seam; never
 	// compiled into the cached CBP, so a CBP shared across tokens with the
 	// same policy set is still matched against each token's own metadata.
+	//
+	// Shared with the token entry it came from, which may share it further (a
+	// cached token's metadata, or a membership rendered for every request of
+	// one credential): read only.
 	TokenMetadata map[string]string
+
+	// roleGrant is the role this request runs under when its token takes its
+	// role per request (an admission token), and hasRoleGrant says whether it
+	// is set. Held by value, so resolving a grant allocates nothing; read it
+	// through RoleGrant.
+	roleGrant    RoleGrant
+	hasRoleGrant bool
+
+	// Discovery records how a request on an identity path was admitted
+	// without a service token: the mounts that admitted the credential, how
+	// many roles their groups grant it, or that it ran anonymously. For the
+	// audit only; never disclosed to the caller. Nil on every other request.
+	Discovery *DiscoveryAdmission `json:"-"`
+
+	// SponsoredBy names the group a request on a sponsor path acted through
+	// ("group:<name>"): the entity's sponsor, or for an accept (and a read by
+	// one of its members) the pending handover. Set by the sponsor handlers on
+	// success only; for the audit. Empty on every other request.
+	SponsoredBy string `json:"-"`
+
+	// RequestedRole is the role a transparent or ticket-admitted request asks
+	// for (X-Warden-Role, the role/<name>/ segment, ?role=, the provider's
+	// default_role), set by core alongside Transparent or TicketAdmitted and
+	// never from client input directly. Empty when the request named none, or
+	// is neither.
+	RequestedRole string `json:"-"`
 
 	// Request metadata
 	ClientIP  string
 	RequestID string
+
+	// ReceivedAt is when the HTTP layer built the request, before its body
+	// was read. A DPoP proof's freshness is measured from it, so a slow upload
+	// does not age a proof that was fresh when the request arrived. Zero on a
+	// request core builds itself.
+	ReceivedAt time.Time `json:"-"`
+
+	// ProofID identifies the DPoP proof a bound ticket's request carried (a
+	// truncated hash of its jti), for the audit. Empty on every other request.
+	ProofID string `json:"-"`
+
+	// ProofOfPossession is whether the credential that authenticated this
+	// request proved, on this request, that its holder has the credential's
+	// key: a bound ticket's DPoP proof, or the TLS handshake of a client
+	// certificate. Only core sets it, once the credential has authenticated.
+	ProofOfPossession bool `json:"-"`
+
+	// body is the request body as core buffered it, and hasBody says whether
+	// it did; read through BufferedBody.
+	body    []byte
+	hasBody bool
 
 	// Whether the request is unauthenticated, as in, had no client token
 	// attached. Useful in some situations where the client token is not made
@@ -116,6 +176,19 @@ type Request struct {
 	// (JWT-based implicit authentication). Credentials for transparent
 	// requests are cache-only, not persisted to storage.
 	Transparent bool `json:"-"`
+
+	// TicketAdmitted indicates core admitted the ticket token this request
+	// presents, on this request: its seal was checked, so the request may ask
+	// for a role (RequestedRole) as a transparent one does. Only core's ticket
+	// hook sets it; it says nothing about transparent mode.
+	TicketAdmitted bool `json:"-"`
+
+	// Internal marks a request core builds and routes in process, never one
+	// that arrived over HTTP. Paths that hand back in-process values (an auth
+	// mount's introspect/admit returns a *Admission) refuse a request without
+	// it. Only core sets it, on requests it routes itself; the HTTP layer
+	// never does, and it is not decoded from JSON.
+	Internal bool `json:"-"`
 
 	// StreamUnauthenticated marks this streaming request for upstream
 	// pass-through without Warden authentication. Set by core when a
@@ -150,12 +223,19 @@ type Request struct {
 	// deep-copy field via MCPRequestDescriptor.Clone.
 	MCPDescriptor *MCPRequestDescriptor `json:"-"`
 
-	// MCPListFilter is set by the policy layer when an allowed MCP
-	// list request (tools/list, resources/list, prompts/list) should
-	// have its response filtered to the items the caller may actually
-	// use. Nil for every other request; a gateway that sees nil streams
-	// the response through verbatim. See MCPListFilter.
+	// MCPListFilter is set by the policy layer when an allowed MCP list
+	// request (tools/list, resources/list, prompts/list, skills/list,
+	// resources/directory/read) should have its response filtered to the
+	// items the caller may actually use. Nil for every other request; a
+	// gateway that sees nil streams the response through verbatim. See
+	// MCPListFilter.
 	MCPListFilter *MCPListFilter `json:"-"`
+
+	// MCPListFilters is MCPListFilter for an in-process MCP server
+	// (MCPInProcessServer): one filter per list method the body calls, keyed
+	// by the lowercased method, so every list call of a batch is filtered.
+	// Nil when no list call needs filtering.
+	MCPListFilters map[string]*MCPListFilter `json:"-"`
 }
 
 func (r *Request) TokenEntry() *TokenEntry {
@@ -164,6 +244,42 @@ func (r *Request) TokenEntry() *TokenEntry {
 
 func (r *Request) SetTokenEntry(te *TokenEntry) {
 	r.tokenEntry = te
+}
+
+// BufferedBody returns the request body core buffered whole, and whether it
+// did. The slice is the one the body is replayed from: read only.
+func (r *Request) BufferedBody() ([]byte, bool) {
+	return r.body, r.hasBody
+}
+
+// SetBufferedBody records b as the request body core buffered whole. Core
+// calls it from the one place it buffers a body.
+func (r *Request) SetBufferedBody(b []byte) {
+	r.body, r.hasBody = b, true
+}
+
+// RoleGrant returns the role grant core resolved for this request, or nil when
+// none is set: the request's token carries its role itself, or no token was
+// checked. The grant lives inside r, so the pointer is valid as long as r is,
+// and it is r's goroutine's to read.
+func (r *Request) RoleGrant() *RoleGrant {
+	if r == nil || !r.hasRoleGrant {
+		return nil
+	}
+	return &r.roleGrant
+}
+
+// SetRoleGrant stores g as the request's role grant and returns it in place.
+// Core calls it, and ClearRoleGrant, from one place: where it resolves the
+// grant. Neither allocates.
+func (r *Request) SetRoleGrant(g RoleGrant) *RoleGrant {
+	r.roleGrant, r.hasRoleGrant = g, true
+	return &r.roleGrant
+}
+
+// ClearRoleGrant removes the request's role grant.
+func (r *Request) ClearRoleGrant() {
+	r.roleGrant, r.hasRoleGrant = RoleGrant{}, false
 }
 
 // UserPrincipal is a request's secondary (user) principal: a first-class Warden

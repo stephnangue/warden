@@ -2,6 +2,7 @@ package spec
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/stephnangue/warden/cmd/helpers"
@@ -44,18 +45,25 @@ func runList(cmd *cobra.Command, args []string) error {
 		if s.RotationPeriod > 0 {
 			item["rotation_period"] = s.RotationPeriod.String()
 		}
+		if len(s.StoredSecrets) > 0 {
+			item["stored_secrets"] = s.StoredSecrets
+		}
 		items = append(items, item)
 	}
 
 	return helpers.RenderList(items, func() {
-		headers := []string{"Name", "Type", "Source", "Min TTL", "Max TTL", "Rotation Period"}
+		headers := []string{"Name", "Type", "Source", "Min TTL", "Max TTL", "Rotation Period", "Stored Secrets"}
 		data := make([][]any, 0, len(specs))
 		for _, s := range specs {
 			rotationPeriod := any("disabled")
 			if s.RotationPeriod > 0 {
 				rotationPeriod = s.RotationPeriod
 			}
-			data = append(data, []any{s.Name, s.Type, s.Source, s.MinTTL, s.MaxTTL, rotationPeriod})
+			storedSecrets := "none"
+			if len(s.StoredSecrets) > 0 {
+				storedSecrets = strings.Join(s.StoredSecrets, ", ")
+			}
+			data = append(data, []any{s.Name, s.Type, s.Source, s.MinTTL, s.MaxTTL, rotationPeriod, storedSecrets})
 		}
 		helpers.PrintTable(headers, data)
 	})

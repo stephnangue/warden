@@ -1,5 +1,6 @@
 ---
 title: "Slack MCP"
+description: "Front the Slack MCP server with Warden: mint a per-user Slack OAuth token at request time from grants held in OpenBao/Vault, so no Slack credential lives in Warden or on the agent."
 ---
 
 This guide walks through exposing the **Slack MCP (Model Context Protocol)
@@ -11,16 +12,38 @@ access token bound to the chosen role, injects it as `Authorization: Bearer
 Slack token.
 
 The Slack MCP server authenticates with **OAuth 2.0 (confidential client),
-user-level permissions** — there is **no bot-token (`xoxb-…`) path**. A human
-authorizes the app once in the browser; Warden seals the resulting refresh token
-and mints a fresh access token on each request, scoped to what that user
-consented to. This is the `mcp` provider's `oauth_bearer_token` credential shape.
+user-level permissions** — there is **no bot-token (`xoxb-…`) path**. Every token is
+some specific person's, scoped to what they consented to.
 
 > **This is not the same credential as the `slack` REST provider.** The `slack`
 > REST provider injects a static bot token (`xoxb-…`, modelled as `api_key`). The
 > Slack **MCP** server does not accept that token — it requires an OAuth user
 > token. The two mounts therefore use different credentials and cannot share a
 > credspec.
+
+## How a request flows
+
+Because Slack only issues user tokens, the question is **which user's**. Warden can hold
+one person's grant and use it for everybody, or resolve each caller to their own — and
+only the second is a production answer.
+
+An OpenBao/Vault **OAuth secrets engine** holds each user's Slack refresh token from their
+one-time consent and mints a fresh access token per request. Warden reads the calling
+user's own credential, because the path is templated by their subject.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which authenticates to an external OpenBao or Vault with a KMS-signed assertion carrying user and agent claims, reads the path slack/creds templated by the user's subject where the OAuth secrets engine mints a fresh Slack access token from that user's stored refresh token, and injects it as a bearer token to the Slack MCP server" src="/images/warden-prov-mcp-slack-vault-minted-access-token.png" width="860"></p>
+
+Warden reaches the store keylessly — it logs in with a signed assertion rather than a
+stored token — so neither a Slack credential nor a store token sits in Warden's storage.
+The `{{user.sub}}` template is what makes the read per-user: one person's Slack token can
+never be served to another, enforced by the path rather than by policy alone.
+
+This matters more on Slack than on most upstreams. A Slack user token carries that
+person's channel membership and DM history, so serving one grant to every caller does not
+merely blur attribution — it hands every agent user the reach of whoever consented.
+
+This is [the chaining mode](/provider-backends/mcp/#chaining--from-openbaovault) from the
+generic MCP page, pointed at a Slack OAuth engine.
 
 ## Prerequisites
 
@@ -41,9 +64,9 @@ consented to. This is the `mcp` provider's `oauth_bearer_token` credential shape
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source); the commands below are for the local dev setup.
 
 > **Set this up before configuring the provider.** The provider resolves
 > `auto_auth_path` per request — writing the config only checks that it is
@@ -53,13 +76,11 @@ Enable the JWT auth method and point it at your identity provider's JWKS endpoin
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/mcp-user \
-    token_policies="mcp-slack-access" \
-    user_claim=sub \
-    cred_spec_name=slack-mcp-creds
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ### Enable audit logging
@@ -73,7 +94,7 @@ warden audit enable -file-path=/tmp/warden-audit.log file
 
 Each gateway request then writes a request/response pair to that file — the agent
 identity, the bound credential (`type`/`source_name`/`spec_name`), the policy
-decision (the `mcp_decision` for `mcp { }` rules), and the upstream URL.
+decision (the `mcp_decision` for MCP policy rules), and the upstream URL.
 
 ## Step 2: Mount and Configure the Provider
 
@@ -93,15 +114,15 @@ warden provider list
 ```
 
 Configure the provider. **`mcp_url` is required — there is no default.** Point it
-at Slack's MCP endpoint. The default `timeout` is 10 minutes — raise it for agent
-sessions that keep an SSE stream open across many tool calls:
+at Slack's MCP endpoint. `timeout` bounds a **single call** and defaults to
+**60 seconds** — raise it when individual tool calls run long. A long-lived SSE session is
+bounded by `listen_timeout` instead, which still defaults to 10 minutes:
 
 ```bash
 warden write slack-mcp/config <<EOF
 {
   "mcp_url": "https://mcp.slack.com/mcp",
   "auto_auth_path": "auth/jwt/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
@@ -115,74 +136,45 @@ Verify the configuration:
 warden read slack-mcp/config
 ```
 
-## Step 3: Register a Slack OAuth App and Create the Credential
+## Step 3: Create a Role and Grant It
 
-The Slack MCP server is an OAuth 2.0 **resource server** that consumes
-user-scoped access tokens. Warden plays the OAuth client: a human consents once,
-Warden seals the refresh token, and mints a fresh access token per request,
-injecting it as `Authorization: Bearer <token>`. Slack does **not** support
-Dynamic Client Registration, so you register a confidential app up front — and it
-only returns a refresh token when the app has **Token Rotation** enabled (step 5
-below), so don't skip that.
+Create the role, then a virtual group that grants it to callers admitted through the JWT mount. The role lists both policies from Step 5 by name: the capability policy that grants the path and the MCP policy that governs the calls. The spec and the policies come in Steps 4 and 5; until they exist, the role write warns.
 
-### Register the Slack app
+```bash
+warden role create mcp-user -json '{
+  "policies": ["mcp-slack-access", "mcp-slack-access-calls"],
+  "cred_spec_name": "slack-mcp-creds",
+  "provider_path": "slack-mcp/"
+}'
 
-Slack's MCP overview documents the *requirements* but not the click-by-click app
-setup, so the steps below combine the MCP-specific constraints (from Slack's
-docs) with Slack's standard app-creation flow. Exact UI labels may shift.
+warden identity group create mcp-user-agents -json '{
+  "type": "virtual",
+  "roles": ["mcp-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
 
-1. **Create the app.** Go to <https://api.slack.com/apps>, sign in to the
-   workspace/org that will use it, and click **Create New App → From scratch**.
-   Enter a name (e.g. `warden-mcp`) and pick the workspace, then **Create App**.
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
 
-2. **Enable the app for MCP — this is the gate that bites silently.** In the app
-   config under **Agents & AI Apps** (URL `https://api.slack.com/apps/<APP_ID>/app-assistant`),
-   enable the Agents & AI Apps feature, then turn on the **Model Context Protocol**
-   toggle. Skipping this is *not* caught at consent time — the OAuth flow succeeds
-   and tokens mint fine, but every MCP call returns HTTP 400 with
-   `{"error":{"code":-32600,"message":"App is not enabled for Slack MCP server access..."}}`.
-   Enabling the feature also unlocks the assistant-related scopes.
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, as shown in [JWT auth](/auth-methods/jwt/#step-4-grant-the-role-with-a-group). See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
 
-3. **Keep it internal — this is the MCP gate.** Under **Settings → Manage
-   Distribution**, leave **public distribution OFF**. Slack permits **internal**
-   apps (installed only in your own org) or **Marketplace-published** apps, and
-   **prohibits "unlisted" apps** — one where public distribution is on but the app
-   was never listed. So keep it private (internal), or go all the way to a
-   Marketplace listing; don't stop in between. If your workspace enforces app
-   approval, a **workspace admin** must approve the app (Slack admin console →
-   **Manage apps**).
+## Step 4: Create the Credential
 
-4. **Add the user-token scopes.** Under **OAuth & Permissions → Scopes → User
-   Token Scopes** (not *Bot* Token Scopes — the MCP server uses the user-token
-   `v2_user` flow), add the scopes for the tools you'll expose, e.g.
-   `channels:history`, `channels:read`, `chat:write`, `users:read`,
-   `search:read.public`. See
-   [Token Scopes and Tool Availability](#token-scopes-and-tool-availability).
+The Slack MCP server is an OAuth 2.0 **resource server** that consumes user-scoped access
+tokens. Something has to play the OAuth client, hold each user's refresh token, and mint a
+fresh access token per request — either an OpenBao/Vault OAuth secrets engine (Option A) or
+Warden itself (Option B).
 
-5. **Register the redirect URL.** Under **OAuth & Permissions → Redirect URLs →
-   Add New Redirect URL**, enter the loopback callback Warden will use — it must
-   **exactly match** the `redirect_uri` on the cred spec below, e.g.
-   `http://127.0.0.1:8765/callback`. Click **Add → Save URLs**.
-
-6. **Enable Token Rotation.** Under **OAuth & Permissions**, turn on **Token
-   Rotation**. This is required for Warden's refresh-on-demand model: *without it,
-   Slack issues a long-lived, non-expiring access token and **no refresh token**,*
-   so the consent in the next section returns only an access token. With it on,
-   the OAuth response carries a 12-hour access token (`xoxe.` prefix,
-   `expires_in: 43200`) **and** a refresh token, which Warden seals and rotates.
-   ⚠️ **Irreversible** — once enabled, token rotation cannot be turned off, so test
-   on a throwaway app first if you're unsure.
-
-7. **Grab the credentials.** Under **Basic Information → App Credentials**, copy
-   the **Client ID** and **Client Secret** (and note the **App ID** — Slack
-   requires a fixed app ID for MCP). Store the client secret in a file for the
-   next step so it never lands in shell history.
-
-8. **Install / get admin approval.** Under **OAuth & Permissions → Install to
-   Workspace**, review the requested user scopes and authorize. If admin approval
-   is required, an admin approves it in the admin console.
-
-### Create the Warden credential
+Either way you need a registered Slack app first, because Slack does **not** support
+Dynamic Client Registration. That is a click-by-click job with two easy-to-miss gates —
+the app must be **enabled for MCP**, and **Token Rotation** must be on or Slack returns no
+refresh token at all. It is written up in
+[Appendix: Register the Slack app](#appendix-register-the-slack-app); come back here with
+the **Client ID** and **Client Secret**.
 
 Slack publishes OAuth server metadata for the MCP endpoint, so you can confirm
 the endpoints below via discovery:
@@ -190,28 +182,96 @@ the endpoints below via discovery:
 - `https://mcp.slack.com/.well-known/oauth-protected-resource`
 - `https://mcp.slack.com/.well-known/oauth-authorization-server`
 
+Two routes from here. **Option A resolves each caller to their own Slack grant** and is
+what to run in production; Option B binds one person's consent to a spec everyone shares,
+and is for trying the upstream out.
+
+#### Option A: Per-user grants from OpenBao/Vault (recommended)
+
+The flow in the diagram above. Each user consents once, into the store; Warden mints from
+whichever grant belongs to the caller. The source is keyless, so no store token lives in
+Warden either.
+
+```bash
+warden cred source create slack-vault-src -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-agents",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+
+warden cred spec create slack-mcp-creds -json '{
+  "source": "slack-vault-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "oauth2",
+    "subject_token_source": "warden_identity",
+    "assertion_user_claims": "sub",
+    "oauth2_mount": "slack",
+    "credential_name": "{{user.sub}}"
+  }
+}'
+```
+
+Warden reads `slack/creds/<resolved name>` and the engine mints against that user's stored
+grant. The mount needs a user leg (`user_auth_path`) — with no user on the request there is
+no `{{user.sub}}` to resolve and the mint fails closed, which is the behaviour you want:
+better a clear failure than quietly falling back to someone else's token.
+
+Registering the Slack app with the engine and capturing each user's consent is
+OpenBao/Vault-side setup — see [OAuth 3LO credential store](/federation/oauth-3lo-store/),
+which also covers the enrollment contract (each user must be enrolled under the name
+`credential_name` resolves to) and how a templated policy on the store gates it a second
+time. The app registration above is the same either way.
+
+#### Option B: A single consent held in Warden — development only
+
+:::danger[Not for production]
+This binds **one person's Slack grant** to a spec every caller then shares, so every agent
+user acts with that person's channel and DM reach. It also cannot be provisioned without
+someone at a browser. Use Option A in production.
+:::
+
 Create the `oauth2` source pointing at Slack's authorize and token endpoints:
 
 ```bash
-warden cred source create slack-oauth-src \
-  -type=oauth2 \
-  -rotation-period=0 \
-  -config=auth_url=https://slack.com/oauth/v2_user/authorize \
-  -config=token_url=https://slack.com/api/oauth.v2.user.access
+warden cred source create slack-oauth-src -json '{
+  "type": "oauth2",
+  "config": {
+    "auth_url": "https://slack.com/oauth/v2_user/authorize",
+    "token_url": "https://slack.com/api/oauth.v2.user.access"
+  }
+}'
 ```
 
 Create the spec carrying the app's OAuth client credentials, the pinned callback,
-and the requested scopes. The client secret is read from a file so it never lands
-in shell history:
+and the requested scopes. Write the payload to a file rather than passing it inline, so
+the client secret never lands in shell history — `-json` takes `@file.json`, or `-` to
+read stdin:
 
 ```bash
-warden cred spec create slack-mcp-creds \
-  -source slack-oauth-src \
-  -config auth_method=authorization_code \
-  -config client_id=<your-client-id> \
-  -config client_secret=@/path/to/client-secret \
-  -config redirect_uri=http://127.0.0.1:8765/callback \
-  -config scopes="channels:read channels:history chat:write users:read search:read.public"
+cat > slack-spec.json <<'EOF'
+{
+  "source": "slack-oauth-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "auth_method": "authorization_code",
+    "client_id": "<your-client-id>",
+    "client_secret": "<your-client-secret>",
+    "redirect_uri": "http://127.0.0.1:8765/callback",
+    "scopes": "channels:read channels:history chat:write users:read search:read.public"
+  }
+}
+EOF
+
+warden cred spec create slack-mcp-creds -json @slack-spec.json
+rm slack-spec.json
 ```
 
 Complete the one-time consent. Warden binds the pinned loopback port, opens the
@@ -228,8 +288,8 @@ authorization without the confirmation prompt, or `-no-browser` on a headless
 host to print the URL to open elsewhere.
 
 > **Only got an access token, no refresh token?** Slack returns a refresh token
-> only when the app has **Token Rotation** enabled (step 5 of *Register the Slack
-> app*). With it off, Slack issues a non-expiring access token and no refresh
+> only when the app has **Token Rotation** enabled (step 6 of
+> [Appendix: Register the Slack app](#appendix-register-the-slack-app)). With it off, Slack issues a non-expiring access token and no refresh
 > token — usable, but a long-lived secret that never auto-rotates. Enable Token
 > Rotation on the app, then re-run `warden cred spec connect slack-mcp-creds
 > -force` to obtain the rotating access + refresh pair.
@@ -242,7 +302,7 @@ warden cred spec read slack-mcp-creds
 
 The agent's effective access is the intersection of three things: the app's
 configured scopes, what the user granted at consent time, and what the Warden
-policy bound to the role permits (the `mcp { }` block — see [Step 4](#step-4-create-a-policy)).
+policy bound to the role permits (the MCP policy — see [Step 5](#step-5-create-a-policy)).
 The OAuth token bounds what Slack will allow; the Warden policy can only narrow
 it further, never widen it. See
 [Token Scopes and Tool Availability](#token-scopes-and-tool-availability).
@@ -272,9 +332,12 @@ Slack's `auth.test` needs no extra scope and returns flat `user_id`, `user`,
 `user.id`/`user.email` live under a sub-object that the top-level extractor skips):
 
 ```bash
-warden cred source update slack-oauth-src \
-  -config=introspection_url=https://slack.com/api/auth.test \
-  -config=metadata_fields=user_id,user,team_id
+warden cred source update slack-oauth-src -json '{
+  "config": {
+    "introspection_url": "https://slack.com/api/auth.test",
+    "metadata_fields": "user_id,user,team_id"
+  }
+}'
 ```
 
 A response audit event for an MCP call then carries both axes — the agent that
@@ -306,29 +369,29 @@ called, and the Slack user it acted as — while the token stays salted:
 > device's `salt_fields` (e.g. `response.credential.metadata.email`) to HMAC it
 > rather than log it in the clear.
 
-## Step 4: Create a Policy
+## Step 5: Create a Policy
 
 MCP traffic passes through two complementary layers of authorization. The minted
 Slack access token is the security boundary — its scopes and the consenting
 user's workspace permissions bound what the agent can actually do in Slack
-regardless of what Warden lets through. On top of that, Warden's CBP policies
-support an `mcp { }` block for governance-style restrictions enforced at the
+regardless of what Warden lets through. On top of that, Warden's MCP policies
+provide governance-style restrictions enforced at the
 gateway: allow- and deny-lists for JSON-RPC methods, tool names, resource URIs,
 prompt names, and selected tool arguments.
 
-The `mcp { }` block is **body-authoritative** and **deny-by-default** — Warden
+An MCP policy is **body-authoritative** and **deny-by-default** — Warden
 strict-parses the JSON-RPC body and a block grants only what it allow-lists
-(`initialize`, `ping`, and `notifications/*` stay exempt for the handshake). See
+(`initialize`, `ping`, `notifications/*` and `server/discover` stay exempt for the handshake and discovery). See
 [Body-Authoritative Authorization](/concepts/mcp/#body-authoritative-authorization)
 for the full semantics and [Denial reasons](/concepts/mcp/#denial-reasons) for the
 `rule_type` values recorded on each decision.
 
 All examples below use `capabilities = ["create", "read", "delete"]` — the three
 MCP Streamable HTTP verbs on the `/gateway/` URL (POST for JSON-RPC, GET for the
-SSE stream, DELETE for session terminate). The `mcp { }` block only fires on the
+SSE stream, DELETE for session terminate). MCP policy enforcement only fires on the
 POST half.
 
-The simplest policy grants the gateway and leans on the OAuth token's scopes for
+The simplest setup grants the gateway and leans on the OAuth token's scopes for
 everything:
 
 ```bash
@@ -337,7 +400,19 @@ path "slack-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
 }
 EOF
+
+warden policy write -type mcp mcp-slack-access-calls - <<EOF
+path "slack-mcp/role/+/gateway*" {
+  methods   { allowed = ["*"] }
+  tools     { allowed = ["*"] }
+  resources { allowed = ["*"] }
+  prompts   { allowed = ["*"] }
+}
+EOF
 ```
+
+Bind **both** names on the role — an MCP policy comes into scope by being
+listed in the role's `policies`, exactly like a capability policy.
 
 A policy that restricts the agent to a vetted set of Slack tools:
 
@@ -345,10 +420,13 @@ A policy that restricts the agent to a vetted set of Slack tools:
 warden policy write mcp-slack-readonly - <<EOF
 path "slack-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call", "resources/list", "resources/read"]
-    allowed_tools   = ["list_channels", "get_messages", "get_thread", "search_messages"]
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-slack-readonly-calls - <<EOF
+path "slack-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/list", "tools/call", "resources/list", "resources/read"] }
+  tools { allowed = ["list_channels", "get_messages", "get_thread", "search_messages"] }
 }
 EOF
 ```
@@ -361,10 +439,15 @@ dangerous ones. Under deny-by-default the `["*"]` allow-lists are required; the
 warden policy write mcp-slack-safe - <<EOF
 path "slack-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["*"]
-    allowed_tools   = ["*"]
-    denied_tools    = ["delete_*", "remove_*", "archive_channel"]
+}
+EOF
+
+warden policy write -type mcp mcp-slack-safe-calls - <<EOF
+path "slack-mcp/role/+/gateway*" {
+  methods { allowed = ["*"] }
+  tools {
+    allowed = ["*"]
+    denied  = ["delete_*", "remove_*", "archive_channel"]
   }
 }
 EOF
@@ -380,24 +463,28 @@ set of channels:
 warden policy write mcp-slack-approved-channels - <<EOF
 path "slack-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["post_message"]
-    condition = "!has(call.args.channel_id) || call.args.channel_id in ['C0123456789', 'C0987654321']"
-  }
+}
+EOF
+
+warden policy write -type mcp mcp-slack-approved-channels-calls - <<EOF
+path "slack-mcp/role/+/gateway*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["post_message"] }
+  condition = "!has(call.args.channel_id) || call.args.channel_id in ['C0123456789', 'C0987654321']"
 }
 EOF
 ```
 
-When a request hits the `mcp { }` gate and is denied, Warden returns HTTP 403
+When a request hits the MCP policy gate and is denied, Warden returns HTTP 403
 with a structured JSON body and an RFC 6750 `WWW-Authenticate` header; MCP client
 SDKs surface this to the agent as a tool-call failure with an actionable message.
 The audit log records the matched rule and the offending tool/parameter so
-operators can debug policy decisions centrally. Policies that omit the `mcp { }`
-block keep today's behaviour: Warden passes the request through to Slack
-unchanged and the OAuth token's scopes alone enforce authorization.
+operators can debug policy decisions centrally. An MCP mount with **no MCP policy
+in scope denies every call** (`no_mcp_policy`) — there is no pass-through default,
+so to let the OAuth token's scopes alone enforce authorization, write a wildcard
+MCP policy that allows every method and tool.
 
-## Step 5: Point an MCP Client at Warden
+## Step 6: Point an MCP Client at Warden
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -462,7 +549,7 @@ by default. Add `--scope project` to write a shared `.mcp.json` you can commit, 
 `--scope user` to make it available across all your projects.
 
 Confirm Claude Code registered it and completes the MCP handshake — this is where
-a missing lifecycle method in your policy (see Step 4) would surface as a hang:
+a missing lifecycle method in your policy (see Step 5) would surface as a hang:
 
 ```bash
 claude mcp list
@@ -477,7 +564,7 @@ consented token allow:
 
 The `role` segment in the URL selects which credential spec — and thus which
 consented Slack identity — backs the calls, via the role's `cred_spec_name`
-binding from Step 1 (here, `slack-mcp-creds`). The Hydra JWT is short-lived —
+binding from Step 3 (here, `slack-mcp-creds`). The Hydra JWT is short-lived —
 when it expires, refresh it, then `claude mcp remove slack` and re-add with the
 new token.
 
@@ -558,11 +645,12 @@ after `gateway` verbatim, so `gateway` maps to `https://mcp.slack.com/mcp` while
   client URL ends at `gateway` (no trailing slash) and `mcp_url` is
   `https://mcp.slack.com/mcp`.
 - **Consent returned only an access token, no refresh token.** Token Rotation is
-  off on the app — see Step 6 of *Register the Slack app*.
+  off on the app — see step 6 of
+  [Appendix: Register the Slack app](#appendix-register-the-slack-app).
 
 ## TLS Certificate Authentication
 
-Steps 1 and 5 above use JWT authentication. Alternatively, you can authenticate
+Steps 1, 3 and 6 above use JWT authentication. Alternatively, you can authenticate
 with a TLS client certificate. This is useful for workloads that already have
 X.509 certificates — Kubernetes pods with cert-manager, VMs with machine
 certificates, or SPIFFE X.509-SVIDs from a service mesh.
@@ -571,9 +659,10 @@ certificates, or SPIFFE X.509-SVIDs from a service mesh.
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 2-4 (provider mount, credential, policy) are identical — the
-`mcp-slack-access` policy from Step 4 works for either auth method. Replace Steps
-1 and 5 with the following.
+The provider mount, the role, the credential and the policies are identical — the
+`mcp-slack-access` policies from Step 5 work for either auth method. Replace the
+JWT mount, the provider's `auto_auth_path`, the group and the client setup with the
+following.
 
 ### Enable Cert Auth
 
@@ -586,21 +675,8 @@ warden auth enable cert
 Provide the PEM-encoded CA certificate that signs your client certificates:
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=mcp-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
-
-### Create a Cert Role
-
-```bash
-warden write auth/cert/role/mcp-user \
-    allowed_common_names="agent-*" \
-    token_policies="mcp-slack-access" \
-    cred_spec_name=slack-mcp-creds
-```
-
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ### Configure Provider for Cert Auth
 
@@ -611,11 +687,26 @@ warden write slack-mcp/config <<EOF
 {
   "mcp_url": "https://mcp.slack.com/mcp",
   "auto_auth_path": "auth/cert/",
-  "timeout": "10m",
   "max_body_size": 10485760
 }
 EOF
 ```
+
+### Grant the Role to Certificates
+
+Grant `mcp-user` with a group whose rule trusts the cert mount and matches the certificate's common name:
+
+```bash
+warden identity group create mcp-user-agents -json '{
+  "type": "virtual",
+  "roles": ["mcp-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+Selectors take glob patterns. A rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
 
 For MCP-client mTLS patterns (local terminating sidecar, or `mcp-remote` as a
 Node bridge) and role selection with a certificate, see the equivalent section in
@@ -632,7 +723,7 @@ never widen it. A `tools/call` that fails with a Slack permission error
 (`missing_scope`, `not_in_channel`, …) means the app lacks a required user scope
 or the consenting user can't see that resource; a `tools/call` denied by Warden
 with a `403` + RFC 6750 `WWW-Authenticate` header (and a `rule_type` in the audit
-log) means the [Step 4](#step-4-create-a-policy) `mcp { }` block blocked it. Read
+log) means the [Step 5](#step-5-create-a-policy) MCP policy blocked it. Read
 the error to tell the two layers apart.
 
 Common mappings (Slack **user-token** scopes):
@@ -653,9 +744,67 @@ to re-consent after changing scopes.
 **Rotate the OAuth client secret** by updating the spec, then re-running consent:
 
 ```bash
-warden cred spec update slack-mcp-creds \
-  -config client_secret=@/path/to/new-client-secret
+printf '{"config":{"client_secret":"%s"}}' "$(cat /path/to/new-client-secret)" \
+  | warden cred spec update slack-mcp-creds -json -
 warden cred spec connect slack-mcp-creds -force
 ```
 
 Then remove the old secret from the Slack app's **OAuth & Permissions** settings.
+
+
+## Appendix: Register the Slack app
+
+Slack's MCP overview documents the *requirements* but not the click-by-click app
+setup, so the steps below combine the MCP-specific constraints (from Slack's
+docs) with Slack's standard app-creation flow. Exact UI labels may shift.
+
+1. **Create the app.** Go to <https://api.slack.com/apps>, sign in to the
+   workspace/org that will use it, and click **Create New App → From scratch**.
+   Enter a name (e.g. `warden-mcp`) and pick the workspace, then **Create App**.
+
+2. **Enable the app for MCP — this is the gate that bites silently.** In the app
+   config under **Agents & AI Apps** (URL `https://api.slack.com/apps/<APP_ID>/app-assistant`),
+   enable the Agents & AI Apps feature, then turn on the **Model Context Protocol**
+   toggle. Skipping this is *not* caught at consent time — the OAuth flow succeeds
+   and tokens mint fine, but every MCP call returns HTTP 400 with
+   `{"error":{"code":-32600,"message":"App is not enabled for Slack MCP server access..."}}`.
+   Enabling the feature also unlocks the assistant-related scopes.
+
+3. **Keep it internal — this is the MCP gate.** Under **Settings → Manage
+   Distribution**, leave **public distribution OFF**. Slack permits **internal**
+   apps (installed only in your own org) or **Marketplace-published** apps, and
+   **prohibits "unlisted" apps** — one where public distribution is on but the app
+   was never listed. So keep it private (internal), or go all the way to a
+   Marketplace listing; don't stop in between. If your workspace enforces app
+   approval, a **workspace admin** must approve the app (Slack admin console →
+   **Manage apps**).
+
+4. **Add the user-token scopes.** Under **OAuth & Permissions → Scopes → User
+   Token Scopes** (not *Bot* Token Scopes — the MCP server uses the user-token
+   `v2_user` flow), add the scopes for the tools you'll expose, e.g.
+   `channels:history`, `channels:read`, `chat:write`, `users:read`,
+   `search:read.public`. See
+   [Token Scopes and Tool Availability](#token-scopes-and-tool-availability).
+
+5. **Register the redirect URL.** Under **OAuth & Permissions → Redirect URLs →
+   Add New Redirect URL**, enter the loopback callback Warden will use — it must
+   **exactly match** the `redirect_uri` on the cred spec below, e.g.
+   `http://127.0.0.1:8765/callback`. Click **Add → Save URLs**.
+
+6. **Enable Token Rotation.** Under **OAuth & Permissions**, turn on **Token
+   Rotation**. This is required for Warden's refresh-on-demand model: *without it,
+   Slack issues a long-lived, non-expiring access token and **no refresh token**,*
+   so the consent in the next section returns only an access token. With it on,
+   the OAuth response carries a 12-hour access token (`xoxe.` prefix,
+   `expires_in: 43200`) **and** a refresh token, which Warden seals and rotates.
+   ⚠️ **Irreversible** — once enabled, token rotation cannot be turned off, so test
+   on a throwaway app first if you're unsure.
+
+7. **Grab the credentials.** Under **Basic Information → App Credentials**, copy
+   the **Client ID** and **Client Secret** (and note the **App ID** — Slack
+   requires a fixed app ID for MCP). Store the client secret in a file for the
+   next step so it never lands in shell history.
+
+8. **Install / get admin approval.** Under **OAuth & Permissions → Install to
+   Workspace**, review the requested user scopes and authorize. If admin approval
+   is required, an admin approves it in the admin console.

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/stephnangue/warden/auth/helper"
 )
 
 // mapToSPIFFEAuthConfig converts a config map (from request field data or stored
@@ -32,6 +34,27 @@ func mapToSPIFFEAuthConfig(data map[string]any) (*SPIFFEAuthConfig, error) {
 		dataCopy["token_ttl"] = time.Duration(int64(ttl)) * time.Second
 	case time.Duration:
 		// already a duration
+	}
+
+	// bound_audiences arrives as a list from a write or storage, and may be a
+	// comma-separated string in a mount table config.
+	if raw, ok := dataCopy["bound_audiences"]; ok {
+		auds, err := helper.ParseBoundAudiences(raw)
+		if err != nil {
+			return nil, err
+		}
+		dataCopy["bound_audiences"] = auds
+	}
+
+	// max_age arrives as seconds from a write, a duration string from storage,
+	// a duration from the merge, and either string or number in a mount table
+	// config.
+	if raw, ok := dataCopy["max_age"]; ok {
+		maxAge, err := helper.ParseMaxAge(raw)
+		if err != nil {
+			return nil, err
+		}
+		dataCopy["max_age"] = maxAge
 	}
 
 	jsonData, err := json.Marshal(dataCopy)

@@ -8,7 +8,7 @@ injects into the outbound request. A [credential source](/concepts/credentials/)
 names a driver through its `type`; when a workload's request reaches a
 [provider](/concepts/providers/) mount, the driver produces the scoped credential
 for that upstream and Warden injects it into the proxied call. The workload
-presents only its [identity](/concepts/authentication/) — it never holds the
+presents only its [identity](/identity/authentication/) — it never holds the
 credential itself.
 
 See [Credentials](/concepts/credentials/) for the source / spec / credential model
@@ -32,7 +32,7 @@ Warden stores **nothing**. Either the source federates an
 [identity assertion](/federation/oidc-issuer/) for a credential the upstream issues
 ([`oidc_federation`](/federation/keyless-credentials/)), or it
 [chains](/federation/credential-chaining/) the secret from a keyless-federated vault
-per request. This is the recommended mode, and it is coming to every driver.
+per request. This is the recommended mode wherever a driver supports it.
 
 The upstream verifies a short-lived assertion and issues a credential directly — no stored secret.
 
@@ -70,8 +70,10 @@ Orthogonal to storage:
 - **Shared service identity** — an inline stored/minted credential; the upstream
   sees Warden's own service account and can't tell callers apart.
 - **Federated identity (agent + user)** — with native federation the assertion
-  channels the agent (and, when present, the [user](/concepts/delegation/) via
-  `warden_user`), so the upstream authorizes the real agent, and can gate on the user.
+  names the agent — and, when the spec discloses a [user](/concepts/delegation/), it
+  becomes a delegation token with the user as `sub` and the agent in `act` — so the
+  upstream authorizes the real agent, and can gate on the user. See
+  [Assertion claims](/federation/assertion-claims/).
 - **Delegated / on-behalf-of** — the upstream authorizes the *caller*, by one of two
   mechanisms (both on the [Delegation](/concepts/delegation/) page): **`token_exchange`**
   forwards the caller's token so the downstream token carries `sub`=user / `act`=agent
@@ -88,23 +90,65 @@ view. **Keyless** columns are best; **Inline: static** is discouraged.
 | Driver (`type`) | Keyless: federation | Keyless: chaining | Inline: dynamic | Inline: static | Delegated |
 |---|:--:|:--:|:--:|:--:|:--:|
 | `aws` | ✓ | | ✓ | ✓ | |
-| `azure` | ✓ | | ✓ | ✓ | |
+| `azure` | ✓ | ✓ | ✓ | ✓ | |
 | `gcp` | ✓ | | ✓ | | |
 | `hvault` | ✓ | | ✓ | ✓ | |
+| `alicloud` | ✓ | | ✓ | | |
+| `kubernetes` | ✓ | | ✓ | | |
+| `anthropic` | ✓ | | | | |
+| `openai` | ✓ | | | | |
+| `cloudflare` | | ✓ | | | |
 | `token_exchange` | | ✓ | ✓ | | ✓ |
-| `oauth2` | | | ✓ | | ✓ |
+| `oauth2` | | ✓ | ✓ | | ✓ |
 | `github` | | ✓ | ✓ | ✓ | |
-| `gitlab` | | | ✓ | | |
-| `kubernetes` | | | ✓ | | |
-| `alicloud` | | | ✓ | | |
-| `scaleway` | | | ✓ | ✓ | |
-| `ovh` | | | ✓ | | |
-| `ibm` | | | ✓ | | |
-| `elastic` | | | ✓ | | |
-| `grafana` | | | ✓ | | |
-| `honeycomb` | | | ✓ | | |
+| `gitlab` | | ✓ | ✓ | | |
+| `scaleway` | | ✓ | ✓ | ✓ | |
+| `ovh` | | ✓ | ✓ | | |
+| `ibm` | | ✓ | ✓ | | |
+| `elastic` | | ✓ | ✓ | | |
+| `grafana` | | ✓ | ✓ | | |
+| `apikey` | | ✓ | | ✓ | |
 | `local` | | | | ✓ | |
-| `apikey` | | | | ✓ | |
+
+**Federation** is `auth_method=oidc_federation`: the source stores no secret and
+each request exchanges a Warden-minted assertion for a short-lived credential.
+Eight drivers accept it — the four clouds, Kubernetes, a secrets vault (`hvault`),
+Anthropic and OpenAI. The `anthropic` and `openai` drivers accept nothing else: a static
+key for either belongs on an [`apikey`](/credential-drivers/apikey/) source.
+**Chaining** is `secret_spec`: the source stores no secret either, but obtains one
+per request from another spec. Either way nothing standing sits in Warden's
+barrier — they differ in what the upstream trusts, an assertion or a secret.
+
+An assertion for an agent names it by its composite subject,
+`wid:<namespaceID>:<mountAccessor>:<principalID>`, and the trust policies on the
+upstream bind agents by that prefix. The `wid:` prefix is therefore reserved for agents.
+When a spec carries the user into the assertion (`assertion_user_claims`), a user whose
+principal begins with `wid:` is refused with `403`, before any assertion is built, so no
+user can present an agent's subject.
+
+`azure` authenticates an app registration in three ways: federation, a stored client
+secret, or a certificate (`auth_method=certificate`). The certificate's key is either
+stored in the source or held in a KMS. With `secret_spec` naming a spec that mints a
+signing capability, Warden signs the PS256 assertion Entra ID expects without ever reading
+the key, which is the chaining column above.
+
+`token_exchange` is keyless by **chaining**, which is easy to misread. It
+forwards a caller-derived subject token — often a Warden assertion — to an STS,
+so its *request* is federated; but the source must still authenticate itself to
+the token endpoint, and that client credential is what chaining removes. The
+exception is a token endpoint that accepts a
+[public client](/credential-drivers/token-exchange/#public-clients--client_authnone)
+(`client_auth=none`): then there is no client credential to hold.
+
+A chained secret has to come from somewhere. Five mint methods can serve as the
+**producer** at the far end of a `secret_spec`: `hvault` `kv2_read`, `aws`
+`secret_read` (Secrets Manager), `gcp` `secret_read` (Secret Manager), `azure`
+`secret_read` (Key Vault), and `hvault` `transit_signer` — which yields not a secret but a scoped *signing
+capability*, so its consumer can sign without the key ever being read. Its consumers are
+`token_exchange` and `oauth2` with `client_auth=kms_private_key_jwt`, and `azure` with
+`auth_method=certificate`. A producer
+can itself be federated, which is what makes a chain keyless end to end. See
+[credential chaining](/federation/credential-chaining/#producers).
 
 Keyless is arriving across more drivers over time — treat this as the current map,
 not a permanent one.
@@ -124,6 +168,21 @@ Two questions, in order:
    [chaining](/federation/credential-chaining/)); fall back to **inline secret** only
    when you must, and there **dynamic** beats **static** (which is not for production).
 
+### When no driver matches your upstream
+
+Use [**`apikey`**](/credential-drivers/apikey/). Every other driver exists because its
+upstream offers a dynamic-credential API worth speaking to; `apikey` assumes none, and
+serves a credential minted out-of-band to any HTTP API that authenticates with a header.
+Since most APIs do exactly that, it has the widest reach of any driver here — pair it with
+the generic [`rest`](/provider-backends/rest/) or [`mcp`](/provider-backends/mcp/) provider
+and Warden brokers an upstream it has never heard of, with no new code.
+
+It is a fallback, not a downgrade: with [chaining](/federation/credential-chaining/) it is
+keyless like the cloud drivers, and `credential_fields` lets it carry multi-part
+credentials rather than only single tokens. Reach for [`local`](/credential-drivers/local/)
+instead only when the value is not an API key at all and needs no verification or header
+shaping.
+
 ## Reference
 
 Every driver has its own page covering config keys, mint methods, credential types,
@@ -132,19 +191,21 @@ and rotation behaviour.
 | Driver | `type` | Upstream |
 |--------|--------|----------|
 | [Alibaba Cloud](/credential-drivers/alicloud/) | `alicloud` | STS AssumeRole |
+| [Anthropic](/credential-drivers/anthropic/) | `anthropic` | short-lived API tokens through workload identity federation |
 | [AWS](/credential-drivers/aws/) | `aws` | STS, Secrets Manager, RDS / Redshift IAM tokens |
 | [Azure](/credential-drivers/azure/) | `azure` | Azure AD bearer tokens, Key Vault secrets |
+| [Cloudflare](/credential-drivers/cloudflare/) | `cloudflare` | API tokens and R2 keys, chained from your secret store |
 | [Elasticsearch](/credential-drivers/elastic/) | `elastic` | `/_security` API keys |
 | [GCP](/credential-drivers/gcp/) | `gcp` | IAM access tokens, service-account impersonation |
 | [GitHub](/credential-drivers/github/) | `github` | App installation tokens and PATs |
 | [GitLab](/credential-drivers/gitlab/) | `gitlab` | project and group access tokens |
 | [Grafana](/credential-drivers/grafana/) | `grafana` | service-account tokens |
 | [HashiCorp Vault / OpenBao](/credential-drivers/vault/) | `hvault` | KV, AWS/GCP/IBM engines, tokens, OAuth2 |
-| [Honeycomb](/credential-drivers/honeycomb/) | `honeycomb` | V2 API keys |
 | [IBM Cloud](/credential-drivers/ibm/) | `ibm` | IAM bearer tokens, COS keys |
 | [Kubernetes](/credential-drivers/kubernetes/) | `kubernetes` | ServiceAccount tokens via the TokenRequest API |
 | [Local](/credential-drivers/local/) | `local` | static secrets stored directly in the spec |
 | [OAuth2](/credential-drivers/oauth2/) | `oauth2` | generic OAuth2 providers |
+| [OpenAI](/credential-drivers/openai/) | `openai` | short-lived API tokens through workload identity federation |
 | [OVHcloud](/credential-drivers/ovh/) | `ovh` | OAuth2 bearer tokens, dynamic S3 credentials |
 | [Scaleway](/credential-drivers/scaleway/) | `scaleway` | IAM static or dynamic API keys |
 | [Static API Key](/credential-drivers/apikey/) | `apikey` | a static API key, held in the spec, for any HTTP API |

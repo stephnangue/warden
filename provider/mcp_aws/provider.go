@@ -16,20 +16,32 @@ import (
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
-// Compile-time assertion: mcp_aws opts into CBP `mcp { }` body-authoritative
-// policy enforcement. Without this assertion the core's request handler type-
+// Compile-time assertion: mcp_aws opts into body-authoritative MCP policy
+// enforcement. Without this assertion the core's request handler type-
 // asserts to logical.MCPPolicyEnforced, fails silently, skips body extraction,
-// and any mcp { } block bound to an mcp_aws path becomes a no-op. The unit
+// and any MCP stanza covering an mcp_aws path becomes a no-op. The unit
 // test in provider_test.go also asserts this at the type level so an
 // accidental refactor that drops the method surfaces as a compile error in
 // the test, not as a quiet over-permission at runtime.
 var _ logical.MCPPolicyEnforced = (*mcpAWSBackend)(nil)
 
-// ShouldEnforceMCPPolicy reports whether this request is subject to mcp { }
-// body-authoritative policy enforcement. The gate matches the generic mcp
-// provider exactly: JSON-RPC POSTs only. GET (SSE reconnect) and DELETE (session
-// close), and any non-JSON Content-Type, decline and pass through under
-// credential-scope-only enforcement (IAM here, bearer-token scopes there).
+var _ logical.GatewayErrorRenderer = (*mcpAWSBackend)(nil)
+
+// RenderGatewayError answers a call Warden failed itself — a policy refusal
+// above all — as a JSON-RPC error for that call, so the client keeps its
+// session. Same answer as the generic mcp provider's.
+func (b *mcpAWSBackend) RenderGatewayError(req *logical.Request, f *logical.GatewayFailure) *logical.Response {
+	return httpproxy.RenderMCPGatewayError(httpproxy.WithMCPCallID(req), f)
+}
+
+// ShouldEnforceMCPPolicy reports whether this request is subject to
+// body-authoritative MCP policy enforcement. The gate matches the generic mcp
+// provider exactly: every POST, the only verb that carries JSON-RPC. GET (SSE
+// reconnect) and DELETE (session close) decline and pass through under
+// credential-scope-only enforcement (IAM here, bearer-token scopes there). The
+// Content-Type is not consulted: a POST labelled anything else is still handed to
+// the strict JSON-RPC parser, which refuses a body that is not JSON-RPC, so a
+// relabelled tools/call cannot slip past the MCP rules.
 //
 // The body cap returned is the backend's MaxBodySize as of THIS call, read
 // through snapshot() to match the rest of the hot path. A config-write that
@@ -42,21 +54,7 @@ func (b *mcpAWSBackend) ShouldEnforceMCPPolicy(req *logical.Request) (bool, int6
 	if req == nil || req.HTTPRequest == nil {
 		return false, 0
 	}
-	r := req.HTTPRequest
-	if r.Method != http.MethodPost {
-		return false, 0
-	}
-	ct := r.Header.Get("Content-Type")
-	if ct == "" {
-		return false, 0
-	}
-	// Strip a charset / boundary parameter (e.g. "application/json; charset=utf-8")
-	// before comparing to the bare media type.
-	if i := strings.IndexByte(ct, ';'); i >= 0 {
-		ct = ct[:i]
-	}
-	ct = strings.TrimSpace(strings.ToLower(ct))
-	if ct != "application/json" {
+	if req.HTTPRequest.Method != http.MethodPost {
 		return false, 0
 	}
 	return true, b.snapshot().maxBody
@@ -65,9 +63,11 @@ func (b *mcpAWSBackend) ShouldEnforceMCPPolicy(req *logical.Request) (bool, int6
 // DefaultMCPAWSURL is the GA endpoint for AWS's hosted MCP Server.
 const DefaultMCPAWSURL = "https://aws-mcp.us-east-1.api.aws/mcp"
 
-// DefaultMCPAWSTimeout caps a single MCP session. MCP responses may stream
-// over SSE across many tool calls, so the default matches the generic mcp provider.
-const DefaultMCPAWSTimeout = 10 * time.Minute
+// DefaultMCPAWSTimeout caps a single call other than subscriptions/listen.
+// Streaming subscriptions answer to listen_timeout instead, so this is a
+// unary ceiling; it matches the generic mcp provider so operators learn one
+// knob across every MCP mount.
+const DefaultMCPAWSTimeout = 60 * time.Second
 
 // mcpAWSBackend is the streaming backend for mcp_aws.
 //
@@ -87,6 +87,12 @@ type mcpAWSBackend struct {
 	// makes cache reuse a feature.
 	signer *v4.Signer
 
+	// configWriteMu serialises config writes and the storage load. A partial
+	// write is a read-merge-persist-install sequence, so two racing would lose
+	// one writer's keys against the other's snapshot. It is not on any request
+	// path.
+	configWriteMu sync.Mutex
+
 	mu          sync.RWMutex
 	upstreamURL *url.URL
 	// configRegion is the operator-supplied region (empty if not set).
@@ -95,9 +101,19 @@ type mcpAWSBackend struct {
 	configRegion string
 	// region is the resolved signing region: coalesce(configRegion, URL-inferred).
 	// This is the value passed to sigv4.ResignRequest.
-	region        string
+	region string
+	// listenTimeout is the deadline for a subscriptions/listen stream. Held
+	// here rather than on the embedded StreamingBackend, which carries only
+	// the one mount-wide timeout.
+	listenTimeout time.Duration
 	tlsSkipVerify bool
 	caData        string
+
+	// installedTransport is the per-mount transport currently in use, or nil
+	// when this mount rides the shared one. The framework's Transport() returns
+	// a stable wrapper rather than what was installed, so a replacement cannot
+	// otherwise be found again to close.
+	installedTransport *http.Transport
 }
 
 // shared transport, initialized once per process.
@@ -187,6 +203,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	// Defaults until Initialize loads persisted config.
 	b.SetMaxBodySize(framework.DefaultMaxBodySize)
 	b.SetTimeout(DefaultMCPAWSTimeout)
+	b.listenTimeout = httpproxy.DefaultListenTimeout
 	if u, err := url.Parse(DefaultMCPAWSURL); err == nil {
 		b.upstreamURL = u
 		_, b.region = serviceAndRegion(u)
@@ -204,21 +221,58 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	return b, nil
 }
 
-// applyParsedConfig parses conf, validates it, builds the new transport,
-// and installs all resolved values under a single write lock. Returns the
-// canonical data to persist (computed from the input alone, never from b.*,
-// so it can't be stale by the time the caller calls Put).
-//
-// Validation + transport build happen BEFORE the lock is taken so a failure
-// in either leaves b.* untouched — no half-mutated state if the CA bundle
-// is malformed or a TLS-toggle build fails.
+// resolvedConfig is a configuration resolved and built, ready to install: every
+// step that can fail is behind it.
+type resolvedConfig struct {
+	upstreamURL   *url.URL
+	configRegion  string
+	region        string
+	listenTimeout time.Duration
+	tlsSkipVerify bool
+	caData        string
+	maxBody       int64
+	timeout       time.Duration
+	transport     http.RoundTripper
+	// perMount is the transport built for this configuration's TLS settings,
+	// or nil when it rides the shared one.
+	perMount    *http.Transport
+	transparent *framework.TransparentConfig
+	// persist is the canonical data to store, computed from the input alone,
+	// never from b.*.
+	persist map[string]any
+}
+
+// discard releases what resolveConfig built, for a configuration that will
+// not be installed. A transport that has served no request holds nothing yet;
+// this keeps that true should resolving ever start to use it.
+func (r *resolvedConfig) discard() {
+	if r.perMount != nil {
+		r.perMount.CloseIdleConnections()
+	}
+}
+
+// applyParsedConfig resolves conf and installs it, returning the data to
+// persist. Mount time and storage load go through it; a config write uses its
+// two halves so it can persist in between.
+func (b *mcpAWSBackend) applyParsedConfig(conf map[string]any) (map[string]any, error) {
+	r, err := b.resolveConfig(conf)
+	if err != nil {
+		return nil, err
+	}
+	b.installConfig(r)
+	return r.persist, nil
+}
+
+// resolveConfig parses conf, validates it and builds the new transport,
+// without touching b.* — a malformed CA bundle or a region that cannot be
+// resolved leaves the mount exactly as it was.
 //
 // TLS handling covers both directions: a config that drops tls_skip_verify
 // or clears ca_data falls back to the shared default transport (the prior
 // implementation only rebuilt when the NEW config had overrides, which left
 // a stuck-state bug where toggling skip-verify off kept the old skip-verify
 // transport in place).
-func (b *mcpAWSBackend) applyParsedConfig(conf map[string]any) (map[string]any, error) {
+func (b *mcpAWSBackend) resolveConfig(conf map[string]any) (*resolvedConfig, error) {
 	parsed := httpproxy.ParseConfig(conf, "mcp_aws_url", DefaultMCPAWSURL, DefaultMCPAWSTimeout)
 	u, err := url.Parse(parsed.ProviderURL)
 	if err != nil {
@@ -240,18 +294,19 @@ func (b *mcpAWSBackend) applyParsedConfig(conf map[string]any) (map[string]any, 
 		return nil, fmt.Errorf("region is required: upstream host %q does not yield a region; set the region config field", u.Host)
 	}
 
-	// Build the transport BEFORE touching state. Either branch returns a
-	// valid http.RoundTripper, so a config-write that removes TLS overrides
-	// successfully falls back to sharedTransport.
-	var newTransport http.RoundTripper
+	// Either branch yields a valid http.RoundTripper, so a config-write that
+	// removes TLS overrides successfully falls back to sharedTransport.
+	var (
+		newTransport http.RoundTripper = sharedTransport
+		perMount     *http.Transport
+	)
 	if parsed.TLSSkipVerify || parsed.CAData != "" {
 		tr, err := httpproxy.NewTransportWithTLS(parsed.CAData, parsed.TLSSkipVerify)
 		if err != nil {
 			return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 		}
 		newTransport = tr
-	} else {
-		newTransport = sharedTransport
+		perMount = tr
 	}
 
 	maxBody := parsed.MaxBodySize
@@ -262,45 +317,73 @@ func (b *mcpAWSBackend) applyParsedConfig(conf map[string]any) (map[string]any, 
 	if timeout == 0 {
 		timeout = DefaultMCPAWSTimeout
 	}
+	listenTimeout := httpproxy.ParseListenTimeout(conf)
 
 	persist := map[string]any{
 		"mcp_aws_url":     u.String(),
 		"region":          configRegion,
 		"max_body_size":   maxBody,
 		"timeout":         timeout.String(),
+		"listen_timeout":  listenTimeout.String(),
 		"auto_auth_path":  parsed.AutoAuthPath,
 		"default_role":    parsed.DefaultAuthRole,
 		"user_auth_path":  parsed.UserAuthPath,
-		"user_auth_role":  parsed.UserAuthRole,
 		"tls_skip_verify": parsed.TLSSkipVerify,
 		"ca_data":         parsed.CAData,
 	}
 
+	return &resolvedConfig{
+		upstreamURL:   u,
+		configRegion:  configRegion,
+		region:        resolvedRegion,
+		listenTimeout: listenTimeout,
+		tlsSkipVerify: parsed.TLSSkipVerify,
+		caData:        parsed.CAData,
+		maxBody:       maxBody,
+		timeout:       timeout,
+		transport:     newTransport,
+		perMount:      perMount,
+		transparent: &framework.TransparentConfig{
+			AutoAuthPath:    parsed.AutoAuthPath,
+			DefaultAuthRole: parsed.DefaultAuthRole,
+			UserAuthPath:    parsed.UserAuthPath,
+
+			UserAuthRoleStored: parsed.UserAuthRoleStored,
+		},
+		persist: persist,
+	}, nil
+}
+
+// installConfig makes r the live configuration. It cannot fail.
+func (b *mcpAWSBackend) installConfig(r *resolvedConfig) {
 	b.mu.Lock()
-	b.upstreamURL = u
-	b.configRegion = configRegion
-	b.region = resolvedRegion
-	b.tlsSkipVerify = parsed.TLSSkipVerify
-	b.caData = parsed.CAData
+	outgoing := b.installedTransport
+	b.upstreamURL = r.upstreamURL
+	b.configRegion = r.configRegion
+	b.region = r.region
+	b.listenTimeout = r.listenTimeout
+	b.tlsSkipVerify = r.tlsSkipVerify
+	b.caData = r.caData
+	b.installedTransport = r.perMount
 	b.mu.Unlock()
 
 	// Framework-side fields are atomic; no lock needed.
-	b.SetMaxBodySize(maxBody)
-	b.SetTimeout(timeout)
-	b.SetTransport(newTransport)
+	b.SetMaxBodySize(r.maxBody)
+	b.SetTimeout(r.timeout)
+	b.SetTransport(r.transport)
 
 	// SetTransparentConfig is the framework's own writer; it does its own
 	// pointer swap on b.TransparentConfig. Concurrent readers see either the
 	// old or new pointer, never a torn one — TransparentConfig is replaced
 	// wholesale, not mutated in place.
-	b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{
-		AutoAuthPath:    parsed.AutoAuthPath,
-		DefaultAuthRole: parsed.DefaultAuthRole,
-		UserAuthPath:    parsed.UserAuthPath,
-		UserAuthRole:    parsed.UserAuthRole,
-	})
+	b.StreamingBackend.SetTransparentConfig(r.transparent)
 
-	return persist, nil
+	// Release the idle connections of the transport just replaced. Only a
+	// per-mount one is ours to close — sharedTransport serves every other
+	// mcp_aws mount. In-flight requests keep the connections they hold.
+	if outgoing != nil && outgoing != r.perMount {
+		outgoing.CloseIdleConnections()
+	}
 }
 
 // Initialize loads persisted configuration from storage. The embedded
@@ -311,6 +394,11 @@ func (b *mcpAWSBackend) Initialize(ctx context.Context) error {
 	if b.StorageView == nil {
 		return nil
 	}
+
+	// The mount is routed before it is initialized, so a config write can
+	// already be under way; loading storage over it would undo it.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	entry, err := b.StorageView.Get(ctx, "config")
 	if err != nil {
@@ -343,21 +431,26 @@ type backendSnapshot struct {
 	region      string
 	maxBody     int64
 	timeout     time.Duration
-	transport   http.RoundTripper
+	// listenTimeout caps a subscriptions/listen stream, which is open-ended
+	// by design; every other call takes timeout above.
+	listenTimeout time.Duration
+	transport     http.RoundTripper
 }
 
 func (b *mcpAWSBackend) snapshot() backendSnapshot {
 	b.mu.RLock()
 	upstream := b.upstreamURL
 	region := b.region
+	listenTimeout := b.listenTimeout
 	b.mu.RUnlock()
 	// Framework-side fields are atomic; no lock needed.
 	return backendSnapshot{
-		upstreamURL: upstream,
-		region:      region,
-		maxBody:     b.MaxBodySize(),
-		timeout:     b.Timeout(),
-		transport:   b.Transport(),
+		upstreamURL:   upstream,
+		region:        region,
+		maxBody:       b.MaxBodySize(),
+		timeout:       b.Timeout(),
+		listenTimeout: listenTimeout,
+		transport:     b.Transport(),
 	}
 }
 
@@ -392,13 +485,31 @@ JSON-RPC bodies, the Accept header, and the Mcp-Session-Id header pass
 through unchanged. Streamable HTTP responses (JSON or SSE) stream
 without buffering.
 
+Mcp-Session-Id is legacy-era and is forwarded for the upstreams that still
+use it; a server speaking 2026-07-28 holds no session and ignores it.
+
+Deadlines are chosen by what the request is, not by how it responds.
+subscriptions/listen — and the legacy SSE GET it replaced — take
+listen_timeout, because a subscription is open-ended by design; everything
+else takes timeout. A long-running tool call that streams progress is still
+capped by timeout, and raising listen_timeout will not save it: the
+alternative, raising timeout far enough to hold a stream open, would hand
+every hung call on the mount the same ceiling. A severed stream is a
+reconnect trigger, losing only the notifications in the gap.
+
 Configuration:
 - mcp_aws_url:    MCP endpoint base URL (default: https://aws-mcp.us-east-1.api.aws/mcp)
 - region:         SigV4 signing region. Optional when the URL host yields one
                   via DNS-label inference; required for hosts that don't
                   (GovCloud, China partition, custom test hosts).
 - max_body_size:  Maximum request body size (default: 10MB, max: 100MB)
-- timeout:        Session timeout (default: 10m)
+- timeout:        Deadline for a single call — a tool call, a listing, a
+                  resource read (default: 60s). It is also how long a hung
+                  call on this mount keeps its goroutine and its two
+                  connections alive.
+- listen_timeout: Deadline for a subscriptions/listen stream (default: 10m).
+                  It governs that method only: a long-running tool call
+                  streaming progress is still capped by timeout.
 - auto_auth_path: Auth mount path for implicit authentication (required)
 - default_role:   Fallback role when not specified by header or URL path
 `

@@ -3,12 +3,13 @@ package http
 import (
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/middleware"
 	"github.com/stephnangue/warden/core"
+	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -57,13 +58,26 @@ func handleLogical(c *core.Core, log *logger.GatedLogger, forwarder *standbyForw
 			// generic Warden error body unchanged. The typed error
 			// Unwraps to sdklogical.ErrPermissionDenied so the status
 			// code is still 403 from errorToStatusCode above.
+			// Branched ahead of the policy-denial case below: a header
+			// mismatch is a protocol fault, not an authorization decision,
+			// and answering it with the 403 would tell a dual-era client to
+			// downgrade rather than to fix its headers. It gets a real
+			// JSON-RPC error and a 400, overriding the 403 that
+			// errorToStatusCode derives from the shared ErrPermissionDenied
+			// unwrap.
+			var mcpHeaderErr *core.ErrMCPHeaderMismatch
+			if errors.As(err, &mcpHeaderErr) {
+				respondMCPHeaderMismatch(w, mcpHeaderErr.RawID, mcpHeaderErr.IDPresent)
+				return
+			}
+
 			var mcpErr *core.ErrMCPPolicyDenied
 			if errors.As(err, &mcpErr) {
 				respondMCPDeny(w, statusCode, mcpErr.Decision)
 				return
 			}
 
-			respondError(w, statusCode, err.Error())
+			respondErr(w, statusCode, err)
 			return
 		}
 
@@ -96,6 +110,7 @@ func buildLogicalRequest(w http.ResponseWriter, r *http.Request) *logical.Reques
 		ResponseWriter: srw,
 		ClientIP:       clientIP,
 		RequestID:      middleware.GetReqID(r.Context()),
+		ReceivedAt:     time.Now(),
 	}
 }
 
@@ -128,32 +143,11 @@ func operationFromHTTPMethod(r *http.Request) logical.Operation {
 	}
 }
 
-// extractClientIP extracts the client IP from the request.
-// It checks X-Real-IP header first (set by reverse proxies),
-// then X-Forwarded-For, then falls back to RemoteAddr.
+// extractClientIP is the client's address, as the listener resolved it into
+// r.RemoteAddr. X-Real-IP and X-Forwarded-For are not read here: the listener
+// honours them only from a trusted proxy or a forwarding node.
 func extractClientIP(r *http.Request) string {
-	// Check X-Real-IP first (commonly set by nginx)
-	clientIP := r.Header.Get("X-Real-IP")
-	if clientIP != "" {
-		return clientIP
-	}
-
-	// Check X-Forwarded-For
-	forwarded := r.Header.Get("X-Forwarded-For")
-	if forwarded != "" {
-		// Take the first IP in the list
-		if idx := strings.Index(forwarded, ","); idx != -1 {
-			return strings.TrimSpace(forwarded[:idx])
-		}
-		return strings.TrimSpace(forwarded)
-	}
-
-	// Fall back to RemoteAddr
-	clientIP = r.RemoteAddr
-	if host, _, err := net.SplitHostPort(clientIP); err == nil {
-		clientIP = host
-	}
-	return clientIP
+	return listener.ClientIP(r)
 }
 
 // errorToStatusCode maps errors to appropriate HTTP status codes.
@@ -194,7 +188,7 @@ func writeLogicalResponse(w http.ResponseWriter, resp *logical.Response) {
 	} else if resp.Err != nil {
 		// Serialize error to JSON
 		w.Header().Set("Content-Type", "application/json")
-		jsonBody, err := json.Marshal(map[string]any{"errors": []string{resp.Err.Error()}})
+		jsonBody, err := json.Marshal(map[string]any{"errors": logical.ErrorMessages(resp.Err)})
 		if err == nil {
 			body = jsonBody
 		}

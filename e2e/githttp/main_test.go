@@ -55,7 +55,7 @@ func ensureEnv(t *testing.T) {
 }
 
 // agentCert mints a client certificate for the agent leg. The common name must
-// match the cert role's allowed_common_names.
+// match the cn the agent role's group grants (agent-*).
 func agentCert(t *testing.T) string {
 	t.Helper()
 	certPEM, _ := h.GenerateClientCert(t, agentCAPEM, agentCAKey, "agent-git")

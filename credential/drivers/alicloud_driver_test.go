@@ -3,12 +3,16 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/logger"
@@ -38,7 +42,7 @@ func TestAlicloudDriverFactory_Type(t *testing.T) {
 
 func TestAlicloudDriverFactory_InferCredentialType(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	ct, err := f.InferCredentialType(map[string]string{})
+	ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{}))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeAlicloudKeys, ct)
 }
@@ -54,27 +58,462 @@ func TestAlicloudDriverFactory_ValidateConfig(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 
 	t.Run("empty config is valid (MVP allows it)", func(t *testing.T) {
-		assert.NoError(t, f.ValidateConfig(map[string]string{}))
+		assert.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{})))
 	})
 
 	t.Run("valid config", func(t *testing.T) {
-		assert.NoError(t, f.ValidateConfig(map[string]string{
+		assert.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{
 			"access_key_id":     "LTAItest",
 			"access_key_secret": "secret",
 			"sts_endpoint":      "https://sts.aliyuncs.com",
 			"ram_endpoint":      "https://ram.aliyuncs.com",
-		}))
+		})))
 	})
+}
+
+// --- Keyless (auth_method=oidc_federation) ---
+
+func TestAlicloudDriverFactory_ValidateConfig_AuthMethod(t *testing.T) {
+	f := &AlicloudDriverFactory{}
+
+	tests := []struct {
+		name    string
+		config  credential.Config
+		wantErr string
+	}{
+		{
+			name: "federation with a provider arn",
+			config: credential.NewConfig(map[string]string{
+				"auth_method":       "oidc_federation",
+				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+				"audience":          "https://warden.example.com",
+			}),
+		},
+		{
+			name:    "federation without a provider arn",
+			config:  credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+			wantErr: "oidc_provider_arn is required",
+		},
+		{
+			name: "unknown auth_method",
+			config: credential.NewConfig(map[string]string{
+				"auth_method": "instance_role",
+			}),
+			wantErr: "auth_method",
+		},
+		{
+			// The static source's fields are exactly what federation removes, so
+			// carrying either is a half-converted source.
+			name: "federation carrying a key pair",
+			config: credential.NewConfig(map[string]string{
+				"auth_method":       "oidc_federation",
+				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+				"access_key_id":     "LTAI-mgmt",
+			}),
+			wantErr: "access_key_id",
+		},
+		{
+			name: "federation carrying rotation config",
+			config: credential.NewConfig(map[string]string{
+				"auth_method":          "oidc_federation",
+				"oidc_provider_arn":    "acs:ram::123456789012:oidc-provider/warden",
+				"management_user_name": "warden-management",
+			}),
+			wantErr: "management_user_name",
+		},
+		{
+			// ram_endpoint is read only by the rotation calls, which federation
+			// forecloses.
+			name: "federation carrying a ram endpoint",
+			config: credential.NewConfig(map[string]string{
+				"auth_method":       "oidc_federation",
+				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+				"ram_endpoint":      "https://ram.aliyuncs.com",
+			}),
+			wantErr: "ram_endpoint",
+		},
+		{
+			name: "static carrying a provider arn",
+			config: credential.NewConfig(map[string]string{
+				"access_key_id":     "LTAI-mgmt",
+				"access_key_secret": "secret",
+				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+			}),
+			wantErr: "oidc_provider_arn",
+		},
+		{
+			name: "static carrying an audience",
+			config: credential.NewConfig(map[string]string{
+				"access_key_id":     "LTAI-mgmt",
+				"access_key_secret": "secret",
+				"audience":          "https://warden.example.com",
+			}),
+			wantErr: "audience",
+		},
+		{
+			// A stored empty auth_method is validated as static, not skipped —
+			// GetString hands back the stored "" rather than the default.
+			name: "explicit empty auth_method is treated as static",
+			config: credential.NewConfig(map[string]string{
+				"auth_method":       "",
+				"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+			}),
+			wantErr: "oidc_provider_arn",
+		},
+		{
+			// Unchanged from before federation existed: nothing is required.
+			name:   "empty config is still valid",
+			config: credential.NewConfig(map[string]string{}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := f.ValidateConfig(tt.config)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// newFederationDriver builds a keyless driver pointed at an STS stub.
+func newAlicloudFederationDriver(t *testing.T, stsURL string) *AlicloudDriver {
+	t.Helper()
+	f := &AlicloudDriverFactory{}
+	d, err := f.Create(credential.NewConfig(map[string]string{
+		"auth_method":       "oidc_federation",
+		"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+		"audience":          "https://warden.example.com",
+		"sts_endpoint":      stsURL,
+	}), createAlicloudTestLogger())
+	require.NoError(t, err)
+	return d.(*AlicloudDriver)
+}
+
+func federationSpec() *credential.CredSpec {
+	return &credential.CredSpec{
+		Name: "prod",
+		Config: credential.NewConfig(map[string]string{
+			"mint_method":      "assume_role",
+			"role_arn":         "acs:ram::123456789012:role/warden-prod",
+			"duration_seconds": "1800s",
+		}),
+	}
+}
+
+// A keyless source has no key to sign with and no ambient identity, so the
+// non-exchange path must fail closed rather than fall back to anything. This is
+// also what makes the spec-create test-mint reject a non-exchange spec on such a
+// source.
+func TestAlicloudDriver_Federation_MintCredentialFailsClosed(t *testing.T) {
+	drv := newAlicloudFederationDriver(t, "https://sts.example.invalid")
+
+	_, _, _, _, err := drv.MintCredential(context.Background(), federationSpec())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "subject_token_source")
+}
+
+func TestAlicloudDriver_Federation_MintWithExchange(t *testing.T) {
+	const assertion = "eyJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qifq.payload.signature"
+
+	var gotQuery url.Values
+	var gotForm url.Values
+	var gotAuth, gotRawQuery, gotContentType string
+
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRawQuery = r.URL.RawQuery
+		gotQuery = r.URL.Query()
+		gotAuth = r.Header.Get("Authorization")
+		gotContentType = r.Header.Get("Content-Type")
+		require.NoError(t, r.ParseForm())
+		gotForm = r.PostForm
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Credentials": map[string]any{
+				"AccessKeyId":     "STS.federated",
+				"AccessKeySecret": "federated-secret",
+				"SecurityToken":   "federated-token",
+				"Expiration":      time.Now().Add(1800 * time.Second).UTC().Format(time.RFC3339),
+			},
+		})
+	}))
+	defer sts.Close()
+
+	drv := newAlicloudFederationDriver(t, sts.URL)
+	raw, metadata, ttl, leaseID, err := drv.MintCredentialWithExchange(
+		context.Background(), federationSpec(),
+		&credential.ExchangeInputs{SubjectToken: assertion})
+	require.NoError(t, err)
+
+	// The RPC common parameters identify the call and stay in the query, as
+	// Alibaba's own RRSA client sends them — Timestamp included, which is part of
+	// that convention and which no stub can prove optional.
+	assert.Equal(t, "AssumeRoleWithOIDC", gotQuery.Get("Action"))
+	assert.Equal(t, alicloudSTSVersion, gotQuery.Get("Version"))
+	assert.Equal(t, "JSON", gotQuery.Get("Format"))
+	stamp, tsErr := time.Parse(alicloudTimestampFormat, gotQuery.Get("Timestamp"))
+	require.NoError(t, tsErr, "Timestamp must be ISO 8601 UTC")
+	assert.WithinDuration(t, time.Now(), stamp, time.Minute)
+
+	// The exchange parameters travel in the form body.
+	assert.Equal(t, "application/x-www-form-urlencoded", gotContentType)
+	assert.Equal(t, assertion, gotForm.Get("OIDCToken"))
+	assert.Equal(t, "acs:ram::123456789012:oidc-provider/warden", gotForm.Get("OIDCProviderArn"))
+	assert.Equal(t, "acs:ram::123456789012:role/warden-prod", gotForm.Get("RoleArn"))
+	assert.Equal(t, "1800", gotForm.Get("DurationSeconds"))
+
+	// The two load-bearing negatives. AssumeRoleWithOIDC is anonymous, and the
+	// assertion must never reach the URL — *url.Error prints the whole thing on
+	// any transport failure.
+	assert.Empty(t, gotAuth, "AssumeRoleWithOIDC is an anonymous call")
+	assert.NotContains(t, gotRawQuery, assertion, "the assertion must not be in the query string")
+	assert.NotContains(t, gotRawQuery, "OIDCToken")
+
+	assert.Equal(t, "STS.federated", raw["access_key_id"])
+	assert.Equal(t, "federated-secret", raw["access_key_secret"])
+	assert.Equal(t, "federated-token", raw["security_token"])
+	assert.Equal(t, "acs:ram::123456789012:role/warden-prod", metadata["role_arn"])
+	assert.InDelta(t, 1800, ttl.Seconds(), 5)
+	assert.Empty(t, leaseID, "STS sessions are self-expiring")
+}
+
+// Pins the body-not-query decision against a future refactor: point the driver at
+// a dead port so client.Do fails, and check the assertion is not in the error.
+// With the token in the query string, *url.Error would print it verbatim.
+func TestAlicloudDriver_Federation_TransportErrorDoesNotLeakAssertion(t *testing.T) {
+	const assertion = "eyJhbGciOiJSUzI1NiJ9.super-secret-payload.signature"
+
+	// A listener closed immediately gives us an address nothing answers on.
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := closed.URL
+	closed.Close()
+
+	drv := newAlicloudFederationDriver(t, deadURL)
+	_, _, _, _, err := drv.MintCredentialWithExchange(
+		context.Background(), federationSpec(),
+		&credential.ExchangeInputs{SubjectToken: assertion})
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), assertion,
+		"a transport error must not print the caller's assertion")
+	assert.NotContains(t, err.Error(), "super-secret-payload")
+}
+
+func TestAlicloudDriver_Federation_ExchangeRejections(t *testing.T) {
+	t.Run("rejected on a static source", func(t *testing.T) {
+		f := &AlicloudDriverFactory{}
+		d, _ := f.Create(credential.NewConfig(map[string]string{
+			"access_key_id":     "LTAI-mgmt",
+			"access_key_secret": "secret",
+		}), createAlicloudTestLogger())
+
+		_, _, _, _, err := d.(*AlicloudDriver).MintCredentialWithExchange(
+			context.Background(), federationSpec(),
+			&credential.ExchangeInputs{SubjectToken: "assertion"})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "oidc_federation")
+	})
+
+	t.Run("rejected with no subject token", func(t *testing.T) {
+		drv := newAlicloudFederationDriver(t, "https://sts.example.invalid")
+
+		_, _, _, _, err := drv.MintCredentialWithExchange(context.Background(), federationSpec(), nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no subject token")
+
+		_, _, _, _, err = drv.MintCredentialWithExchange(
+			context.Background(), federationSpec(), &credential.ExchangeInputs{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no subject token")
+	})
+
+	t.Run("rejected for an unsupported mint_method", func(t *testing.T) {
+		drv := newAlicloudFederationDriver(t, "https://sts.example.invalid")
+		spec := federationSpec()
+		spec.Config = spec.Config.With("mint_method", "dynamic_keys")
+
+		_, _, _, _, err := drv.MintCredentialWithExchange(
+			context.Background(), spec, &credential.ExchangeInputs{SubjectToken: "assertion"})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "assume_role")
+	})
+}
+
+// The three things most likely to be misconfigured are the issuer trust, the
+// audience, and the role's trust policy; the raw envelope names none of them.
+func TestAlicloudDriver_Federation_ErrorMappingNamesTheTrustChain(t *testing.T) {
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Code":      "AuthenticationFail.OIDCToken.Invalid",
+			"Message":   "The OIDC token is invalid.",
+			"RequestId": "req-oidc",
+		})
+	}))
+	defer sts.Close()
+
+	drv := newAlicloudFederationDriver(t, sts.URL)
+	_, _, _, _, err := drv.MintCredentialWithExchange(
+		context.Background(), federationSpec(),
+		&credential.ExchangeInputs{SubjectToken: "assertion"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AuthenticationFail.OIDCToken.Invalid", "the upstream code survives")
+	assert.Contains(t, err.Error(), "issuer")
+	assert.Contains(t, err.Error(), "client_ids")
+	assert.Contains(t, err.Error(), "trust policy")
+}
+
+// A federation source holds no key, so there is nothing to rotate and no RAM user
+// to rotate as.
+func TestAlicloudDriver_Federation_RotationRefused(t *testing.T) {
+	drv := newAlicloudFederationDriver(t, "https://sts.example.invalid")
+
+	assert.False(t, drv.SupportsRotation())
+
+	_, _, _, err := drv.PrepareRotation(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no key to rotate")
+}
+
+// VerifySpec has no ambient credential to dry-run with under federation. The
+// guard is unreachable in practice — the spec-create test-mint is skipped for
+// exchange specs — but it must not attempt a network call if it is ever reached.
+func TestAlicloudDriver_Federation_VerifySpecMakesNoCall(t *testing.T) {
+	sts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("VerifySpec must not call STS on a federation source")
+	}))
+	defer sts.Close()
+
+	drv := newAlicloudFederationDriver(t, sts.URL)
+	assert.NoError(t, drv.VerifySpec(context.Background(), federationSpec()))
+}
+
+func TestAlicloudAssertionClaims(t *testing.T) {
+	federationSource := map[string]string{
+		"auth_method":       "oidc_federation",
+		"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+		"audience":          "https://warden.example.com",
+	}
+
+	t.Run("audience comes from the source", func(t *testing.T) {
+		aud, ok := DeriveAssertionAudience(credential.SourceTypeAlicloud, credential.NewConfig(federationSource), credential.Config{})
+		assert.True(t, ok)
+		assert.Equal(t, "https://warden.example.com", aud)
+	})
+
+	t.Run("no audience without one configured", func(t *testing.T) {
+		// Alibaba matches aud against the provider's registered client_ids, which
+		// the operator chooses, so there is no default to fall back to. Returning
+		// false is what makes spec-create demand assertion_audience.
+		_, ok := DeriveAssertionAudience(credential.SourceTypeAlicloud, credential.NewConfig(map[string]string{
+			"auth_method":       "oidc_federation",
+			"oidc_provider_arn": "acs:ram::123456789012:oidc-provider/warden",
+		}), credential.Config{})
+		assert.False(t, ok)
+	})
+
+	t.Run("a static source derives no audience", func(t *testing.T) {
+		_, ok := DeriveAssertionAudience(credential.SourceTypeAlicloud, credential.NewConfig(map[string]string{
+			"access_key_id": "LTAI-mgmt",
+			"audience":      "https://warden.example.com",
+		}), credential.Config{})
+		assert.False(t, ok)
+	})
+
+	t.Run("resource is the role arn", func(t *testing.T) {
+		res, ok := DeriveAssertionResource(credential.SourceTypeAlicloud, credential.NewConfig(federationSource), credential.NewConfig(map[string]string{
+			"mint_method": "assume_role",
+			"role_arn":    "acs:ram::123456789012:role/warden-prod",
+		}))
+		assert.True(t, ok)
+		assert.Equal(t, "alicloud-ram:acs:ram::123456789012:role/warden-prod", res)
+	})
+
+	t.Run("no resource without a role arn", func(t *testing.T) {
+		_, ok := DeriveAssertionResource(credential.SourceTypeAlicloud, credential.NewConfig(federationSource), credential.NewConfig(map[string]string{
+			"mint_method": "assume_role",
+		}))
+		assert.False(t, ok)
+	})
+}
+
+// A rotation_period the driver could never honour is refused at write time.
+// Accepting it means the manager retries, parks the entry as failed, comes back
+// after FailedMinAge and repeats for the life of the source, all of it visible
+// only in the server log.
+//
+// The rules must match SupportsRotation exactly — anything required there but not
+// here is a source that is accepted and then fails every cycle forever — so the
+// same configs are asserted against both.
+func TestAlicloudDriverFactory_ValidateRotationConfig(t *testing.T) {
+	f := &AlicloudDriverFactory{}
+
+	tests := []struct {
+		name    string
+		config  credential.Config
+		wantErr string
+	}{
+		{
+			name: "complete rotation config",
+			config: credential.NewConfig(map[string]string{
+				"access_key_id":        "LTAI-mgmt",
+				"access_key_secret":    "secret",
+				"management_user_name": "warden-management",
+			}),
+		},
+		{
+			name: "missing management_user_name",
+			config: credential.NewConfig(map[string]string{
+				"access_key_id":     "LTAI-mgmt",
+				"access_key_secret": "secret",
+			}),
+			wantErr: "management_user_name",
+		},
+		{
+			name:    "missing everything",
+			config:  credential.NewConfig(map[string]string{}),
+			wantErr: "access_key_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := f.ValidateRotationConfig(tt.config)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
+
+			// The config-time check and the live check must agree, or a source
+			// slips past one and stalls on the other.
+			d, createErr := f.Create(tt.config, createAlicloudTestLogger())
+			require.NoError(t, createErr)
+			assert.Equal(t, err == nil, d.(*AlicloudDriver).SupportsRotation(),
+				"ValidateRotationConfig and SupportsRotation must agree")
+		})
+	}
 }
 
 func TestAlicloudDriverFactory_Create(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 	log := createAlicloudTestLogger()
 
-	d, err := f.Create(map[string]string{
+	d, err := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAItest",
 		"access_key_secret": "secret",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	assert.Equal(t, credential.SourceTypeAlicloud, d.Type())
 }
@@ -86,13 +525,13 @@ func TestAlicloudDriverFactory_Create(t *testing.T) {
 // flows (assume_role, dynamic_keys).
 func TestAlicloudDriver_StaticKeysRejected(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+	d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":       "static_keys",
 			"access_key_id":     "x",
 			"access_key_secret": "y",
-		},
+		}),
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "assume_role")
@@ -100,9 +539,9 @@ func TestAlicloudDriver_StaticKeysRejected(t *testing.T) {
 
 func TestAlicloudDriver_UnsupportedMintMethod(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+	d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{"mint_method": "bogus"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "bogus"}),
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported or missing mint_method")
@@ -110,9 +549,9 @@ func TestAlicloudDriver_UnsupportedMintMethod(t *testing.T) {
 
 func TestAlicloudDriver_MissingMintMethod(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+	d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{},
+		Config: credential.NewConfig(map[string]string{}),
 	})
 	assert.Error(t, err)
 }
@@ -124,6 +563,7 @@ func TestAlicloudDriver_MintAssumeRole(t *testing.T) {
 	var receivedAuth string
 	var receivedRoleArn string
 
+	expiry := time.Now().Add(1800 * time.Second).UTC().Format(time.RFC3339)
 	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAction = r.URL.Query().Get("Action")
 		receivedRoleArn = r.URL.Query().Get("RoleArn")
@@ -134,27 +574,27 @@ func TestAlicloudDriver_MintAssumeRole(t *testing.T) {
 				"AccessKeyId":     "STS.tempid",
 				"AccessKeySecret": "tempsecret",
 				"SecurityToken":   "tempstsToken",
-				"Expiration":      "2099-01-01T00:00:00Z",
+				"Expiration":      expiry,
 			},
 		})
 	}))
 	defer sts.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, err := f.Create(map[string]string{
+	d, err := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
 		"sts_endpoint":      sts.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 	require.NoError(t, err)
 
 	spec := &credential.CredSpec{
 		Name: "ops",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":      "assume_role",
 			"role_arn":         "acs:ram::123:role/ops",
 			"duration_seconds": "1800s",
-		},
+		}),
 	}
 
 	raw, _, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
@@ -162,7 +602,10 @@ func TestAlicloudDriver_MintAssumeRole(t *testing.T) {
 	assert.Equal(t, "STS.tempid", raw["access_key_id"])
 	assert.Equal(t, "tempsecret", raw["access_key_secret"])
 	assert.Equal(t, "tempstsToken", raw["security_token"])
-	assert.Equal(t, 1800, int(ttl.Seconds()), "ttl should match duration_seconds")
+	// Derived from the Expiration STS reported, so it is at most the requested
+	// 1800s — never more, whatever the round trip cost.
+	assert.InDelta(t, 1800, ttl.Seconds(), 5, "ttl should track the reported expiry")
+	assert.LessOrEqual(t, ttl, 1800*time.Second)
 	assert.Equal(t, "", leaseID, "STS has no leaseID")
 
 	// Verify the request was signed with ACS3 and had the right params
@@ -172,15 +615,96 @@ func TestAlicloudDriver_MintAssumeRole(t *testing.T) {
 	assert.Contains(t, receivedAuth, "Credential=LTAI-mgmt")
 }
 
-func TestAlicloudDriver_MintAssumeRole_MissingRoleArn(t *testing.T) {
+// mintWithExpiration mints one credential against an STS stub that reports the
+// given Expiration verbatim, and returns the resulting lease TTL.
+func mintWithExpiration(t *testing.T, expiration, durationSeconds string) (time.Duration, error) {
+	t.Helper()
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Credentials": map[string]any{
+				"AccessKeyId":     "STS.tempid",
+				"AccessKeySecret": "tempsecret",
+				"SecurityToken":   "tempstsToken",
+				"Expiration":      expiration,
+			},
+		})
+	}))
+	t.Cleanup(sts.Close)
+
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, err := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
-	}, createAlicloudTestLogger())
+		"sts_endpoint":      sts.URL,
+	}), createAlicloudTestLogger())
+	require.NoError(t, err)
+
+	_, _, ttl, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
+		Config: credential.NewConfig(map[string]string{
+			"mint_method":      "assume_role",
+			"role_arn":         "acs:ram::123:role/ops",
+			"duration_seconds": durationSeconds,
+		}),
+	})
+	return ttl, err
+}
+
+// The lease must follow the credential, not the request. STS is free to issue a
+// shorter session than was asked for; caching for the requested duration would
+// then serve a dead token to whoever hits the cache near the end.
+func TestAlicloudDriver_MintAssumeRole_TTLFollowsServerExpiry(t *testing.T) {
+	shortened := time.Now().Add(600 * time.Second).UTC().Format(time.RFC3339)
+
+	ttl, err := mintWithExpiration(t, shortened, "3600s")
+
+	require.NoError(t, err)
+	assert.InDelta(t, 600, ttl.Seconds(), 5, "the reported expiry wins over the requested duration")
+}
+
+// The reported expiry is only as good as the agreement between two clocks. A
+// local clock running behind Alibaba's reports a remaining lifetime longer than
+// was ever requested, which would reintroduce the over-long lease this fix
+// exists to prevent — so the requested duration is the ceiling. STS never issues
+// longer than asked, so a longer expiry means skew, not generosity.
+func TestAlicloudDriver_MintAssumeRole_TTLCappedAtRequestedDuration(t *testing.T) {
+	skewed := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+
+	ttl, err := mintWithExpiration(t, skewed, "1800s")
+
+	require.NoError(t, err)
+	assert.Equal(t, 1800*time.Second, ttl, "an expiry beyond the requested duration must be capped")
+}
+
+// A credential that is usable should not be discarded over a timestamp format,
+// so an unparseable Expiration falls back to the requested duration — no worse
+// than the behaviour this replaced.
+func TestAlicloudDriver_MintAssumeRole_UnparseableExpiryFallsBack(t *testing.T) {
+	ttl, err := mintWithExpiration(t, "not-a-timestamp", "1800s")
+
+	require.NoError(t, err)
+	assert.Equal(t, 1800*time.Second, ttl)
+}
+
+// An expiry already in the past leaves nothing usable to hand back.
+func TestAlicloudDriver_MintAssumeRole_ExpiredCredentialIsRejected(t *testing.T) {
+	past := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+
+	_, err := mintWithExpiration(t, past, "1800s")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already expired")
+}
+
+func TestAlicloudDriver_MintAssumeRole_MissingRoleArn(t *testing.T) {
+	f := &AlicloudDriverFactory{}
+	d, _ := f.Create(credential.NewConfig(map[string]string{
+		"access_key_id":     "LTAI-mgmt",
+		"access_key_secret": "mgmt-secret",
+	}), createAlicloudTestLogger())
 
 	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{"mint_method": "assume_role"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "assume_role"}),
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "role_arn")
@@ -188,12 +712,12 @@ func TestAlicloudDriver_MintAssumeRole_MissingRoleArn(t *testing.T) {
 
 func TestAlicloudDriver_MintAssumeRole_MissingManagementKey(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+	d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "assume_role",
 			"role_arn":    "acs:ram::123:role/x",
-		},
+		}),
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "access_key_id")
@@ -203,22 +727,22 @@ func TestAlicloudDriver_MintAssumeRole_MissingManagementKey(t *testing.T) {
 
 func TestAlicloudDriver_RevokeIsNoop(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+	d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 	assert.NoError(t, d.Revoke(context.Background(), ""))
 	assert.NoError(t, d.Revoke(context.Background(), "any-lease-id"))
 }
 
 func TestAlicloudDriver_DynamicKeysRejected(t *testing.T) {
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 	_, _, _, _, err := d.MintCredential(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":   "dynamic_keys",
 			"ram_user_name": "warden-svc",
-		},
+		}),
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "assume_role")
@@ -230,33 +754,33 @@ func TestAlicloudDriver_VerifySpec(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 
 	t.Run("unsupported mint_method", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+		d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 		err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-			Config: map[string]string{"mint_method": "bogus"},
+			Config: credential.NewConfig(map[string]string{"mint_method": "bogus"}),
 		})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "unsupported mint_method")
 	})
 
 	t.Run("assume_role requires role_arn", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":     "LTAI-mgmt",
 			"access_key_secret": "mgmt-secret",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 		err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-			Config: map[string]string{"mint_method": "assume_role"},
+			Config: credential.NewConfig(map[string]string{"mint_method": "assume_role"}),
 		})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "role_arn")
 	})
 
 	t.Run("assume_role requires management keys", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{}, createAlicloudTestLogger())
+		d, _ := f.Create(credential.NewConfig(map[string]string{}), createAlicloudTestLogger())
 		err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "assume_role",
 				"role_arn":    "acs:ram::123:role/x",
-			},
+			}),
 		})
 		assert.Error(t, err)
 	})
@@ -279,17 +803,17 @@ func TestAlicloudDriver_VerifySpec(t *testing.T) {
 		}))
 		defer sts.Close()
 
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":     "LTAI-mgmt",
 			"access_key_secret": "mgmt-secret",
 			"sts_endpoint":      sts.URL,
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 
 		err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "assume_role",
 				"role_arn":    "acs:ram::123:role/verify-ok",
-			},
+			}),
 		})
 		require.NoError(t, err)
 		assert.Equal(t, "AssumeRole", receivedAction)
@@ -309,17 +833,17 @@ func TestAlicloudDriver_VerifySpec(t *testing.T) {
 		}))
 		defer sts.Close()
 
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":     "LTAI-mgmt",
 			"access_key_secret": "mgmt-secret",
 			"sts_endpoint":      sts.URL,
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 
 		err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "assume_role",
 				"role_arn":    "acs:ram::123:role/does-not-exist",
-			},
+			}),
 		})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "pre-flight AssumeRole")
@@ -378,17 +902,17 @@ func TestAlicloudDriver_CallSignedJSON_RetriesOnThrottling(t *testing.T) {
 	defer sts.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
 		"sts_endpoint":      sts.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 
 	err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "assume_role",
 			"role_arn":    "acs:ram::123:role/retry-ok",
-		},
+		}),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 2, hits, "first call throttled, second should succeed")
@@ -417,17 +941,17 @@ func TestAlicloudDriver_CallSignedJSON_RetriesOnInternalError(t *testing.T) {
 	defer sts.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
 		"sts_endpoint":      sts.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 
 	err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "assume_role",
 			"role_arn":    "acs:ram::123:role/retry-internal",
-		},
+		}),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 2, hits)
@@ -448,17 +972,17 @@ func TestAlicloudDriver_CallSignedJSON_DoesNotRetrySignatureMismatch(t *testing.
 	defer sts.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
 		"sts_endpoint":      sts.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 
 	err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "assume_role",
 			"role_arn":    "acs:ram::123:role/sig",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Equal(t, 1, hits, "signature mismatches must not be retried")
@@ -481,22 +1005,129 @@ func TestAlicloudDriver_CallSignedJSON_StopsAtMaxAttempts(t *testing.T) {
 	defer sts.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":     "LTAI-mgmt",
 		"access_key_secret": "mgmt-secret",
 		"sts_endpoint":      sts.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 
 	err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "assume_role",
 			"role_arn":    "acs:ram::123:role/stuck",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Equal(t, alicloudMaxRetryAttempts, hits, "retries must be capped at alicloudMaxRetryAttempts")
 	assert.Contains(t, err.Error(), "exhausted")
 	assert.Contains(t, err.Error(), "Throttling")
+}
+
+// 400/403/404 are marked OK statuses only so Alicloud error envelopes arrive as
+// readable bodies. A 4xx whose body is not an envelope — an intercepting proxy's
+// HTML error page, a load balancer's own JSON — must still fail. It used to be
+// read as success, which let CleanupRotation report that it had deleted a key it
+// had not touched.
+func TestAlicloudDriver_CallSignedJSON_NonEnvelope4xxIsAnError(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+		wantInErr   string
+	}{
+		{
+			name:        "html error page from a proxy",
+			status:      http.StatusForbidden,
+			contentType: "text/html",
+			body:        "<html>\n<head><title>403 Forbidden</title></head>\n<body>denied</body>\n</html>",
+			wantInErr:   "403 Forbidden",
+		},
+		{
+			name:        "json without a Code field",
+			status:      http.StatusBadRequest,
+			contentType: "application/json",
+			body:        `{"message":"malformed request"}`,
+			wantInErr:   "malformed request",
+		},
+		{
+			name:        "empty body",
+			status:      http.StatusNotFound,
+			contentType: "text/plain",
+			body:        "",
+			wantInErr:   "<empty>",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := 0
+			sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				w.Header().Set("Content-Type", tc.contentType)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer sts.Close()
+
+			f := &AlicloudDriverFactory{}
+			d, _ := f.Create(credential.NewConfig(map[string]string{
+				"access_key_id":     "LTAI-mgmt",
+				"access_key_secret": "mgmt-secret",
+				"sts_endpoint":      sts.URL,
+			}), createAlicloudTestLogger())
+
+			err := d.(*AlicloudDriver).VerifySpec(context.Background(), &credential.CredSpec{
+				Config: credential.NewConfig(map[string]string{
+					"mint_method": "assume_role",
+					"role_arn":    "acs:ram::123:role/proxied",
+				}),
+			})
+			require.Error(t, err, "a non-envelope %d must not be treated as success", tc.status)
+			assert.Contains(t, err.Error(), fmt.Sprintf("HTTP %d", tc.status))
+			assert.Contains(t, err.Error(), tc.wantInErr, "the body should be quoted back for triage")
+			assert.Equal(t, 1, hits, "a non-envelope 4xx is not transient and must not be retried")
+		})
+	}
+}
+
+// The body excerpt is collapsed onto one line so a multi-line HTML error page
+// cannot break the error across a dozen log lines, and bounded so it cannot
+// flood them either.
+func TestAlicloudBodyPreview(t *testing.T) {
+	assert.Equal(t, "<empty>", alicloudBodyPreview(nil))
+	assert.Equal(t, "<empty>", alicloudBodyPreview([]byte("")))
+	assert.Equal(t, "a b c", alicloudBodyPreview([]byte("a\n  b\t\nc\n")))
+
+	long := alicloudBodyPreview([]byte(strings.Repeat("x", alicloudBodyPreviewLen*2)))
+	assert.Equal(t, strings.Repeat("x", alicloudBodyPreviewLen)+"...", long)
+}
+
+// The typed envelope error lets callers branch on the upstream Code instead of
+// matching substrings. Rotation cleanup relies on this to treat an
+// already-deleted key as success.
+func TestAlicloudErrorHasCodePrefix(t *testing.T) {
+	notExist := alicloudErrorFromEnvelope(alicloudErrorEnvelope{
+		Code: "EntityNotExist.User.AccessKey", Message: "gone", RequestId: "req-1",
+	})
+
+	assert.True(t, alicloudErrorHasCodePrefix(notExist, "EntityNotExist"))
+	assert.True(t, alicloudErrorHasCodePrefix(notExist, "EntityNotExist.User"))
+	assert.True(t, alicloudErrorHasCodePrefix(notExist, "EntityNotExist.User.AccessKey"))
+	assert.False(t, alicloudErrorHasCodePrefix(notExist, "NoPermission"))
+
+	// The dotted boundary keeps a prefix from matching a longer sibling code.
+	assert.False(t, alicloudErrorHasCodePrefix(
+		alicloudErrorFromEnvelope(alicloudErrorEnvelope{Code: "EntityNotExistent"}), "EntityNotExist"))
+
+	// It survives wrapping, and a plain error is simply not a match.
+	assert.True(t, alicloudErrorHasCodePrefix(fmt.Errorf("cleanup: %w", notExist), "EntityNotExist"))
+	assert.False(t, alicloudErrorHasCodePrefix(errors.New("EntityNotExist.User"), "EntityNotExist"))
+
+	// Formatting is unchanged from the untyped version operators are used to.
+	assert.Equal(t, "EntityNotExist.User.AccessKey: gone (RequestId=req-1)", notExist.Error())
+	assert.Equal(t, "NoPermission: denied",
+		alicloudErrorFromEnvelope(alicloudErrorEnvelope{Code: "NoPermission", Message: "denied"}).Error())
 }
 
 // --- Rotation ---
@@ -505,26 +1136,26 @@ func TestAlicloudDriver_SupportsRotation(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 
 	t.Run("requires management user name", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":     "x",
 			"access_key_secret": "y",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 		assert.False(t, d.(*AlicloudDriver).SupportsRotation())
 	})
 
 	t.Run("requires management keys", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"management_user_name": "u",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 		assert.False(t, d.(*AlicloudDriver).SupportsRotation())
 	})
 
 	t.Run("all fields present", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":        "x",
 			"access_key_secret":    "y",
 			"management_user_name": "u",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 		assert.True(t, d.(*AlicloudDriver).SupportsRotation())
 	})
 }
@@ -538,6 +1169,22 @@ type ramServer struct {
 	deactivated   []string
 	deleted       []string
 	actionSeq     []string // action names in the order received, for ordering assertions
+
+	// createAnswer, when set, answers the n-th CreateAccessKey (from 1) itself and
+	// reports true; on false the key is created as usual.
+	createAnswer func(w http.ResponseWriter, n int) bool
+	createCalls  int
+}
+
+// writeEntityNotExist replies as RAM does for an access key that is not there:
+// an error envelope on HTTP 404, not a bare status.
+func (s *ramServer) writeEntityNotExist(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusNotFound)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"Code":      "EntityNotExist.User.AccessKey",
+		"Message":   "The specified access key does not exist.",
+		"RequestId": "req-not-exist",
+	})
 }
 
 func (s *ramServer) handle(w http.ResponseWriter, r *http.Request) {
@@ -564,6 +1211,10 @@ func (s *ramServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"AccessKeys": list})
 	case "CreateAccessKey":
+		s.createCalls++
+		if s.createAnswer != nil && s.createAnswer(w, s.createCalls) {
+			return
+		}
 		s.nextIDCounter++
 		newID := fmt.Sprintf("LTAI-rotated-%d", s.nextIDCounter)
 		s.keys[newID] = "Active"
@@ -579,7 +1230,7 @@ func (s *ramServer) handle(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("UserAccessKeyId")
 		status := r.URL.Query().Get("Status")
 		if _, ok := s.keys[id]; !ok {
-			http.Error(w, "no such key", http.StatusBadRequest)
+			s.writeEntityNotExist(w)
 			return
 		}
 		s.keys[id] = status
@@ -589,6 +1240,10 @@ func (s *ramServer) handle(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"RequestId": "req"})
 	case "DeleteAccessKey":
 		id := r.URL.Query().Get("UserAccessKeyId")
+		if _, ok := s.keys[id]; !ok {
+			s.writeEntityNotExist(w)
+			return
+		}
 		delete(s.keys, id)
 		s.deleted = append(s.deleted, id)
 		_ = json.NewEncoder(w).Encode(map[string]any{"RequestId": "req"})
@@ -606,12 +1261,12 @@ func TestAlicloudDriver_Rotation_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	f := &AlicloudDriverFactory{}
-	d, err := f.Create(map[string]string{
+	d, err := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":        "LTAI-old",
 		"access_key_secret":    "old-secret",
 		"management_user_name": "warden-management",
 		"ram_endpoint":         srv.URL,
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 	require.NoError(t, err)
 	drv := d.(*AlicloudDriver)
 
@@ -630,7 +1285,7 @@ func TestAlicloudDriver_Rotation_HappyPath(t *testing.T) {
 
 	// Commit: swap to the new config
 	require.NoError(t, drv.CommitRotation(context.Background(), newConfig))
-	mgmtID, _ := drv.mgmtAccessKey()
+	_, mgmtID, _ := drv.ramCallConfig()
 	assert.Equal(t, "LTAI-rotated-1", mgmtID)
 
 	// Cleanup: two-step — UpdateAccessKey(Inactive) then DeleteAccessKey on the old key.
@@ -657,55 +1312,201 @@ func TestAlicloudDriver_Rotation_HappyPath(t *testing.T) {
 	assert.Less(t, updateIdx, deleteIdx, "UpdateAccessKey(Inactive) must precede DeleteAccessKey")
 }
 
-func TestAlicloudDriver_Rotation_OrphanCleanup(t *testing.T) {
-	// Simulate a previous failed rotation that left an orphan key behind.
+// A create may have succeeded before a 5xx or an InternalError came back, and a
+// retry would create a second key; only throttling, which created nothing, is
+// retried.
+func TestAlicloudDriver_Rotation_CreateRetriesOnlyThrottling(t *testing.T) {
+	envelope := func(code string) func(http.ResponseWriter, int) bool {
+		return func(w http.ResponseWriter, n int) bool {
+			if n > 1 {
+				return false
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"Code": code, "Message": code, "RequestId": "req"})
+			return true
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		answer  func(http.ResponseWriter, int) bool
+		calls   int
+		success bool
+		unknown bool // the error says a key may exist
+	}{
+		{"502 after a possible create", func(w http.ResponseWriter, _ int) bool {
+			w.WriteHeader(http.StatusBadGateway)
+			return true
+		}, 1, false, true},
+		{"InternalError envelope", envelope("InternalError"), 1, false, true},
+		{"ServiceUnavailable envelope", envelope("ServiceUnavailable"), 1, false, true},
+		{"a refusal creates nothing", envelope("NoPermission"), 1, false, false},
+		{"Throttling envelope", envelope("Throttling.User"), 2, true, false},
+		{"429", func(w http.ResponseWriter, n int) bool {
+			if n > 1 {
+				return false
+			}
+			w.WriteHeader(http.StatusTooManyRequests)
+			return true
+		}, 2, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ram := &ramServer{
+				user:         "warden-management",
+				keys:         map[string]string{"LTAI-old": "Active"},
+				createAnswer: tc.answer,
+			}
+			srv := httptest.NewServer(http.HandlerFunc(ram.handle))
+			defer srv.Close()
+
+			_, _, _, err := newRotationDriver(t, srv.URL, "LTAI-old").PrepareRotation(context.Background())
+			assert.Equal(t, tc.calls, ram.createCalls, "CreateAccessKey attempts")
+			if tc.success {
+				require.NoError(t, err)
+				assert.Len(t, ram.created, 1)
+				return
+			}
+			require.Error(t, err)
+			if tc.unknown {
+				assert.Contains(t, err.Error(), `may still have been created for user "warden-management"`)
+			} else {
+				assert.NotContains(t, err.Error(), "may still have been created")
+			}
+		})
+	}
+}
+
+// newRotationDriver builds a driver pointed at a ramServer, holding keyID as its
+// current management key.
+func newRotationDriver(t *testing.T, srvURL, keyID string) *AlicloudDriver {
+	t.Helper()
+	f := &AlicloudDriverFactory{}
+	d, err := f.Create(credential.NewConfig(map[string]string{
+		"access_key_id":        keyID,
+		"access_key_secret":    "secret-" + keyID,
+		"management_user_name": "warden-management",
+		"ram_endpoint":         srvURL,
+	}), createAlicloudTestLogger())
+	require.NoError(t, err)
+	return d.(*AlicloudDriver)
+}
+
+// An Inactive orphan is what Warden's own interrupted cleanup leaves behind
+// (CleanupRotation deactivates before it deletes), so it can be reclaimed
+// immediately.
+func TestAlicloudDriver_Rotation_SweepsInactiveOrphanAtCap(t *testing.T) {
 	ram := &ramServer{
 		user: "warden-management",
 		keys: map[string]string{
 			"LTAI-old":    "Active",
-			"LTAI-orphan": "Active", // at the RAM two-key limit
+			"LTAI-orphan": "Inactive", // at the RAM two-key limit
 		},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(ram.handle))
 	defer srv.Close()
 
-	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
-		"access_key_id":        "LTAI-old",
-		"access_key_secret":    "old-secret",
-		"management_user_name": "warden-management",
-		"ram_endpoint":         srv.URL,
-	}, createAlicloudTestLogger())
-	drv := d.(*AlicloudDriver)
-
-	newConfig, _, _, err := drv.PrepareRotation(context.Background())
+	newConfig, _, _, err := newRotationDriver(t, srv.URL, "LTAI-old").
+		PrepareRotation(context.Background())
 	require.NoError(t, err)
 
-	// Orphan should have been deleted before create
-	assert.Contains(t, ram.deleted, "LTAI-orphan")
-	// Current key must not be touched by orphan cleanup
-	assert.NotContains(t, ram.deleted, "LTAI-old")
-	// New key should have been created
+	assert.Equal(t, []string{"LTAI-orphan"}, ram.deleted)
+	assert.NotContains(t, ram.deleted, "LTAI-old", "the current key must never be swept")
 	assert.Equal(t, "LTAI-rotated-1", newConfig["access_key_id"])
+}
+
+// An Active non-current key is not one Warden can attribute to itself, so it is
+// deactivated rather than deleted and the cycle stops. The next cycle finds it
+// Inactive and reclaims the slot — rotation heals itself without ever destroying
+// a key outright.
+func TestAlicloudDriver_Rotation_DeactivatesActiveKeyThenSweepsNextCycle(t *testing.T) {
+	ram := &ramServer{
+		user: "warden-management",
+		keys: map[string]string{
+			"LTAI-old":        "Active",
+			"LTAI-breakglass": "Active", // at the cap, and not ours
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(ram.handle))
+	defer srv.Close()
+	drv := newRotationDriver(t, srv.URL, "LTAI-old")
+
+	// First cycle: deactivate, refuse to go further, create nothing.
+	_, _, _, err := drv.PrepareRotation(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deactivated")
+	assert.Equal(t, []string{"LTAI-breakglass"}, ram.deactivated)
+	assert.Empty(t, ram.deleted, "an active key must never be deleted outright")
+	assert.Empty(t, ram.created, "no key may be created while the user is at the cap")
+	assert.Equal(t, "Inactive", ram.keys["LTAI-breakglass"])
+
+	// Second cycle: the slot is now reclaimable and rotation proceeds.
+	newConfig, _, _, err := drv.PrepareRotation(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"LTAI-breakglass"}, ram.deleted)
+	assert.Equal(t, "LTAI-rotated-1", newConfig["access_key_id"])
+}
+
+// Below the cap there is a free slot already, so nothing is swept whatever its
+// status — the only reason to remove a key is to make room.
+func TestAlicloudDriver_Rotation_BelowCapSweepsNothing(t *testing.T) {
+	for _, status := range []string{"Active", "Inactive"} {
+		t.Run("sole key is "+status, func(t *testing.T) {
+			ram := &ramServer{
+				user: "warden-management",
+				keys: map[string]string{"LTAI-old": status},
+			}
+			srv := httptest.NewServer(http.HandlerFunc(ram.handle))
+			defer srv.Close()
+
+			_, _, _, err := newRotationDriver(t, srv.URL, "LTAI-old").
+				PrepareRotation(context.Background())
+			require.NoError(t, err)
+
+			assert.Empty(t, ram.deleted)
+			assert.Empty(t, ram.deactivated)
+			assert.Equal(t, []string{"LTAI-rotated-1"}, ram.created)
+		})
+	}
+}
+
+// If the configured key is not among the user's own, every key listed belongs to
+// someone else — most likely management_user_name is wrong. Touch none of them.
+func TestAlicloudDriver_Rotation_RefusesWhenCurrentKeyIsNotTheUsers(t *testing.T) {
+	ram := &ramServer{
+		user: "warden-management",
+		keys: map[string]string{
+			"LTAI-someone-else":   "Active",
+			"LTAI-someone-else-2": "Active",
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(ram.handle))
+	defer srv.Close()
+
+	_, _, _, err := newRotationDriver(t, srv.URL, "LTAI-not-on-this-user").
+		PrepareRotation(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "management_user_name")
+	assert.Empty(t, ram.deleted)
+	assert.Empty(t, ram.deactivated)
+	assert.Empty(t, ram.created)
 }
 
 func TestAlicloudDriver_Rotation_MissingConfig(t *testing.T) {
 	f := &AlicloudDriverFactory{}
 
 	t.Run("missing management_user_name", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"access_key_id":     "x",
 			"access_key_secret": "y",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 		_, _, _, err := d.(*AlicloudDriver).PrepareRotation(context.Background())
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "management_user_name")
 	})
 
 	t.Run("missing management keys", func(t *testing.T) {
-		d, _ := f.Create(map[string]string{
+		d, _ := f.Create(credential.NewConfig(map[string]string{
 			"management_user_name": "u",
-		}, createAlicloudTestLogger())
+		}), createAlicloudTestLogger())
 		_, _, _, err := d.(*AlicloudDriver).PrepareRotation(context.Background())
 		assert.Error(t, err)
 	})
@@ -714,17 +1515,163 @@ func TestAlicloudDriver_Rotation_MissingConfig(t *testing.T) {
 func TestAlicloudDriver_Rotation_CleanupRefusesCurrentKey(t *testing.T) {
 	// Guard: CleanupRotation must not delete the currently active key.
 	f := &AlicloudDriverFactory{}
-	d, _ := f.Create(map[string]string{
+	d, _ := f.Create(credential.NewConfig(map[string]string{
 		"access_key_id":        "LTAI-current",
 		"access_key_secret":    "secret",
 		"management_user_name": "warden-management",
-	}, createAlicloudTestLogger())
+	}), createAlicloudTestLogger())
 	err := d.(*AlicloudDriver).CleanupRotation(context.Background(), map[string]string{
 		"access_key_id":        "LTAI-current",
 		"management_user_name": "warden-management",
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "currently active")
+}
+
+// Cleanup is retried for days after a failure, and the next rotation's
+// slot-freeing sweep can delete the very key a pending cleanup is still chasing.
+// Cleaning up an already-deleted key must therefore succeed: otherwise those
+// retries fail daily until the manager logs an abandonment for a key that no
+// longer exists.
+func TestAlicloudDriver_Rotation_CleanupIsIdempotent(t *testing.T) {
+	ram := &ramServer{
+		user: "warden-management",
+		keys: map[string]string{"LTAI-new": "Active"}, // LTAI-old already gone
+	}
+	srv := httptest.NewServer(http.HandlerFunc(ram.handle))
+	defer srv.Close()
+
+	err := newRotationDriver(t, srv.URL, "LTAI-new").
+		CleanupRotation(context.Background(), map[string]string{
+			"access_key_id":        "LTAI-old",
+			"management_user_name": "warden-management",
+		})
+
+	require.NoError(t, err, "cleaning up an already-deleted key is the outcome we wanted")
+	assert.Empty(t, ram.deleted)
+	assert.Equal(t, "Active", ram.keys["LTAI-new"], "the live key must be untouched")
+}
+
+// Idempotency must not swallow a real failure: only the not-there family counts
+// as already-done.
+func TestAlicloudDriver_Rotation_CleanupStillFailsOnOtherErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Code":      "NoPermission",
+			"Message":   "ram:UpdateAccessKey is not granted.",
+			"RequestId": "req-denied",
+		})
+	}))
+	defer srv.Close()
+
+	err := newRotationDriver(t, srv.URL, "LTAI-new").
+		CleanupRotation(context.Background(), map[string]string{
+			"access_key_id":        "LTAI-old",
+			"management_user_name": "warden-management",
+		})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "NoPermission")
+}
+
+// The defect this PR fixes, at the level it actually bites. CleanupRotation
+// discards the response body, so when a non-envelope 4xx was classified as
+// success both steps reported done, no PendingCleanup was persisted, nothing
+// retried, and the old privileged key stayed live forever.
+func TestAlicloudDriver_Rotation_CleanupFailsOnInterceptedResponse(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("<html><body>blocked by policy</body></html>"))
+	}))
+	defer srv.Close()
+
+	f := &AlicloudDriverFactory{}
+	d, _ := f.Create(credential.NewConfig(map[string]string{
+		"access_key_id":        "LTAI-new",
+		"access_key_secret":    "new-secret",
+		"management_user_name": "warden-management",
+		"ram_endpoint":         srv.URL,
+	}), createAlicloudTestLogger())
+
+	err := d.(*AlicloudDriver).CleanupRotation(context.Background(), map[string]string{
+		"access_key_id":        "LTAI-old",
+		"management_user_name": "warden-management",
+	})
+
+	require.Error(t, err, "an intercepted RAM response must not read as a completed cleanup")
+	assert.Contains(t, err.Error(), "UpdateAccessKey")
+	assert.Contains(t, err.Error(), "blocked by policy")
+	assert.Equal(t, 1, hits, "cleanup must stop at the failed Inactive step, not go on to delete")
+}
+
+// CommitRotation replaces the whole Config map while mints are reading it, so
+// every accessor must hold configMu. Run under -race: before the endpoint
+// accessors took the read lock this reported a data race on credSource.Config.
+//
+// It also pins the pairing. stsCallConfig returns the endpoint and the key from
+// one snapshot, so a mint can never sign with one config's key against another
+// config's address — which is what reading them through separate accessors
+// allowed.
+func TestAlicloudDriver_ConfigAccessIsRaceFree(t *testing.T) {
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Credentials": map[string]any{
+				"AccessKeyId":     "STS.minted",
+				"AccessKeySecret": "minted-secret",
+				"SecurityToken":   "minted-token",
+				"Expiration":      "2099-01-01T00:00:00Z",
+			},
+		})
+	}))
+	defer sts.Close()
+
+	f := &AlicloudDriverFactory{}
+	d, _ := f.Create(credential.NewConfig(map[string]string{
+		"access_key_id":        "LTAI-gen-0",
+		"access_key_secret":    "secret-0",
+		"management_user_name": "warden-management",
+		"sts_endpoint":         sts.URL,
+	}), createAlicloudTestLogger())
+	drv := d.(*AlicloudDriver)
+
+	spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{
+		"mint_method": "assume_role",
+		"role_arn":    "acs:ram::123:role/concurrent",
+	})}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				_, _, _, _, err := drv.MintCredential(context.Background(), spec)
+				assert.NoError(t, err)
+				drv.SupportsRotation()
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for gen := 1; gen <= 40; gen++ {
+			require.NoError(t, drv.CommitRotation(context.Background(), map[string]string{
+				"access_key_id":        fmt.Sprintf("LTAI-gen-%d", gen),
+				"access_key_secret":    fmt.Sprintf("secret-%d", gen),
+				"management_user_name": "warden-management",
+				"sts_endpoint":         sts.URL,
+			}))
+		}
+	}()
+
+	wg.Wait()
 }
 
 // --- ACS3 signing helper ---
@@ -776,4 +1723,36 @@ func TestSignACS3_KnownAnswer(t *testing.T) {
 		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 		r.Header.Get("x-acs-content-sha256"),
 	)
+}
+
+// ACS3 sorts by parameter name only. A repeated name keeps the order it arrived
+// in, because that is the order the server signs; sorting the values would
+// compute a canonical string the server does not derive. This matches the
+// identical helper in provider/alicloud/signature.go.
+func TestACS3CanonicalQuery(t *testing.T) {
+	got, err := acs3CanonicalQuery("b=2&a=1&c=hello%20world")
+	require.NoError(t, err)
+	assert.Equal(t, "a=1&b=2&c=hello%20world", got)
+
+	got, err = acs3CanonicalQuery("k=b&k=a&j=1")
+	require.NoError(t, err)
+	assert.Equal(t, "j=1&k=b&k=a", got, "values for a repeated name keep request order")
+
+	got, err = acs3CanonicalQuery("")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// A query that will not parse must be reported, not silently rendered as empty:
+// signing an empty canonical query for a request that has one produces a
+// signature the server cannot reproduce, surfacing as a confusing remote
+// SignatureDoesNotMatch instead of the local defect.
+func TestACS3CanonicalQuery_MalformedQueryIsReported(t *testing.T) {
+	_, err := acs3CanonicalQuery("a=%zz")
+	require.Error(t, err)
+
+	r, _ := http.NewRequest("POST", "https://sts.aliyuncs.com/", nil)
+	r.URL.RawQuery = "a=%zz"
+	assert.Error(t, signACS3(r, "LTAItest", "secret", "", nil),
+		"signACS3 should surface a malformed query rather than sign an empty one")
 }

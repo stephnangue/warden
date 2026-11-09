@@ -3,13 +3,14 @@
 package rotation
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
 
-const vaultSourceBody = `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+const vaultSourceBody = `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 
 func cleanupSource(t *testing.T, port int, name string) {
 	h.APIRequest(t, "DELETE", "sys/cred/sources/"+name, port, "")
@@ -39,12 +40,18 @@ func TestVaultSourceRotationConfig(t *testing.T) {
 	cleanupSource(t, port, "e2e-rot-test")
 }
 
-// TestRotationPeriodBelowMinimum verifies rotation_period below 5m (300s) is rejected (T-034).
+// TestRotationPeriodBelowMinimum verifies a rotation_period below the configured
+// floor is rejected (T-034).
+//
+// The floor is min_cred_source_rotation_period in the node config, and this
+// cluster runs a deliberately low one so other suites can watch a rotation
+// complete rather than infer it. The period below is therefore small; keep it
+// under whatever that config says, or this stops testing a refusal.
 func TestRotationPeriodBelowMinimum(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	cleanupSource(t, port, "e2e-rot-invalid")
 
-	body := `{"type":"hvault","rotation_period":10,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+	body := `{"type":"hvault","rotation_period":5,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 	status, _ := h.APIRequest(t, "POST", "sys/cred/sources/e2e-rot-invalid", port, body)
 	if status != 400 {
 		t.Fatalf("expected 400 for rotation_period below minimum, got %d", status)
@@ -93,7 +100,7 @@ func TestUpdateRotationPeriod(t *testing.T) {
 	// Delete and recreate with updated rotation_period
 	cleanupSource(t, port, "e2e-rot-update")
 
-	updatedBody := `{"type":"hvault","rotation_period":600,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+	updatedBody := `{"type":"hvault","rotation_period":600,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 	recreateStatus, _ := h.APIRequest(t, "POST", "sys/cred/sources/e2e-rot-update", port, updatedBody)
 	if recreateStatus != 200 && recreateStatus != 201 && recreateStatus != 204 {
 		t.Fatalf("expected 200, 201, or 204 on recreate, got %d", recreateStatus)
@@ -125,7 +132,7 @@ func TestRotationMaxAttemptsFailedState(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	cleanupSource(t, port, "e2e-rot-fail")
 
-	body := `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:9999","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+	body := `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:9999","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 	status, _ := h.APIRequest(t, "POST", "sys/cred/sources/e2e-rot-fail", port, body)
 	if status != 400 {
 		t.Fatalf("expected 400 for unreachable vault, got %d", status)
@@ -171,7 +178,7 @@ func TestActivationDelayConfig(t *testing.T) {
 	port := h.GetLeaderPort(t)
 	cleanupSource(t, port, "e2e-rot-actdelay")
 
-	body := `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role","activation_delay":"10m"}}`
+	body := `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role","activation_delay":"10m"}}`
 	status, _ := h.APIRequest(t, "POST", "sys/cred/sources/e2e-rot-actdelay", port, body)
 	if status != 200 && status != 201 && status != 204 {
 		t.Fatalf("expected 200, 201, or 204 on create with activation_delay, got %d", status)
@@ -266,7 +273,7 @@ func TestRotationPeriodUpdateOnExistingSource(t *testing.T) {
 	// Delete and recreate with a longer rotation_period
 	cleanupSource(t, port, "e2e-rot-upd2")
 
-	updatedBody := `{"type":"hvault","rotation_period":900,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+	updatedBody := `{"type":"hvault","rotation_period":900,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 	recreateStatus, _ := h.APIRequest(t, "POST", "sys/cred/sources/e2e-rot-upd2", port, updatedBody)
 	if recreateStatus != 200 && recreateStatus != 201 && recreateStatus != 204 {
 		t.Fatalf("expected 200, 201, or 204 on recreate, got %d", recreateStatus)
@@ -291,6 +298,93 @@ func TestRotationPeriodUpdateOnExistingSource(t *testing.T) {
 	}
 
 	cleanupSource(t, port, "e2e-rot-upd2")
+}
+
+// TestRotationScheduleFollowsInPlaceUpdate drives the schedule, not just the
+// stored config: a rotation period changed or cleared through the update API must
+// reach the rotation manager.
+//
+// The two neighbouring rows named for updating a period both delete and recreate
+// the source, because updating one in place was not possible — the update handler
+// preserved whatever period the source was created with. Nothing therefore covered
+// the manager's side of an update, which is where the schedule actually lives.
+//
+// next_rotation is the observable: the source read reports it only while an entry
+// is registered, so its disappearance is the assertion that clearing the period
+// unregistered the entry rather than leaving one firing on a period the source no
+// longer carries.
+func TestRotationScheduleFollowsInPlaceUpdate(t *testing.T) {
+	port := h.GetLeaderPort(t)
+	const name = "e2e-rot-inplace"
+	cleanupSource(t, port, name)
+	t.Cleanup(func() { cleanupSource(t, port, name) })
+
+	// POST creates and refuses an existing name; PUT is the update verb. The two
+	// neighbouring rows never needed the distinction, having only ever created.
+	mustWrite := func(method, what, body string) {
+		t.Helper()
+		status, resp := h.APIRequest(t, method, "sys/cred/sources/"+name, port, body)
+		if status != 200 && status != 201 && status != 204 {
+			t.Fatalf("%s: status %d: %s", what, status, string(resp))
+		}
+	}
+
+	// Returns the stored period and the scheduled next rotation, the latter empty
+	// when the source is not enrolled.
+	read := func(t *testing.T) (float64, string) {
+		t.Helper()
+		status, body := h.APIRequest(t, "GET", "sys/cred/sources/"+name, port, "")
+		if status != 200 {
+			t.Fatalf("read: status %d: %s", status, string(body))
+		}
+		data := h.ParseJSON(t, body)
+		period, _ := h.JSONPath(data, "data.rotation_period").(float64)
+		next, _ := h.JSONPath(data, "data.next_rotation").(string)
+		return period, next
+	}
+
+	// A local source, not the hvault one the rest of this file uses: hvault is
+	// required to carry a rotation_period, so clearing one is refused before it
+	// could reach the manager. Enrolment does not depend on the type — any source
+	// with a period is registered — so this covers the same lifecycle.
+	const body = `{"type":"local","rotation_period":%d,"config":{"key":"value"}}`
+
+	mustWrite("POST", "create", fmt.Sprintf(body, 300))
+	period, firstNext := read(t)
+	if period != 300 {
+		t.Fatalf("rotation_period = %v, want 300 after create", period)
+	}
+	if firstNext == "" {
+		t.Fatal("no next_rotation after create: the source was never enrolled")
+	}
+
+	// Change it in place. The config is untouched, so this is the case that used to
+	// leave the manager on the period the source was created with.
+	mustWrite("PUT", "update period", fmt.Sprintf(body, 600))
+
+	period, secondNext := read(t)
+	if period != 600 {
+		t.Fatalf("rotation_period = %v, want 600 after update", period)
+	}
+	if secondNext == "" {
+		t.Fatal("no next_rotation after updating the period: the entry was dropped")
+	}
+	// Rescheduled from now against a longer period, so the next action must move
+	// later. Comparing the strings is enough: both are RFC3339 in UTC.
+	if secondNext <= firstNext {
+		t.Errorf("next_rotation did not move for a lengthened period: %s then %s", firstNext, secondNext)
+	}
+
+	// Clear it. The entry must go, not linger on the old schedule.
+	mustWrite("PUT", "clear period", fmt.Sprintf(body, 0))
+
+	period, clearedNext := read(t)
+	if period != 0 {
+		t.Fatalf("rotation_period = %v, want 0 after clearing", period)
+	}
+	if clearedNext != "" {
+		t.Errorf("next_rotation still reported after clearing the period (%s): the entry is still enrolled", clearedNext)
+	}
 }
 
 // TestDeleteSourceWithRotation verifies a rotating source can be deleted (T-045).

@@ -119,8 +119,12 @@ Credential type: cloudflare_keys (at least one mode required)
   - secret_access_key: R2 secret access key for Object Storage (R2 mode)
 
 Two credential source types are supported:
+- cloudflare (keyless): the source stores nothing; each spec sets secret_spec
+  naming a spec that yields api_token and/or access_key_id + secret_access_key
+  (e.g. a key_value spec over a secrets manager), fetched per request as the
+  caller. secret_field names the key holding the API token when it is not
+  stored as api_token.
 - local (static_keys): Static credentials stored on the spec
-- hvault (static_cloudflare): Keys fetched from a Vault/OpenBao KV v2 secret
 
 Configuration:
 - cloudflare_url: Cloudflare API base URL (default: https://api.cloudflare.com/client/v4)

@@ -203,7 +203,6 @@ func TestFieldData_TypeConversions(t *testing.T) {
 		{"bool true", TypeBool, true, true},
 		{"bool from string", TypeBool, "true", true},
 		{"float", TypeFloat, 3.14, 3.14},
-		{"lowercase", TypeLowerCaseString, "HELLO", "hello"},
 		{"duration", TypeDurationSecond, "30s", 30},
 		{"duration int", TypeDurationSecond, 60, 60},
 	}

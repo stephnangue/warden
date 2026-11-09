@@ -14,12 +14,16 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/middleware"
+	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -404,6 +408,70 @@ func TestApiListener_PlainHTTP_Serves(t *testing.T) {
 	assert.Equal(t, "plain-ok", string(body))
 }
 
+// TestApiListener_ForwardingHeadersTrust drives a real listener: forwarding
+// headers sent by a caller that is not a trusted proxy say nothing — not the
+// client certificate it would be logged in as, not the IP its token is bound
+// to, not the id it is audited under — while a trusted proxy's are honoured.
+// The certificate case is the regression test for the header check having
+// run after RealIP had already replaced the peer address with X-Real-IP.
+func TestApiListener_ForwardingHeadersTrust(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	certPEM, _ := generateTestCert(t, "victim")
+
+	type seen struct{ clientIP, requestID, certCN string }
+	serve := func(t *testing.T, trustedProxies []string) (string, *seen) {
+		got := &seen{}
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got.clientIP = listener.ClientIP(r)
+			got.requestID = middleware.GetReqID(r.Context())
+			if cert := listener.ForwardedClientCert(r.Context()); cert != nil {
+				got.certCN = cert.Subject.CommonName
+			}
+		})
+		addr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+		ln, err := NewApiListener(ApiListenerConfig{
+			Logger: log, Address: addr, TLSDisable: true, TrustedProxies: trustedProxies,
+		}, handler)
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		go ln.Start(ctx)
+		time.Sleep(200 * time.Millisecond)
+		t.Cleanup(func() { ln.Stop() })
+		return addr, got
+	}
+	send := func(t *testing.T, addr string) {
+		req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s/v1/sys/health", addr), nil)
+		require.NoError(t, err)
+		req.Header.Set("X-Real-IP", "10.255.255.1")
+		req.Header.Set("X-Forwarded-For", "203.0.113.7")
+		req.Header.Set("X-SSL-Client-Cert", url.QueryEscape(certPEM))
+		req.Header.Set("X-Request-Id", "chosen-by-caller")
+		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+		require.NoError(t, err)
+		resp.Body.Close()
+	}
+
+	t.Run("caller that is not a trusted proxy", func(t *testing.T) {
+		// X-Real-IP names an address inside trusted_proxies: the check must
+		// be made against the connection, not against what the caller says.
+		addr, got := serve(t, []string{"10.255.255.0/24"})
+		send(t, addr)
+		assert.Empty(t, got.certCN, "a forged certificate header must not log the caller in")
+		assert.Equal(t, "127.0.0.1", got.clientIP)
+		assert.NotEmpty(t, got.requestID)
+		assert.NotEqual(t, "chosen-by-caller", got.requestID)
+	})
+
+	t.Run("trusted proxy", func(t *testing.T) {
+		addr, got := serve(t, []string{"127.0.0.1/32"})
+		send(t, addr)
+		assert.Equal(t, "victim", got.certCN)
+		assert.Equal(t, "203.0.113.7", got.clientIP)
+		assert.Equal(t, "chosen-by-caller", got.requestID)
+	})
+}
+
 // =============================================================================
 // Injected TLSConfig Tests
 // =============================================================================
@@ -557,4 +625,139 @@ func getFreePort(t *testing.T) int {
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 	return port
+}
+
+// =============================================================================
+// HTTP deadline configuration
+// =============================================================================
+
+func TestNewApiListener_TimeoutDefaults(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+
+	ln, err := NewApiListener(ApiListenerConfig{
+		Logger:     log,
+		Address:    "127.0.0.1:0",
+		TLSDisable: true,
+	}, http.DefaultServeMux)
+
+	require.NoError(t, err)
+	assert.Equal(t, DefaultReadTimeout, ln.server.ReadTimeout)
+	assert.Equal(t, DefaultWriteTimeout, ln.server.WriteTimeout)
+	assert.Equal(t, DefaultIdleTimeout, ln.server.IdleTimeout)
+}
+
+func TestNewApiListener_TimeoutOverrides(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+
+	ln, err := NewApiListener(ApiListenerConfig{
+		Logger:       log,
+		Address:      "127.0.0.1:0",
+		TLSDisable:   true,
+		ReadTimeout:  11 * time.Second,
+		WriteTimeout: 22 * time.Second,
+		IdleTimeout:  33 * time.Second,
+	}, http.DefaultServeMux)
+
+	require.NoError(t, err)
+	assert.Equal(t, 11*time.Second, ln.server.ReadTimeout)
+	assert.Equal(t, 22*time.Second, ln.server.WriteTimeout)
+	assert.Equal(t, 33*time.Second, ln.server.IdleTimeout)
+}
+
+// TestApiListener_WriteTimeoutSeversSlowHandler pins the bug this knob was
+// added for: the write deadline is armed when request headers are read and is
+// absolute from that moment, so it kills a handler that runs longer than it —
+// the client gets a bare transport error, never a status. Reproducing this
+// against the shipped 10s default took ~13 seconds of wall clock, which is
+// most of why it survived; with the timeout configurable it is sub-second.
+func TestApiListener_WriteTimeoutSeversSlowHandler(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(600 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "too late")
+	})
+
+	addr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	ln, err := NewApiListener(ApiListenerConfig{
+		Logger:       log,
+		Address:      addr,
+		TLSDisable:   true,
+		WriteTimeout: 200 * time.Millisecond,
+	}, handler)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ln.Start(ctx)
+	defer ln.Stop()
+	waitForListener(t, addr)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://%s/slow", addr))
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("expected the write deadline to sever the response, got %d", resp.StatusCode)
+	}
+	assert.NotErrorIs(t, err, context.DeadlineExceeded, "the client timed out, not the server deadline")
+}
+
+// TestApiListener_ClearedDeadlineSurvivesSlowHandler is the other half: a
+// handler that sheds the deadlines the way streaming and proxied paths do
+// completes normally past the same configured write timeout.
+func TestApiListener_ClearedDeadlineSurvivesSlowHandler(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reported through the response rather than require.NoError: this
+		// runs on the server's goroutine, where a failed require would
+		// abort the wrong stack.
+		if err := logical.ClearStreamDeadlines(w); err != nil {
+			http.Error(w, "clear failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		time.Sleep(600 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "in time")
+	})
+
+	addr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	ln, err := NewApiListener(ApiListenerConfig{
+		Logger:       log,
+		Address:      addr,
+		TLSDisable:   true,
+		WriteTimeout: 200 * time.Millisecond,
+	}, handler)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ln.Start(ctx)
+	defer ln.Stop()
+	waitForListener(t, addr)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://%s/slow", addr))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, "in time", string(body))
+}
+
+// waitForListener blocks until addr accepts a TCP connection, so a test does
+// not race the listener goroutine's bind.
+func waitForListener(t *testing.T, addr string) {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("listener at %s never came up", addr)
 }

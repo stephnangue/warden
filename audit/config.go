@@ -3,6 +3,8 @@ package audit
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -32,6 +34,10 @@ type FileDeviceConfig struct {
 	OmitFields []string `json:"omit_fields,omitempty"`
 
 	SkipTest bool `json:"skip_test" default:"false"`
+
+	// unknownFieldPaths describes the operator's salt and omit paths that name
+	// no field, left out of SaltFields and OmitFields.
+	unknownFieldPaths []string
 }
 
 // Configuration validation limits
@@ -46,8 +52,14 @@ const (
 	MaxMaxBackups  = 1000
 )
 
+// defaultSaltFields are salted on every device, whatever its salt_fields
+// says: an operator's list adds to them and can never remove one. They cover
+// every secret Warden issues (access keys, tokens, passwords).
+var defaultSaltFields = []string{"response.credential.data"}
+
 func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
-	// Set defaults first
+	// Set defaults first. The salt and omit lists are not pre-filled: an
+	// operator's list would replace them.
 	config := FileDeviceConfig{
 		Path:        "warden_audit.log",
 		RotateSize:  104857600, // 100MB (more reasonable default)
@@ -58,16 +70,7 @@ func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
 		BufferSize:  100,
 		FlushPeriod: 5 * time.Second,
 		Mode:        "0600",
-		SaltFields: []string{
-			"response.credential.data", // HMAC salt all credential values (access_key, secret_key, password, etc.)
-		},
-		OmitFields: []string{
-			"request.data",
-			"request.headers",
-			"response.data",
-			"response.headers",
-		},
-		SkipTest: false,
+		SkipTest:    false,
 	}
 
 	jsonData, err := json.Marshal(data)
@@ -80,12 +83,69 @@ func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal to FileDeviceConfig: %w", err)
 	}
 
+	// The operator's paths are checked before the floor is merged in, so a
+	// path it would absorb (a misspelt key under response.credential.data) is
+	// still reported. Nothing is omitted by default: request and response
+	// headers and bodies are not fields of an entry.
+	salt, unknownSalt := knownFieldPaths(config.SaltFields, true, "salt_fields")
+	omit, unknownOmit := knownFieldPaths(config.OmitFields, false, "omit_fields")
+	config.unknownFieldPaths = append(unknownSalt, unknownOmit...)
+	config.SaltFields = fieldPaths(defaultSaltFields, salt, true)
+	config.OmitFields = fieldPaths(nil, omit, false)
+
 	// Validate configuration
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
 
 	return &config, nil
+}
+
+// fieldPaths returns a new list holding floor, then the operator's paths in
+// their order, each once and empty ones dropped. It never appends to floor,
+// which is shared by every device being created.
+//
+// With collapseCovered, a path below another listed path is dropped too: for
+// salt paths, response.credential.data.secret_key under the floor's
+// response.credential.data would otherwise be hashed twice, and its hash
+// would no longer match the value's.
+func fieldPaths(floor, operator []string, collapseCovered bool) []string {
+	// Sized from the operator's list alone: no arithmetic on a length that
+	// comes from configuration; the floor is a path or two.
+	out := make([]string, 0, len(operator))
+	for _, list := range [2][]string{floor, operator} {
+		for _, p := range list {
+			if p != "" && !slices.Contains(out, p) {
+				out = append(out, p)
+			}
+		}
+	}
+	if !collapseCovered {
+		return out
+	}
+	kept := make([]string, 0, len(out))
+	for _, p := range out {
+		if !slices.ContainsFunc(out, func(q string) bool { return strings.HasPrefix(p, q+".") }) {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
+// knownFieldPaths keeps the paths that name a field an entry records, and
+// describes each one left out. A path that matched nothing used to be ignored
+// without a word, leaving a value its operator believed hashed or dropped in
+// clear.
+func knownFieldPaths(paths []string, salt bool, option string) (known, unknown []string) {
+	known = make([]string, 0, len(paths))
+	for _, p := range paths {
+		if err := checkFieldPath(salt, p); err != nil {
+			unknown = append(unknown, fmt.Sprintf("%s %q: %v", option, p, err))
+			continue
+		}
+		known = append(known, p)
+	}
+	return known, unknown
 }
 
 // Validate checks the configuration for invalid values

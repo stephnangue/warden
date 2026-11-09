@@ -12,22 +12,19 @@ upstream: OpenAI REST API (api.openai.com)
 ## What it does
 
 Warden proxies OpenAI REST API requests. The agent calls a Warden
-URL; Warden authenticates the caller (JWT/cert), looks up the OpenAI
-API key bound to the chosen role, injects `Authorization: Bearer <key>`
-plus optional `OpenAI-Organization` and `OpenAI-Project` headers,
-and forwards. The agent **never holds an API key**.
+URL; Warden authenticates the caller (JWT/cert), resolves the chosen
+role's OpenAI credential — a short-lived token minted by federation,
+or a key fetched from a secret store or held by Warden — injects
+`Authorization: Bearer <token>` plus optional `OpenAI-Organization` and
+`OpenAI-Project` headers, and forwards. The agent **never holds an API
+key**.
 
 ## Configure the CLI/SDK
 
-`<gateway-url>` comes from the role you chose: the `list_roles` discovery tool
-returns each role with a `description`, and for a non-MCP provider the operator
-embeds the role's **gateway URL** in it — a relative path
-`/v1/<namespace>/<mount>/role/<role>/gateway/`, with the namespace, mount, and role already baked in. Prepend `$WARDEN_ADDR` (the address you already
-used to discover your roles).
-
-The `role/<role>/` segment in `<gateway-url>` is the role this call runs under.
-To act under a *different* role, use the `<gateway-url>` of that role from
-`list_roles` — each role provides its own role-bearing URL in its description.
+`<gateway-url>` is the `url` of the role you chose, as returned by the
+`list_roles` discovery tool. Prepend `$WARDEN_ADDR` (the address you already
+used to discover your roles). Each role has its own `url`: to act under a
+*different* role, use that role's `url`.
 
 Present your identity on every call: `Authorization: Bearer <jwt>`, or an mTLS
 client certificate. A `401` means the JWT expired (typical TTL 5–60 min) —
@@ -64,7 +61,7 @@ const client = new OpenAI({
 ## Examples
 
 (Examples use a concrete `<gateway-url>` of `/v1/openai/role/llm-app/gateway/`;
-substitute the one from your role's `list_roles` description.)
+substitute your role's `url`.)
 
 Chat completion via `curl`:
 ```bash
@@ -101,8 +98,18 @@ curl -H "Authorization: Bearer <jwt>" \
 - **Default 120s timeout.** Long generations close to the limit may
   fail at the proxy level; chunk requests with smaller `max_tokens`.
 - **`OpenAI-Organization` / `OpenAI-Project` headers** are injected
-  only when the operator configured them on the credential. You can
-  also override per-request.
+  only when the operator configured them on the credential. Any you
+  send are stripped, so you cannot override them per request.
+- **Keyless roles send neither header.** A role backed by workload
+  identity federation injects a short-lived token bound to one service
+  account, whose organization and project are fixed by that binding.
 - **Streaming responses (SSE)** pass through unchanged — usable from
   the OpenAI SDK's `stream=true` mode.
+- **Warden's own failures use OpenAI's error shape.** A request Warden
+  refuses itself (authentication, policy, credential) comes back as
+  `{"error": {...}}` with a `code` starting `warden_` and a message
+  starting `Warden: `. `warden_credential_refused` and
+  `warden_permission_denied` will not succeed on retry: the role or
+  its credential needs changing. Errors without the prefix are
+  OpenAI's own.
 

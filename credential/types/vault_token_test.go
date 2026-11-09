@@ -104,7 +104,7 @@ func TestVaultTokenCredType_ValidateConfig_VaultSource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, tt.sourceType)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), tt.sourceType)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {

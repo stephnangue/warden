@@ -202,4 +202,7 @@ type MountOutput struct {
 	// (e.g. "gateway", "role/<role>/gateway", "access/<grant>") to reach
 	// the upstream. Has the namespace and mount path already baked in.
 	MountURL string `json:"mount_url" mapstructure:"mount_url"`
+	// Warnings are non-fatal notices about the mount a read returned, such
+	// as storage it no longer uses. Filled by reads of one mount only.
+	Warnings []string `json:"warnings,omitempty" mapstructure:"-"`
 }

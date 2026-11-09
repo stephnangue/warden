@@ -44,7 +44,7 @@ type AdjunctCarrier interface {
 // prevent, one layer up.
 //
 // Returns nothing for a type that does not carry adjuncts.
-func UncarriedAdjunctFields(credType interface{}, specConfig, sourceConfig map[string]string, sourceType string) (fields []string, carriable bool) {
+func UncarriedAdjunctFields(credType interface{}, specConfig, sourceConfig Config, sourceType string) (fields []string, carriable bool) {
 	carrier, ok := credType.(AdjunctCarrier)
 	if !ok {
 		return nil, true
@@ -56,17 +56,43 @@ func UncarriedAdjunctFields(credType interface{}, specConfig, sourceConfig map[s
 
 	declared := make(map[string]bool)
 	if carriable {
-		for _, name := range ParseAdjunctNames(sourceConfig["credential_fields"]) {
+		for _, name := range ParseAdjunctNames(sourceConfig.Get("credential_fields")) {
 			declared[name] = true
 		}
 	}
 
+	mintParams := mintParameterFields[sourceType]
+
 	for _, field := range carrier.KnownAdjunctFields() {
-		if specConfig[field] != "" && !declared[field] {
-			fields = append(fields, field)
+		if specConfig.Get(field) == "" || declared[field] {
+			continue
 		}
+		// The same name means different things to different sources, so whether it
+		// describes the credential is not a property of the name alone. Skipping
+		// here rather than trimming the type's list keeps the helpful error for
+		// every source that does treat it as a credential field.
+		if _, isMintParam := mintParams[field]; isMintParam {
+			continue
+		}
+		fields = append(fields, field)
 	}
 	return fields, carriable
+}
+
+// mintParameterFields names, per source type, the spec-config keys that a
+// credential type lists as adjuncts but that this source spends on the mint
+// instead — so they are neither carried nor missing, and rejecting a spec for
+// setting one would refuse a documented parameter.
+//
+// It is deliberately keyed on the source type rather than added to
+// reservedSpecConfigKeys, because these names are not globally reserved. An
+// apikey spec's key_name really is a credential field: an operator names it in
+// credential_fields and a provider reads it. An elastic spec's key_name is the
+// name the cluster will give the key it creates, and never reaches the
+// credential at all. Reserving it globally would delete the check for the source
+// that needs it.
+var mintParameterFields = map[string]map[string]struct{}{
+	SourceTypeElastic: {"key_name": {}},
 }
 
 // reservedSpecConfigKeys are spec-config keys that address the mint itself —
@@ -96,18 +122,34 @@ var reservedSpecConfigKeys = map[string]struct{}{
 	ConfigAssertionUserClaims:     {},
 	ConfigAssertionAlgorithm:      {},
 	ConfigAssertionResource:       {},
+	ConfigAssertionProfile:        {},
+	ConfigAssertionTTL:            {},
 
 	// Store-backed mint locators (string literals in the drivers).
 	"mint_method":     {},
 	"kv2_mount":       {},
 	"secret_path":     {},
 	"secret_id":       {},
+	"secret_name":     {},
+	"vault_name":      {},
 	"role_arn":        {},
 	"version_stage":   {},
 	"version_id":      {},
+	"secret_version":  {},
 	"credential_type": {},
 	"json_key_map":    {},
 }
+
+// Deliberately absent: `project` and `target_service_account`, the other two keys a
+// gcp secret_read spec addresses its secret with. Both are ordinary words an operator
+// may already have named a credential field — an apikey source listing `project` in
+// credential_fields is entirely plausible — and reserving a name here stops that field
+// being carried, silently, on mounts that have nothing to do with GCP. Same reasoning
+// as mintParameterFields above: a name that is a locator for one source and a
+// credential field for another cannot be settled globally. `secret_name` is listed
+// because it is Key Vault's locator too, and is nobody's credential field; so is
+// `vault_name`. The Key Vault read's `client_id` and `tenant_id` are left out on the
+// same grounds as `project`: both are plausible credential field names elsewhere.
 
 // reservedRawDataPrefix marks keys that belong to the mint pipeline rather than
 // to the credential — RawAdjunctFieldsKey and the rotated-refresh-token keys. No

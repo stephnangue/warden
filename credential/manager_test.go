@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/internal/cachesize"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
@@ -38,14 +41,54 @@ type mockConfigStore struct {
 	sources   map[string]*CredSource
 	persisted []*CredSpec // specs captured by PersistRotatedSpec, in order
 	persistFn func(spec *CredSpec) error
+
+	// getSourceHook, when set, runs after GetSource has read a source and before
+	// it returns. See GetSource.
+	getSourceHook func()
+
+	// sourceReads counts GetSource calls per name, so a test can assert an issuance
+	// resolves each source exactly once.
+	sourceReads map[string]int
+
+	// revisions is what SpecRevision answers, per spec (name → *atomic.Uint64);
+	// bumpRevision advances one. Lock-free like the real store's, so a benchmark
+	// of the hit path does not measure this mock's mutex.
+	revisions sync.Map
+}
+
+func (m *mockConfigStore) SpecRevision(_ context.Context, name string) uint64 {
+	if rev, ok := m.revisions.Load(name); ok {
+		return rev.(*atomic.Uint64).Load()
+	}
+	return 0
+}
+
+func (m *mockConfigStore) bumpRevision(name string) {
+	rev, _ := m.revisions.LoadOrStore(name, new(atomic.Uint64))
+	rev.(*atomic.Uint64).Add(1)
 }
 
 func newMockConfigStore() *mockConfigStore {
 	return &mockConfigStore{
-		cache:   make(map[string]*CredSpec),
-		storage: make(map[string]*CredSpec),
-		sources: make(map[string]*CredSource),
+		cache:       make(map[string]*CredSpec),
+		storage:     make(map[string]*CredSpec),
+		sources:     make(map[string]*CredSource),
+		sourceReads: make(map[string]int),
 	}
+}
+
+// sourceReadCount reports how many times a source name was resolved.
+func (m *mockConfigStore) sourceReadCount(name string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sourceReads[name]
+}
+
+// resetSourceReads zeroes the counters so a test can measure one issuance.
+func (m *mockConfigStore) resetSourceReads() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sourceReads = make(map[string]int)
 }
 
 func (m *mockConfigStore) GetSpec(ctx context.Context, name string) (*CredSpec, error) {
@@ -71,10 +114,22 @@ func (m *mockConfigStore) ReloadSpec(ctx context.Context, name string) (*CredSpe
 
 func (m *mockConfigStore) GetSource(ctx context.Context, name string) (*CredSource, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	source, ok := m.sources[name]
+	hook := m.getSourceHook
+	if m.sourceReads == nil {
+		m.sourceReads = make(map[string]int)
+	}
+	m.sourceReads[name]++
+	m.mu.Unlock()
+
 	if !ok {
 		return nil, errors.New("source not found")
+	}
+	// Runs after the source has been read and before it reaches the caller, so a
+	// test can land a config update in exactly the window a caller sits in between
+	// reading a source and installing the driver built from it.
+	if hook != nil {
+		hook()
 	}
 	return source, nil
 }
@@ -113,11 +168,12 @@ func (m *mockConfigStore) rotateOnOtherNode(name, refreshToken string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cur := m.storage[name]
-	updated := &CredSpec{Name: cur.Name, Type: cur.Type, Source: cur.Source, Config: map[string]string{}}
-	for k, v := range cur.Config {
-		updated.Config[k] = v
+	updated := &CredSpec{
+		Name:   cur.Name,
+		Type:   cur.Type,
+		Source: cur.Source,
+		Config: cur.Config.With("refresh_token", refreshToken),
 	}
-	updated.Config["refresh_token"] = refreshToken
 	m.storage[name] = updated // cache intentionally left stale
 }
 
@@ -185,19 +241,20 @@ func (f *mockSourceDriverFactory) Type() string {
 	return f.driverType
 }
 
-func (f *mockSourceDriverFactory) Create(config map[string]string, logger *logger.GatedLogger) (SourceDriver, error) {
+func (f *mockSourceDriverFactory) Create(config Config, logger *logger.GatedLogger) (SourceDriver, error) {
 	return f.driver, nil
 }
 
-func (f *mockSourceDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *mockSourceDriverFactory) ValidateConfig(config Config) error {
 	return nil
 }
 
 func (f *mockSourceDriverFactory) SensitiveConfigFields() []string {
 	return []string{"password", "secret"}
 }
+func (f *mockSourceDriverFactory) StoredSecrets(Config) []string { return nil }
 
-func (f *mockSourceDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *mockSourceDriverFactory) InferCredentialType(_ Config) (string, error) {
 	return "", fmt.Errorf("mock driver cannot infer type")
 }
 
@@ -224,7 +281,7 @@ func (t *mockCredentialType) ConfigSchema() []*FieldValidator {
 	return nil // No schema required for mock
 }
 
-func (t *mockCredentialType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *mockCredentialType) ValidateConfig(config Config, sourceType string) error {
 	return nil
 }
 
@@ -262,6 +319,7 @@ func (t *mockCredentialType) RequiresSpecRotation() bool {
 }
 
 func (t *mockCredentialType) SensitiveConfigFields() []string { return nil }
+func (t *mockCredentialType) StoredSecrets(Config) []string   { return nil }
 
 func (t *mockCredentialType) FieldSchemas() map[string]*CredentialFieldSchema {
 	return map[string]*CredentialFieldSchema{
@@ -274,7 +332,7 @@ func (t *mockCredentialType) FieldSchemas() map[string]*CredentialFieldSchema {
 // Test Helpers
 // ============================================================================
 
-func createTestManager(t *testing.T) (*Manager, *mockConfigStore, *mockSourceDriverFactory) {
+func createTestManager(t testing.TB, opts ...ManagerOption) (*Manager, *mockConfigStore, *mockSourceDriverFactory) {
 	t.Helper()
 
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
@@ -295,7 +353,7 @@ func createTestManager(t *testing.T) (*Manager, *mockConfigStore, *mockSourceDri
 	require.NoError(t, err)
 
 	// Create manager (credentials are cache-only, no storage needed)
-	manager, err := NewManager(typeRegistry, driverRegistry, configStore, log)
+	manager, err := NewManager(typeRegistry, driverRegistry, configStore, log, opts...)
 	require.NoError(t, err)
 
 	return manager, configStore, factory
@@ -329,6 +387,112 @@ func TestNewManager(t *testing.T) {
 	manager.Stop()
 }
 
+// The secret cache holds secretCacheMaxEntries chained secrets. Charged 1 plus
+// ristretto's per-entry record against a cost limit of 10,000, it used to
+// hold 175, and every further consumer refetched its secret upstream.
+func TestNewManager_SecretCacheHoldsItsEntries(t *testing.T) {
+	manager, _, _ := createTestManager(t)
+	defer manager.Stop()
+
+	assert.Equal(t, int64(secretCacheMaxEntries), manager.secretCache.MaxCost())
+	for i := range secretCacheMaxEntries {
+		manager.secretCache.SetWithTTL(strconv.Itoa(i), chainedSecret{}, 1, time.Hour)
+	}
+	manager.secretCache.Wait()
+	kept := 0
+	for i := range secretCacheMaxEntries {
+		if _, ok := manager.secretCache.Get(strconv.Itoa(i)); ok {
+			kept++
+		}
+	}
+	assert.Equal(t, secretCacheMaxEntries, kept)
+}
+
+// The credential cache is bounded in bytes: 64 MiB unless the manager is
+// given another budget.
+func TestNewManager_CredentialCacheBudget(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	budget := func(opts ...ManagerOption) int64 {
+		m, err := NewManager(NewTypeRegistry(), NewDriverRegistry(nil), newMockConfigStore(), log, opts...)
+		require.NoError(t, err)
+		defer m.Stop()
+		return m.cache.MaxCost()
+	}
+	assert.Equal(t, int64(64<<20), budget())
+	assert.Equal(t, int64(8<<20), budget(WithCacheMaxBytes(8<<20)))
+	assert.Equal(t, int64(64<<20), budget(WithCacheMaxBytes(0)), "0 keeps the default")
+}
+
+// A credential is charged its approximate size: the struct, its strings and
+// its data and metadata maps.
+func TestCredentialCost(t *testing.T) {
+	assert.Equal(t, credentialStructBytes, credentialCost(&Credential{}))
+	assert.InDelta(t, 192, credentialStructBytes, 32, "measured, not assumed")
+
+	cred := &Credential{
+		CredentialID: "id",        // 2
+		Type:         "aws_keys",  // 8
+		SourceName:   "aws-prod",  // 8
+		SpecName:     "s3-reader", // 9
+		Data:         map[string]string{"access_key_id": "AKIA0000", "session_token": "token"},
+		Metadata:     map[string]string{"region": "eu-west-1"},
+	}
+	want := credentialStructBytes + 2 + 8 + 8 + 9 +
+		cachesize.StringMapBytes(cred.Data) + cachesize.StringMapBytes(cred.Metadata)
+	assert.Equal(t, want, credentialCost(cred))
+
+	bigger := *cred
+	bigger.Data = map[string]string{"access_key_id": "AKIA0000", "session_token": strings.Repeat("t", 1000)}
+	assert.Equal(t, credentialCost(cred)+995, credentialCost(&bigger), "a longer session token costs its bytes")
+
+	// It runs once per mint, inside the coalesced issue: it allocates nothing.
+	assert.Zero(t, testing.AllocsPerRun(1000, func() { _ = credentialCost(cred) }))
+}
+
+// A full cache may reject or evict the credentials it is handed. Every mint
+// still returns its credential and registers its lease, and revoking one the
+// cache no longer holds still reaches the source.
+func TestManager_IssueCredential_FullCache(t *testing.T) {
+	// 8 KiB: room for about three of these 2 KB credentials.
+	manager, configStore, factory := createTestManager(t, WithCacheMaxBytes(8<<10))
+	defer manager.Stop()
+	registrar := &recordingRegistrar{}
+	manager.SetExpirationRegistrar(registrar)
+	factory.driver.mintFunc = func(context.Context, *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"username": "test-user", "password": strings.Repeat("p", 2000)},
+			nil, time.Hour, "lease-123", nil
+	}
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
+
+	ctx := createNamespaceContext()
+	const n = 40
+	var first *Credential
+	for i := range n {
+		cred, err := issueForTest(manager, ctx, "token-"+strconv.Itoa(i), "test-spec", time.Hour, nil)
+		require.NoError(t, err)
+		require.NotNil(t, cred)
+		assert.Len(t, cred.Data["password"], 2000)
+		if first == nil {
+			first = cred
+		}
+	}
+	assert.Equal(t, int32(n), factory.driver.mintCalls.Load(), "each caller minted its own")
+	assert.Len(t, registrar.registered(), n, "every lease is registered, cached or not")
+
+	// The cache did fill: asked again, the callers it did not keep mint anew.
+	for i := range n {
+		_, err := issueForTest(manager, ctx, "token-"+strconv.Itoa(i), "test-spec", time.Hour, nil)
+		require.NoError(t, err)
+	}
+	assert.Greater(t, factory.driver.mintCalls.Load(), int32(n+n/2), "most no longer cached")
+	assert.Len(t, registrar.registered(), int(factory.driver.mintCalls.Load()), "and each new mint is registered")
+
+	err := manager.RevokeByExpiration(ctx, first.CredentialID, "test-namespace-id:token-0", first.LeaseID, "test-source", true)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), factory.driver.revokeCalls.Load(), "the source revokes the lease")
+}
+
 func TestManager_IssueCredential_Success(t *testing.T) {
 	manager, configStore, _ := createTestManager(t)
 	defer manager.Stop()
@@ -337,13 +501,13 @@ func TestManager_IssueCredential_Success(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -370,13 +534,13 @@ func TestManager_IssueCredential_CacheHit(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -410,8 +574,8 @@ func TestManager_IssueCredential_ExpiredNotServed(t *testing.T) {
 		return map[string]interface{}{"username": "u", "password": "p"}, nil, 40 * time.Millisecond, "", nil
 	}
 
-	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: map[string]string{}})
-	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: map[string]string{}})
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
 
 	ctx := createNamespaceContext()
 	tokenID := "token-expiry"
@@ -431,6 +595,64 @@ func TestManager_IssueCredential_ExpiredNotServed(t *testing.T) {
 	_, err = issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "expired credential must be re-minted, not served stale")
+}
+
+// A write to the spec or its source advances the spec's revision, and the next
+// request misses the credential minted under the old config. An unchanged
+// revision keeps serving the cached one.
+func TestManager_IssueCredential_SpecRevisionKeysTheCache(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
+
+	ctx := createNamespaceContext()
+	_, err := issueForTest(manager, ctx, "token-rev", "test-spec", time.Hour, nil)
+	require.NoError(t, err)
+	_, err = issueForTest(manager, ctx, "token-rev", "test-spec", time.Hour, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), factory.driver.mintCalls.Load(), "an unchanged revision is a hit")
+
+	configStore.bumpRevision("test-spec")
+	_, err = issueForTest(manager, ctx, "token-rev", "test-spec", time.Hour, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "a new revision mints again")
+
+	_, err = issueForTest(manager, ctx, "token-rev", "test-spec", time.Hour, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "and is cached in turn")
+}
+
+// A static credential keeps LeaseTTL 0, so it never reads as expired; the spec's
+// max_ttl still bounds how long its cache entry serves it.
+func TestManager_IssueCredential_StaticServedNoLongerThanMaxTTL(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+
+	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		return map[string]interface{}{"username": "u", "password": "p"}, nil, 0, "", nil
+	}
+
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", MaxTTL: 40 * time.Millisecond, Config: NewConfig(map[string]string{})})
+
+	ctx := createNamespaceContext()
+	tokenID := "token-static"
+	tokenTTL := time.Hour
+
+	cred, err := issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), cred.LeaseTTL, "a static credential stays static")
+
+	_, err = issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), factory.driver.mintCalls.Load(), "should serve from cache within max_ttl")
+
+	time.Sleep(80 * time.Millisecond)
+	_, err = issueForTest(manager, ctx, tokenID, "test-spec", tokenTTL, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "a static credential must be read again after max_ttl")
 }
 
 func TestManager_IssueCredential_SpecNotFound(t *testing.T) {
@@ -453,7 +675,7 @@ func TestManager_IssueCredential_SourceNotFound(t *testing.T) {
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "nonexistent-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -471,13 +693,13 @@ func TestManager_IssueCredential_NoNamespace(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	// Context without namespace
@@ -495,13 +717,13 @@ func TestManager_RevokeByExpiration_Success(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -557,7 +779,7 @@ func TestManager_RevokeByExpiration_CreatesDriverIfNeeded(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -577,7 +799,7 @@ func TestManager_RevokeByExpiration_RevokeFails(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	// Configure driver to fail revocation
@@ -593,6 +815,134 @@ func TestManager_RevokeByExpiration_RevokeFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "revoke failed")
 }
 
+// A lease the source reports gone is revoked as far as anyone can tell: no error,
+// so the expiration manager does not retry it into the irrevocable tier.
+func TestManager_RevokeByExpiration_LeaseGoneCountsAsRevoked(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	factory.driver.revokeFunc = func(ctx context.Context, leaseID string) error {
+		return fmt.Errorf("token accessor %s: %w", leaseID, ErrLeaseGone)
+	}
+
+	err := manager.RevokeByExpiration(createNamespaceContext(), "cred-uuid-123", "ns:token", "lease-123", "test-source", true)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), factory.driver.revokeCalls.Load())
+}
+
+// recordingRegistrar is an ExpirationRegistrar that records the TTL of each
+// registration and fails every one when err is set.
+type recordingRegistrar struct {
+	mu   sync.Mutex
+	ttls []time.Duration
+	err  error
+}
+
+func (r *recordingRegistrar) RegisterCredential(_ context.Context, _, _ string, ttl time.Duration, _, _, _, _ string, _ bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return r.err
+	}
+	r.ttls = append(r.ttls, ttl)
+	return nil
+}
+
+func (r *recordingRegistrar) registered() []time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Duration(nil), r.ttls...)
+}
+
+// A lease the expiration manager does not hold would outlive every bound Warden
+// sets on it. A failed registration revokes the lease and fails the mint, and
+// nothing is cached.
+func TestManager_IssueCredential_FailedRegistrationRevokesAndFails(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+	manager.SetExpirationRegistrar(&recordingRegistrar{err: errors.New("storage sealed")})
+
+	// The orphan revoke keeps the namespace and is not cut short by the request.
+	var revokeNamespaced, revokeLive atomic.Bool
+	factory.driver.revokeFunc = func(ctx context.Context, leaseID string) error {
+		_, err := namespace.FromContext(ctx)
+		revokeNamespaced.Store(err == nil)
+		revokeLive.Store(ctx.Err() == nil)
+		return nil
+	}
+
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
+
+	ctx, cancel := context.WithCancel(createNamespaceContext())
+	defer cancel()
+	factory.driver.mintFunc = func(_ context.Context, _ *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+		cancel() // the request gives up while the mint is in flight
+		return map[string]interface{}{"username": "u", "password": "p"}, nil, time.Hour, "lease-123", nil
+	}
+	_, err := issueForTest(manager, ctx, "token-unregistered", "test-spec", time.Hour, nil)
+	require.Error(t, err)
+
+	// The request stopped waiting, so its error may be its own cancellation; the
+	// flight still ran to its end, so give it a moment to finish revoking.
+	require.Eventually(t, func() bool { return factory.driver.revokeCalls.Load() == 1 }, 5*time.Second, 5*time.Millisecond,
+		"the minted lease must be revoked")
+	assert.True(t, revokeNamespaced.Load(), "the revoke must carry the namespace")
+	assert.True(t, revokeLive.Load(), "the revoke must not run on a cancelled context")
+	factory.driver.lastRevokeMu.Lock()
+	assert.Equal(t, "lease-123", factory.driver.lastRevokeID)
+	factory.driver.lastRevokeMu.Unlock()
+
+	// Nothing was cached: once registration works, the same caller mints afresh.
+	// Until the failed flight has returned, a new request joins it and shares its
+	// error, so retry until one runs on its own.
+	manager.SetExpirationRegistrar(&recordingRegistrar{})
+	require.Eventually(t, func() bool {
+		_, err := issueForTest(manager, createNamespaceContext(), "token-unregistered", "test-spec", time.Hour, nil)
+		return err == nil
+	}, 5*time.Second, 5*time.Millisecond)
+	assert.Equal(t, int32(2), factory.driver.mintCalls.Load(), "a credential nothing tracks must not be served")
+}
+
+// A revocable credential is registered for the span it is served: the shortest
+// positive of its lease, the session and max_ttl. With none of them there is no
+// end to schedule, and it is not registered.
+func TestManager_IssueCredential_RegistrationTTL(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		lease   time.Duration
+		session time.Duration
+		maxTTL  time.Duration
+		want    []time.Duration
+	}{
+		{"lease shorter than the session", 30 * time.Minute, time.Hour, 0, []time.Duration{30 * time.Minute}},
+		{"session shorter than the lease", 2 * time.Hour, time.Hour, 0, []time.Duration{time.Hour}},
+		{"static credential takes the session", 0, time.Hour, 0, []time.Duration{time.Hour}},
+		{"lease with no session", 30 * time.Minute, 0, 0, []time.Duration{30 * time.Minute}},
+		{"static credential bounded by max_ttl", 0, time.Hour, 20 * time.Minute, []time.Duration{20 * time.Minute}},
+		{"nothing to schedule", 0, 0, 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, configStore, factory := createTestManager(t)
+			defer manager.Stop()
+			registrar := &recordingRegistrar{}
+			manager.SetExpirationRegistrar(registrar)
+
+			factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+				return map[string]interface{}{"username": "u", "password": "p"}, nil, tc.lease, "lease-123", nil
+			}
+			configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+			configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", MaxTTL: tc.maxTTL, Config: NewConfig(map[string]string{})})
+
+			_, err := issueForTest(manager, createNamespaceContext(), "token-ttl", "test-spec", tc.session, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, registrar.registered())
+			assert.Equal(t, int32(0), factory.driver.revokeCalls.Load())
+		})
+	}
+}
+
 func TestManager_IssueCredential_Concurrent(t *testing.T) {
 	manager, configStore, factory := createTestManager(t)
 	defer manager.Stop()
@@ -600,13 +950,13 @@ func TestManager_IssueCredential_Concurrent(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -663,13 +1013,13 @@ func TestManager_IssueCredential_Timeout(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	// Configure driver to block longer than timeout
@@ -699,13 +1049,13 @@ func TestManager_IssueCredential_ErrorNotCached(t *testing.T) {
 	configStore.AddSource(&CredSource{
 		Name:   "test-source",
 		Type:   SourceTypeLocal,
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 	configStore.AddSpec(&CredSpec{
 		Name:   "test-spec",
 		Type:   TypeVaultToken,
 		Source: "test-source",
-		Config: map[string]string{},
+		Config: NewConfig(map[string]string{}),
 	})
 
 	ctx := createNamespaceContext()
@@ -773,7 +1123,7 @@ func TestManager_SpecExists(t *testing.T) {
 			Name:   "existing-spec",
 			Type:   TypeVaultToken,
 			Source: "test-source",
-			Config: map[string]string{},
+			Config: NewConfig(map[string]string{}),
 		})
 
 		exists := manager.SpecExists(ctx, "existing-spec")
@@ -806,10 +1156,10 @@ func TestManager_SpecExists(t *testing.T) {
 // ============================================================================
 
 func addRefreshSpecAndSource(configStore *mockConfigStore, refreshToken string) {
-	configStore.AddSource(&CredSource{Name: "src", Type: SourceTypeLocal, Config: map[string]string{}})
-	configStore.AddSpec(&CredSpec{Name: "gh", Type: TypeVaultToken, Source: "src", Config: map[string]string{
+	configStore.AddSource(&CredSource{Name: "src", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "gh", Type: TypeVaultToken, Source: "src", Config: NewConfig(map[string]string{
 		"auth_method": "authorization_code", "refresh_token": refreshToken,
-	}})
+	})})
 }
 
 func TestManager_WriteBack_StripsReservedKeyAndPersists(t *testing.T) {
@@ -837,17 +1187,17 @@ func TestManager_WriteBack_StripsReservedKeyAndPersists(t *testing.T) {
 
 	// The rotated token and its refreshed expiry are persisted into a fresh spec copy.
 	require.Len(t, configStore.persisted, 1)
-	assert.Equal(t, "rt-new", configStore.persisted[0].Config["refresh_token"])
-	assert.Equal(t, "2030-01-01T00:00:00Z", configStore.persisted[0].Config["refresh_token_expires_at"])
+	assert.Equal(t, "rt-new", configStore.persisted[0].Config.Get("refresh_token"))
+	assert.Equal(t, "2030-01-01T00:00:00Z", configStore.persisted[0].Config.Get("refresh_token_expires_at"))
 }
 
 func TestManager_WriteBack_RotatingWithoutExpiry_KeepsPriorExpiry(t *testing.T) {
 	manager, configStore, factory := createTestManager(t)
 	defer manager.Stop()
-	configStore.AddSource(&CredSource{Name: "src", Type: SourceTypeLocal, Config: map[string]string{}})
-	configStore.AddSpec(&CredSpec{Name: "gh", Type: TypeVaultToken, Source: "src", Config: map[string]string{
+	configStore.AddSource(&CredSource{Name: "src", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "gh", Type: TypeVaultToken, Source: "src", Config: NewConfig(map[string]string{
 		"auth_method": "authorization_code", "refresh_token": "rt-old", "refresh_token_expires_at": "2027-01-01T00:00:00Z",
-	}})
+	})})
 
 	// Rotates the token but surfaces no new expiry.
 	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
@@ -858,9 +1208,9 @@ func TestManager_WriteBack_RotatingWithoutExpiry_KeepsPriorExpiry(t *testing.T) 
 	require.NoError(t, err)
 
 	require.Len(t, configStore.persisted, 1)
-	assert.Equal(t, "rt-new", configStore.persisted[0].Config["refresh_token"])
+	assert.Equal(t, "rt-new", configStore.persisted[0].Config.Get("refresh_token"))
 	// The prior expiry is left untouched rather than dropped or overwritten.
-	assert.Equal(t, "2027-01-01T00:00:00Z", configStore.persisted[0].Config["refresh_token_expires_at"])
+	assert.Equal(t, "2027-01-01T00:00:00Z", configStore.persisted[0].Config.Get("refresh_token_expires_at"))
 }
 
 func TestManager_WriteBack_NonRotating_NoPersist(t *testing.T) {
@@ -891,11 +1241,11 @@ func TestManager_InvalidGrant_RetriesOnceWithReloadedSpec(t *testing.T) {
 	factory.driver.mintFunc = func(ctx context.Context, spec *CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 		n := atomic.AddInt32(&attempts, 1)
 		if n == 1 {
-			assert.Equal(t, "rt-stale", spec.Config["refresh_token"])
+			assert.Equal(t, "rt-stale", spec.Config.Get("refresh_token"))
 			configStore.rotateOnOtherNode("gh", "rt-fresh") // storage advances; cache stays stale
 			return nil, nil, 0, "", ErrRefreshTokenRejected
 		}
-		assert.Equal(t, "rt-fresh", spec.Config["refresh_token"], "retry must reload from storage, bypassing the stale cache")
+		assert.Equal(t, "rt-fresh", spec.Config.Get("refresh_token"), "retry must reload from storage, bypassing the stale cache")
 		return map[string]interface{}{"api_key": "at-ok"}, nil, time.Hour, "", nil
 	}
 
@@ -989,6 +1339,47 @@ func TestManager_LockSpec_ContextCancel(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
+func TestManager_LockSource(t *testing.T) {
+	manager, _, _ := createTestManager(t)
+	defer manager.Stop()
+
+	unlock, err := manager.LockSource(context.Background(), "ns-uuid", "aws")
+	require.NoError(t, err)
+
+	// A second lock for the same source blocks until unlock.
+	locked := make(chan struct{})
+	go func() {
+		u2, e := manager.LockSource(context.Background(), "ns-uuid", "aws")
+		if e == nil {
+			close(locked)
+			u2()
+		}
+	}()
+	select {
+	case <-locked:
+		t.Fatal("second LockSource acquired while the first was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// A spec lock of the same name is a different lock.
+	u3, err := manager.LockSpec(context.Background(), "ns-uuid", "aws")
+	require.NoError(t, err)
+	u3()
+
+	// A waiter whose context ends returns an error rather than blocking.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = manager.LockSource(ctx, "ns-uuid", "aws")
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	unlock()
+	select {
+	case <-locked:
+	case <-time.After(time.Second):
+		t.Fatal("second LockSource did not acquire after unlock")
+	}
+}
+
 // ============================================================================
 // Token-exchange input tests
 // ============================================================================
@@ -1000,12 +1391,13 @@ type exchangeDriverFactory struct {
 }
 
 func (f *exchangeDriverFactory) Type() string { return "exchange_src" }
-func (f *exchangeDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (SourceDriver, error) {
+func (f *exchangeDriverFactory) Create(config Config, log *logger.GatedLogger) (SourceDriver, error) {
 	return f.driver, nil
 }
-func (f *exchangeDriverFactory) ValidateConfig(config map[string]string) error { return nil }
-func (f *exchangeDriverFactory) SensitiveConfigFields() []string               { return nil }
-func (f *exchangeDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *exchangeDriverFactory) ValidateConfig(config Config) error { return nil }
+func (f *exchangeDriverFactory) SensitiveConfigFields() []string    { return nil }
+func (f *exchangeDriverFactory) StoredSecrets(Config) []string      { return nil }
+func (f *exchangeDriverFactory) InferCredentialType(_ Config) (string, error) {
 	return "", fmt.Errorf("mock exchange driver cannot infer type")
 }
 
@@ -1023,12 +1415,12 @@ func createExchangeTestManager(t *testing.T) (*Manager, *exchangeDriverFactory) 
 	require.NoError(t, driverRegistry.RegisterFactory(factory))
 
 	configStore := newMockConfigStore()
-	configStore.AddSource(&CredSource{Name: "ex-source", Type: "exchange_src", Config: map[string]string{}})
+	configStore.AddSource(&CredSource{Name: "ex-source", Type: "exchange_src", Config: NewConfig(map[string]string{})})
 	configStore.AddSpec(&CredSpec{
 		Name:   "ex-spec",
 		Type:   TypeVaultToken,
 		Source: "ex-source",
-		Config: map[string]string{ConfigSubjectTokenSource: SourceUserIdentity},
+		Config: NewConfig(map[string]string{ConfigSubjectTokenSource: SourceUserIdentity}),
 	})
 
 	manager, err := NewManager(typeRegistry, driverRegistry, configStore, log)
@@ -1076,8 +1468,8 @@ func TestManager_IssueCredential_ExchangeInputs_NonExchangeDriver(t *testing.T) 
 	manager, configStore, factory := createTestManager(t)
 	defer manager.Stop()
 
-	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: map[string]string{}})
-	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: map[string]string{}})
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
 
 	ctx := createNamespaceContext()
 	_, err := issueForTest(manager, ctx, "tok", "test-spec", time.Hour, exchangeInputsFor("s"))
@@ -1235,6 +1627,143 @@ func TestManager_IssueCredential_LazySubject_SingleflightCoalesces(t *testing.T)
 	assert.Equal(t, int32(1), factory.driver.exchangeCount.Load(), "N concurrent misses must exchange once")
 }
 
+// blockingSubjectInputs resolves its subject only once release is closed, and fails
+// as a real resolver would if the context it was given is done by then.
+func blockingSubjectInputs(entered chan<- struct{}, release <-chan struct{}, mints *atomic.Int32) *ExchangeInputs {
+	return &ExchangeInputs{
+		SubjectTokenType:     TokenTypeJWT,
+		SubjectCacheIdentity: "id-shared",
+		ResolveSubjectToken: func(ctx context.Context) (string, error) {
+			mints.Add(1)
+			entered <- struct{}{}
+			<-release
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return "assertion-shared", nil
+		},
+	}
+}
+
+// within waits for ch, failing the test instead of hanging when a caller that
+// should have returned is still stuck.
+func within[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		var zero T
+		return zero
+	}
+}
+
+// releaser closes release once, from the test or its cleanup, so a goroutine left
+// blocked by a failing assertion is freed rather than leaked into later tests.
+func releaser(t *testing.T) (chan struct{}, func()) {
+	release := make(chan struct{})
+	var once sync.Once
+	closeRelease := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease)
+	return release, closeRelease
+}
+
+// Coalesced callers share one mint, so the caller that happened to start it must
+// not decide the outcome for the rest: its client going away fails only itself.
+// The mint completes, the waiting caller gets the credential, and it is cached.
+func TestManager_IssueCredential_LeaderCancellationDoesNotFailFollowers(t *testing.T) {
+	manager, _ := createExchangeTestManager(t)
+	defer manager.Stop()
+	ctx := createNamespaceContext()
+
+	var mints atomic.Int32
+	entered := make(chan struct{}, 2)
+	release, closeRelease := releaser(t)
+
+	leaderCtx, cancelLeader := context.WithCancel(ctx)
+	leaderErr := make(chan error, 1)
+	go func() {
+		_, err := issueForTest(manager, leaderCtx, "tok", "ex-spec", time.Hour, blockingSubjectInputs(entered, release, &mints))
+		leaderErr <- err
+	}()
+	within(t, entered, "the leader to start the mint")
+
+	follower := make(chan *Credential, 1)
+	go func() {
+		cred, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, blockingSubjectInputs(entered, release, &mints))
+		assert.NoError(t, err)
+		follower <- cred
+	}()
+	time.Sleep(50 * time.Millisecond) // let the follower join the flight
+
+	cancelLeader()
+	assert.ErrorIs(t, within(t, leaderErr, "the cancelled leader to return"), context.Canceled,
+		"the leader stops waiting when its own context ends")
+	closeRelease()
+
+	cred := within(t, follower, "the follower's credential")
+	require.NotNil(t, cred, "the follower must get the credential the shared mint produced")
+	assert.EqualValues(t, 1, mints.Load(), "one mint served both")
+
+	again, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, blockingSubjectInputs(entered, release, &mints))
+	require.NoError(t, err)
+	assert.Equal(t, cred.CredentialID, again.CredentialID, "the shared mint's credential was cached")
+}
+
+// A mint runs detached from every request waiting on it, so it is the manager
+// stopping — at seal or step-down — that has to end it.
+func TestManager_IssueCredential_StopEndsAMintInFlight(t *testing.T) {
+	manager, _ := createExchangeTestManager(t)
+	ctx := createNamespaceContext()
+
+	var mints atomic.Int32
+	entered := make(chan struct{}, 1)
+	release, closeRelease := releaser(t)
+	result := make(chan error, 1)
+	go func() {
+		_, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, blockingSubjectInputs(entered, release, &mints))
+		result <- err
+	}()
+	within(t, entered, "the mint to start")
+
+	manager.Stop()
+	closeRelease()
+	assert.ErrorIs(t, within(t, result, "the stopped mint to end"), context.Canceled)
+}
+
+// A caller that gives up stops waiting at once, and the mint it joined carries on
+// for the caller that started it.
+func TestManager_IssueCredential_FollowerCancellationReturnsPromptly(t *testing.T) {
+	manager, _ := createExchangeTestManager(t)
+	defer manager.Stop()
+	ctx := createNamespaceContext()
+
+	var mints atomic.Int32
+	entered := make(chan struct{}, 2)
+	release, closeRelease := releaser(t)
+
+	leader := make(chan error, 1)
+	go func() {
+		_, err := issueForTest(manager, ctx, "tok", "ex-spec", time.Hour, blockingSubjectInputs(entered, release, &mints))
+		leader <- err
+	}()
+	within(t, entered, "the leader to start the mint")
+
+	followerCtx, cancelFollower := context.WithCancel(ctx)
+	cancelFollower()
+	followerErr := make(chan error, 1)
+	go func() {
+		_, err := issueForTest(manager, followerCtx, "tok", "ex-spec", time.Hour, blockingSubjectInputs(entered, release, &mints))
+		followerErr <- err
+	}()
+	assert.ErrorIs(t, within(t, followerErr, "the cancelled follower to return"), context.Canceled)
+
+	closeRelease()
+	require.NoError(t, within(t, leader, "the leader's mint"))
+	assert.EqualValues(t, 1, mints.Load())
+}
+
 // A failure inside the lazy mint must surface as an error, must NOT invoke the
 // driver, and must NOT be cached — the next request retries cleanly.
 func TestManager_IssueCredential_LazySubject_ResolveErrorNotCached(t *testing.T) {
@@ -1276,8 +1805,8 @@ func TestManager_IssueCredential_PerUserCacheDimension(t *testing.T) {
 	manager, configStore, factory := createTestManager(t)
 	defer manager.Stop()
 
-	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: map[string]string{}})
-	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: map[string]string{}})
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
 
 	ctx := createNamespaceContext()
 	const agentTok = "shared-agent-token"
@@ -1302,4 +1831,327 @@ func TestManager_IssueCredential_PerUserCacheDimension(t *testing.T) {
 	assert.NotEqual(t, credA1.CredentialID, credNoUser.CredentialID, "a no-user caller must not reuse a user-scoped entry")
 
 	assert.Equal(t, int32(3), factory.driver.mintCalls.Load(), "three distinct cache keys → three mints")
+}
+
+// TestChainedSecretCacheKey_AgentClaimsDimension pins the invariant the templating
+// feature depends on: anything that can select which secret is fetched has to key
+// the entry that answers for it.
+//
+// The fingerprint alone does not cover the agent's claims. Where the subject is the
+// agent's raw token it hashes the token bytes, but the claims are derived from those
+// bytes AND the auth role's mapping — so one token under two roles yields two claim
+// sets behind one fingerprint. Without the ":a:" dimension those two share an entry
+// and one is served the other's secret.
+func TestChainedSecretCacheKey_AgentClaimsDimension(t *testing.T) {
+	caller := Caller{TokenID: "agent-token"}
+	base := func(agentClaims map[string]string) *ExchangeInputs {
+		return &ExchangeInputs{
+			SubjectToken:     "the.same.jwt",
+			SubjectTokenType: TokenTypeJWT,
+			AgentClaims:      agentClaims,
+		}
+	}
+
+	t.Run("same token, different resolved claims, different keys", func(t *testing.T) {
+		viaRoleA := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "build-runner"}))
+		viaRoleB := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "deploy-bot"}))
+
+		require.NotEmpty(t, viaRoleA)
+		assert.NotEqual(t, viaRoleA, viaRoleB,
+			"one token presented under two roles resolves two principals; sharing a key would serve one the other's secret")
+	})
+
+	t.Run("same claims give the same key", func(t *testing.T) {
+		first := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "a", "team": "platform"}))
+		second := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"team": "platform", "sub": "a"}))
+		assert.Equal(t, first, second, "map iteration order must not change the key")
+	})
+
+	t.Run("a metadata claim changing moves the key", func(t *testing.T) {
+		before := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "a", "team": "platform"}))
+		after := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "a", "team": "infra"}))
+		assert.NotEqual(t, before, after)
+	})
+
+	t.Run("no agent claims keeps the key byte-identical", func(t *testing.T) {
+		withNone := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(nil))
+		legacy := "chainsecret:ns:ref:s:" + testRefFP + ":" + base(nil).Fingerprint()
+		assert.Equal(t, legacy, withNone,
+			"a spec not carrying agent claims must not have its cache key perturbed")
+	})
+}
+
+// The agent and user dimensions are independent: a per-user chained fetch under two
+// agents must still separate by agent.
+func TestChainedSecretCacheKey_AgentAndUserDimensionsCompose(t *testing.T) {
+	caller := Caller{TokenID: "agent-token", User: &UserContext{TokenID: "user-token"}}
+	key := func(sub string) string {
+		return chainedSecretCacheKey("ns", "ref", testRefFP, caller, &ExchangeInputs{
+			SubjectToken:     "the.same.jwt",
+			SubjectTokenType: TokenTypeJWT,
+			AgentClaims:      map[string]string{"sub": sub},
+			UserClaims:       map[string]string{"sub": "alice"},
+		})
+	}
+	a, b := key("build-runner"), key("deploy-bot")
+	require.Contains(t, a, ":u:user-token")
+	assert.NotEqual(t, a, b)
+}
+
+// TestChainedSecretCacheKey_UserClaimsDimension is the user-side mirror of
+// TestChainedSecretCacheKey_AgentClaimsDimension, and it closes the same hole.
+//
+// The user token id looks like it already covers this, but it hashes the presented
+// credential, the mount and the role *name* — not the role's claim mapping. An operator
+// editing that mapping leaves every token id untouched while changing what the claims
+// resolve to, so a templated path renders somewhere new under a key that never moved,
+// and the previous location's secret keeps being served for the rest of the cache TTL.
+// Unlike the consumer credential cache, the chained-secret TTL is not bounded by either
+// principal's token lifetime, so nothing else closes the window.
+func TestChainedSecretCacheKey_UserClaimsDimension(t *testing.T) {
+	caller := Caller{TokenID: "agent-token", User: &UserContext{TokenID: "user-token"}}
+	base := func(userClaims map[string]string) *ExchangeInputs {
+		return &ExchangeInputs{
+			SubjectToken:     "the.same.jwt",
+			SubjectTokenType: TokenTypeJWT,
+			UserClaims:       userClaims,
+		}
+	}
+
+	t.Run("same user token, remapped claims, different keys", func(t *testing.T) {
+		beforeEdit := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "alice", "team": "platform"}))
+		afterEdit := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "alice", "team": "infra"}))
+
+		require.NotEmpty(t, beforeEdit)
+		assert.NotEqual(t, beforeEdit, afterEdit,
+			"the same user token resolving a different team must not read the old team's secret")
+	})
+
+	t.Run("same claims give the same key", func(t *testing.T) {
+		first := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "alice", "team": "platform"}))
+		second := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"team": "platform", "sub": "alice"}))
+		assert.Equal(t, first, second, "map iteration order must not change the key")
+	})
+
+	t.Run("two users still separate", func(t *testing.T) {
+		other := Caller{TokenID: "agent-token", User: &UserContext{TokenID: "other-user-token"}}
+		mine := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(map[string]string{"sub": "alice"}))
+		theirs := chainedSecretCacheKey("ns", "ref", testRefFP, other, base(map[string]string{"sub": "alice"}))
+		assert.NotEqual(t, mine, theirs,
+			"the token id still binds the entry to a principal even when claims coincide")
+	})
+
+	t.Run("no user claims keeps the key byte-identical", func(t *testing.T) {
+		withNone := chainedSecretCacheKey("ns", "ref", testRefFP, caller, base(nil))
+		legacy := "chainsecret:ns:ref:s:" + testRefFP + ":" + base(nil).Fingerprint()
+		assert.Equal(t, legacy, withNone,
+			"a source-global fetch must not have its cache key perturbed")
+	})
+
+	t.Run("a user-scoped fetch with no user principal refuses to cache", func(t *testing.T) {
+		agentOnly := Caller{TokenID: "agent-token"}
+		assert.Empty(t, chainedSecretCacheKey("ns", "ref", testRefFP, agentOnly, base(map[string]string{"sub": "alice"})),
+			"sharing a user-scoped fetch namespace-wide is never the safe failure mode")
+	})
+}
+
+// testRefFP stands in for chainedSpecFingerprint in the subtests above, which pin the
+// agent and user dimensions and must be unaffected by the referenced-spec one.
+const testRefFP = "0000000000000000000000000000000000000000000000000000000000000000"
+
+// TestChainedSpecFingerprint pins what the referenced spec contributes to the key. The
+// spec NAME is a label an operator can repoint; the fingerprint is what the name
+// resolved to when the entry was filled, so an edit cannot inherit the old answer.
+func TestChainedSpecFingerprint(t *testing.T) {
+	spec := func(cfg map[string]string) *CredSpec {
+		return &CredSpec{Name: "ref", Type: TypeVaultToken, Source: "vault-main", Config: NewConfig(cfg)}
+	}
+	src := func(cfg map[string]string) *CredSource {
+		return &CredSource{Name: "vault-main", Type: "vault", Config: NewConfig(cfg)}
+	}
+	basePath := map[string]string{"kv2_mount": "kv", "secret_path": "teams/{{user.team}}/db"}
+	baseSrc := map[string]string{"vault_address": "https://vault.internal:8200", "approle_mount": "approle"}
+
+	t.Run("editing the templated path moves the fingerprint", func(t *testing.T) {
+		before := chainedSpecFingerprint(spec(basePath), src(baseSrc))
+		after := chainedSpecFingerprint(spec(map[string]string{
+			"kv2_mount": "kv", "secret_path": "prod-teams/{{user.team}}/db",
+		}), src(baseSrc))
+		assert.NotEqual(t, before, after,
+			"the fetch moved to a different location, so the entry filled from the old one must not answer for it")
+	})
+
+	t.Run("repointing the spec at another source moves it", func(t *testing.T) {
+		other := &CredSpec{Name: "ref", Type: TypeVaultToken, Source: "vault-other", Config: NewConfig(basePath)}
+		assert.NotEqual(t, chainedSpecFingerprint(spec(basePath), src(baseSrc)),
+			chainedSpecFingerprint(other, src(baseSrc)))
+	})
+
+	t.Run("moving the source itself moves it", func(t *testing.T) {
+		moved := src(map[string]string{"vault_address": "https://vault-dr.internal:8200", "approle_mount": "approle"})
+		assert.NotEqual(t, chainedSpecFingerprint(spec(basePath), src(baseSrc)),
+			chainedSpecFingerprint(spec(basePath), moved))
+	})
+
+	t.Run("an arbitrary spec config key moves it", func(t *testing.T) {
+		// The named cases below are the ones we thought of. This is the general rule:
+		// anything an operator can put in a referenced spec's config can change what the
+		// fetch returns, so a regression to an allow-list of known fields fails here.
+		assert.NotEqual(t,
+			chainedSpecFingerprint(spec(map[string]string{"anything": "1"}), src(baseSrc)),
+			chainedSpecFingerprint(spec(map[string]string{"anything": "2"}), src(baseSrc)))
+	})
+
+	t.Run("an arbitrary source config key moves it", func(t *testing.T) {
+		assert.NotEqual(t,
+			chainedSpecFingerprint(spec(basePath), src(map[string]string{"anything": "1"})),
+			chainedSpecFingerprint(spec(basePath), src(map[string]string{"anything": "2"})))
+	})
+
+	t.Run("the spec type moves it", func(t *testing.T) {
+		other := &CredSpec{Name: "ref", Type: TypeAPIKey, Source: "vault-main", Config: NewConfig(basePath)}
+		assert.NotEqual(t, chainedSpecFingerprint(spec(basePath), src(baseSrc)),
+			chainedSpecFingerprint(other, src(baseSrc)))
+	})
+
+	// Several names are proof material on the source side and the fetch coordinate — or
+	// the vended credential itself — on the spec side. Excluding them from the spec's
+	// config would serve an operator the value they had just replaced.
+	t.Run("spec-side names that are content are not excluded", func(t *testing.T) {
+		for _, field := range []string{
+			"secret_id", // names which AWS Secrets Manager secret to fetch
+			"api_key",   // IS the credential a static_apikey spec vends
+			"token",     // IS the credential a github PAT-mode spec vends
+			"anything",  // the local driver returns spec.Config wholesale
+		} {
+			assert.NotEqual(t,
+				chainedSpecFingerprint(spec(map[string]string{field: "old"}), src(baseSrc)),
+				chainedSpecFingerprint(spec(map[string]string{field: "new"}), src(baseSrc)),
+				"replacing a spec's %q must not keep serving the old value", field)
+		}
+	})
+
+	t.Run("rotating the source credential does not move it", func(t *testing.T) {
+		before := chainedSpecFingerprint(spec(basePath), src(map[string]string{
+			"vault_address": "https://vault.internal:8200", "approle_mount": "approle",
+			"secret_id": "sid-1", "secret_id_accessor": "acc-1",
+		}))
+		after := chainedSpecFingerprint(spec(basePath), src(map[string]string{
+			"vault_address": "https://vault.internal:8200", "approle_mount": "approle",
+			"secret_id": "sid-2", "secret_id_accessor": "acc-2",
+		}))
+		assert.Equal(t, before, after,
+			"a rotation replaces an authenticator, not the identity it authenticates — dumping the cache buys nothing")
+	})
+
+	t.Run("the per-mint refresh fields do not move it", func(t *testing.T) {
+		// Not merely churn: both are rewritten on every use by the refresh-token
+		// write-back, so a moving key would mean no entry is ever read once and caching
+		// is silently dead. They must be excluded together — one alone still moves it.
+		withRT := func(rt, exp string) *CredSpec {
+			return spec(map[string]string{
+				"oauth2_mount": "oauth2", "credential_name": "cred",
+				"refresh_token": rt, "refresh_token_expires_at": exp,
+			})
+		}
+		assert.Equal(t,
+			chainedSpecFingerprint(withRT("rt-1", "2030-01-01T00:00:00Z"), src(baseSrc)),
+			chainedSpecFingerprint(withRT("rt-2", "2031-01-01T00:00:00Z"), src(baseSrc)))
+	})
+
+	t.Run("a pinned digest, so nondeterminism cannot creep in", func(t *testing.T) {
+		// The iteration-order subtest compares two calls in one process, which a
+		// per-process-seeded hash would satisfy. This pins the bytes themselves.
+		fp := chainedSpecFingerprint(
+			&CredSpec{Name: "ref", Type: "vault_token", Source: "vault-main",
+				Config: NewConfig(map[string]string{"kv2_mount": "kv", "secret_path": "teams/a/db"})},
+			&CredSource{Name: "vault-main", Type: "vault",
+				Config: NewConfig(map[string]string{"vault_address": "https://vault.internal:8200"})})
+		assert.Equal(t, "858b2859308fc79fa46a539f40e6110c56ed111994f7e08c8867ced2a63116b0", fp)
+	})
+
+	t.Run("stable across map iteration order", func(t *testing.T) {
+		a := chainedSpecFingerprint(spec(map[string]string{"kv2_mount": "kv", "secret_path": "p"}), src(baseSrc))
+		b := chainedSpecFingerprint(spec(map[string]string{"secret_path": "p", "kv2_mount": "kv"}), src(baseSrc))
+		assert.Equal(t, a, b)
+	})
+
+	t.Run("config values never appear in the clear", func(t *testing.T) {
+		fp := chainedSpecFingerprint(
+			spec(map[string]string{"secret_path": "teams/SECRETPATH/db"}),
+			src(map[string]string{"vault_address": "https://SECRETHOST:8200"}))
+		assert.NotContains(t, fp, "SECRETPATH")
+		assert.NotContains(t, fp, "SECRETHOST")
+	})
+
+	t.Run("no concatenation collisions across sections", func(t *testing.T) {
+		// The same k/v moved between the spec's config and the source's must not
+		// produce the same digest.
+		inSpec := chainedSpecFingerprint(spec(map[string]string{"mount": "kv"}), src(nil))
+		inSrc := chainedSpecFingerprint(spec(nil), src(map[string]string{"mount": "kv"}))
+		assert.NotEqual(t, inSpec, inSrc)
+
+		// Nor may a value bleed into the neighbouring field.
+		assert.NotEqual(t,
+			chainedSpecFingerprint(&CredSpec{Type: "ab", Source: "c", Config: Config{}}, nil),
+			chainedSpecFingerprint(&CredSpec{Type: "a", Source: "bc", Config: Config{}}, nil))
+	})
+}
+
+// An unresolvable referenced spec has no identity to key on, so the key function must
+// refuse to cache rather than let whatever the name points at now share one entry.
+func TestChainedSecretCacheKey_NoFingerprintRefusesToCache(t *testing.T) {
+	caller := Caller{TokenID: "agent-token"}
+	assert.Empty(t, chainedSecretCacheKey("ns", "ref", "", caller,
+		&ExchangeInputs{SubjectToken: "jwt", SubjectTokenType: TokenTypeJWT}))
+}
+
+// claimsFingerprint must not let two different maps collide by running their bytes
+// together differently.
+func TestClaimsFingerprint_NoConcatenationCollisions(t *testing.T) {
+	assert.NotEqual(t,
+		claimsFingerprint(map[string]string{"ab": "c"}),
+		claimsFingerprint(map[string]string{"a": "bc"}))
+	assert.NotEqual(t,
+		claimsFingerprint(map[string]string{"a": "b", "c": "d"}),
+		claimsFingerprint(map[string]string{"a": "bcd"}))
+	assert.NotContains(t, claimsFingerprint(map[string]string{"sub": "SECRETVALUE"}), "SECRETVALUE")
+}
+
+// TestManager_IssuanceResolvesEachSourceOnce pins the read count of a plain
+// issuance.
+//
+// Unlike the chained case — see TestChaining_ResolvesEachSourceOnce, which is where
+// the repeated reads actually were — a plain issuance always resolved its source
+// once, so this test does not reproduce a past defect. It guards against a future
+// one: the helpers that want a source-level value now take the pair they are given,
+// and the count must not start growing again as more of them appear.
+func TestManager_IssuanceResolvesEachSourceOnce(t *testing.T) {
+	manager, configStore, _ := createTestManager(t)
+	defer manager.Stop()
+
+	configStore.AddSource(&CredSource{Name: "src", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "spec", Type: TypeVaultToken, Source: "src", Config: NewConfig(map[string]string{})})
+
+	ctx := createNamespaceContext()
+	configStore.resetSourceReads()
+
+	_, err := manager.IssueCredential(ctx, Caller{TokenID: "tok", TokenTTL: time.Hour}, "spec", nil)
+	require.NoError(t, err)
+
+	// Two, and both are load-bearing: the request's own snapshot, and the read the
+	// driver coordinator pairs with a generation so it can refuse to install a driver
+	// built from config that went stale mid-build. Handing the coordinator the
+	// request's already-read source would collapse this to one and undo that check.
+	// What this asserts is that the number does not grow with the number of helpers
+	// that want a source-level value.
+	assert.Equal(t, 2, configStore.sourceReadCount("src"),
+		"a plain issuance resolves its source once for the request and once to build the driver")
+
+	// The driver is cached now, so a second issuance takes only the request snapshot.
+	configStore.resetSourceReads()
+	_, err = manager.IssueCredential(ctx, Caller{TokenID: "tok2", TokenTTL: time.Hour}, "spec", nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, configStore.sourceReadCount("src"),
+		"with the driver already built, an issuance resolves its source exactly once")
 }

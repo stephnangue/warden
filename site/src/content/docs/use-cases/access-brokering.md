@@ -1,5 +1,7 @@
 ---
 title: "Access brokering"
+sidebar:
+  order: 2
 ---
 
 _Give agents access without giving them secrets._
@@ -26,7 +28,7 @@ a secret can sit, each on its own rotation schedule, each a thing to provision w
 an agent is created and revoke when it is retired. The work of distributing and
 rotating those keys quietly becomes the dominant cost of running agents at all.
 
-## Warden holds the secret; the agent carries only an identity
+## Warden brokers the credential; the agent carries only an identity
 
 Warden's purpose is to keep secrets out of workloads. Instead of handing the agent
 a key, Warden **brokers access**: at request time it mints or retrieves a scoped,
@@ -34,25 +36,27 @@ short-lived [credential](/concepts/credentials/) for the upstream the agent is t
 to reach — then injects it into the proxied request rather than handing it over. The
 agent presents **only its own identity** and never receives a credential of its own.
 
-And, increasingly, Warden holds no standing secret to broker *from*: a
-[keyless](/federation/keyless-credentials/) source federates the caller's identity for
-a credential the upstream issues, or [chains](/federation/credential-chaining/) the
-secret it needs from an external vault per request — so the privileged secret is stored
-neither in the agent nor in Warden.
+Warden need not hold a standing secret to broker *from*, either. Where the upstream
+trusts it, a [keyless](/federation/keyless-credentials/) source federates the caller's
+identity for a credential the upstream issues. Where the upstream only issues secrets,
+Warden [chains](/federation/credential-chaining/) the one it needs from your own secret
+store per request, so it stays where you manage it. Storing the secret in Warden itself is
+the quick start, and the fallback when there is no store to chain from.
 
 The identity is something the agent already has — a JWT, an mTLS client
 certificate, or a SPIFFE SVID. The agent points an ordinary client at a Warden
 [provider](/concepts/providers/) mount as if Warden were the upstream;
 Warden validates that identity through
-[transparent authentication](/concepts/authentication/#transparent-authentication),
-resolves what it may draw, mints the credential, injects it, and streams the
-response back. The credential lives only inside that one hop, and the privileged
-secret that minted it never leaves Warden.
+[implicit authentication](/identity/authentication/#implicit-authentication),
+resolves the roles its [groups](/identity/groups/) grant on this request, authorizes
+the call, mints the credential, injects it, and streams the response back. The credential lives only inside that one hop, and whatever minted it — a
+federated trust, a secret fetched from your store, or one Warden holds — never reaches the
+agent.
 
 Because the same identity is what reaches *every* upstream, there are no per-system
 keys to distribute and none to rotate per integration — the agent runs
 **secretless**, carrying an identity rather than a wallet of credentials. That
-identity is also what every [policy](/concepts/policies/) decision and
+identity is also what every [policy](/identity/policies/) decision and
 [audit](/concepts/audit/) entry ties back to, so access is attributable to the
 agent that used it rather than to a shared key.
 
@@ -71,9 +75,11 @@ agent that used it rather than to a shared key.
 
 A coding agent needs to push to GitHub. It runs with a SPIFFE SVID and speaks
 plain HTTPS to a `github` mount; it holds no GitHub token and no app key. When it
-makes the call, Warden validates the SVID, resolves the role, mints a short-lived
-GitHub App **installation token** from the private key it holds, injects it into
-the push, and streams GitHub's response back. No long-lived GitHub credential ever
+makes the call, Warden validates the SVID, checks that a group grants it the role
+the request names, mints a short-lived
+GitHub App **installation token** from the App's private key — chained from the
+team's secret store, so Warden fetches it per mint rather than storing it — injects it
+into the push, and streams GitHub's response back. No long-lived GitHub credential ever
 lands in the agent's environment or its repository secrets — the agent acted as
 itself, and Warden brokered the rest.
 
@@ -85,7 +91,7 @@ itself, and Warden brokered the rest.
   identity may actually do, on every call.
 - [Credentials](/concepts/credentials/) — sources, specs, drivers, lifetime,
   and rotation.
-- [Authentication](/concepts/authentication/) — transparent auth and the
+- [Authentication](/identity/authentication/) — implicit authentication and the
   credential forms an agent presents.
 - [Agent Identity](/agent-identity/) — how an agent presents the
   identity Warden brokers from.

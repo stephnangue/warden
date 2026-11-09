@@ -2,15 +2,27 @@ package aws
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/aws/processor"
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // createTestLogger creates a logger for testing that discards output
@@ -549,5 +561,417 @@ func BenchmarkNormalizeRequest(b *testing.B) {
 		req.Header.Set("Content-Type", "application/json")
 
 		backend.normalizeRequest(req, []byte{})
+	}
+}
+
+// --- Failures the gateway raises itself ---
+
+// gatewayJWT stands in for an agent's JWT. On the transparent path an agent's
+// SDK signs with it as both the secret key and the session token.
+const gatewayJWT = "eyJhbGciOiJSUzI1NiJ9.e30.sig"
+
+// roundTripFunc is an http.RoundTripper made of a function.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+var (
+	// upstreamOK answers every forwarded request with a 200.
+	upstreamOK = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+	})
+	// upstreamDown cannot be reached.
+	upstreamDown = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	})
+	// upstreamSilent never answers: it waits for the request's context to end.
+	upstreamSilent = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})
+)
+
+// newGatewayBackend is an AWS backend wired as Factory wires it, forwarding to
+// upstream instead of AWS.
+func newGatewayBackend(upstream http.RoundTripper) *awsBackend {
+	b := &awsBackend{
+		signer:           v4.NewSigner(),
+		s3Signer:         v4.NewSigner(func(o *v4.SignerOptions) { o.DisableURIPathEscaping = true }),
+		StreamingBackend: &framework.StreamingBackend{Logger: createTestLogger()},
+	}
+	b.initializeProcessors()
+	b.SetTransport(upstream)
+	return b
+}
+
+// gatewayCredential is the AWS credential core minted for the request.
+func gatewayCredential() *credential.Credential {
+	return &credential.Credential{
+		Type: credential.TypeAWSAccessKeys,
+		Data: map[string]string{"access_key_id": "AKIAEXAMPLE", "secret_access_key": "upstream-secret"},
+	}
+}
+
+// signedGatewayRequest is a request to the gateway signed as an agent's SDK
+// signs it on the transparent path, with secret as the signing key: a secret
+// other than gatewayJWT makes a signature that does not verify.
+func signedGatewayRequest(t *testing.T, method, service string, header http.Header, body, secret string, at time.Time) *http.Request {
+	t.Helper()
+	r := httptest.NewRequest(method, "http://warden.test/v1/aws/gateway/", strings.NewReader(body))
+	for k, v := range header {
+		r.Header[k] = v
+	}
+	hash := sigv4.ComputePayloadHash([]byte(body))
+	if service == "s3" {
+		r.Header.Set("X-Amz-Content-Sha256", hash)
+	}
+	creds := awssdk.Credentials{AccessKeyID: "gw-role", SecretAccessKey: secret, SessionToken: gatewayJWT}
+	require.NoError(t, v4.NewSigner().SignHTTP(context.Background(), creds, r, hash, service, "us-east-1", at))
+	return r
+}
+
+// An agent signs with its own JWT, so it picks the region and service in its
+// credential scope, and the upstream host is built from them. One that would
+// move the request to another host is refused, and nothing is forwarded:
+// before, "x.attacker.example#" as the region sent the request, re-signed
+// with the real AWS credential, to ec2.x.attacker.example.
+func TestHandleGateway_RefusesHostChangingScope(t *testing.T) {
+	for _, scope := range []struct{ service, region string }{
+		{"ec2", "x.attacker.example#"},
+		{"ec2", "us-east-1@attacker.example"},
+		{"ec2.attacker.example#", "us-east-1"},
+	} {
+		var forwarded bool
+		b := newGatewayBackend(recordingUpstream(&forwarded))
+		b.SetMaxBodySize(framework.DefaultMaxBodySize)
+
+		body := "Action=DescribeRegions&Version=2016-11-15"
+		r := httptest.NewRequest(http.MethodPost, "http://warden.test/v1/aws/gateway/", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+		signAsAgent(t, r, body, scope.service, scope.region)
+
+		rec := httptest.NewRecorder()
+		b.handleGateway(context.Background(), &logical.Request{
+			Path: "gateway/", HTTPRequest: r, ResponseWriter: rec,
+			RequestID: "rid-scope", Credential: gatewayCredential(),
+		})
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "scope %v", scope)
+		assert.False(t, forwarded, "scope %v: the request was forwarded", scope)
+	}
+}
+
+// An access point ARN in the path names the region and access point the
+// upstream host is built from. One that would move the request to another
+// host is refused: before, a region of "attacker.example/" sent it, re-signed,
+// to ap-123456789012.s3-accesspoint.attacker.example.
+func TestHandleGateway_RefusesHostChangingAccessPointARN(t *testing.T) {
+	for _, arnPath := range []string{
+		"/arn:aws:s3:attacker.example/:123456789012:accesspoint/ap/key.txt",
+		"/arn:aws:s3:us-east-1@attacker.example:123456789012:accesspoint/ap/key.txt",
+		"/arn:aws:s3:attacker.example%2F:123456789012:accesspoint/ap/key.txt",
+		"/arn:aws:s3:us-east-1:123456789012:accesspoint/ap@attacker.example%23/key.txt",
+		"/arn:aws:s3::123456789012:accesspoint/x@attacker.example%23.mrap/key.txt",
+	} {
+		var forwarded bool
+		b := newGatewayBackend(recordingUpstream(&forwarded))
+		b.SetMaxBodySize(framework.DefaultMaxBodySize)
+
+		r := httptest.NewRequest(http.MethodGet, "http://warden.test/v1/aws/gateway"+arnPath, nil)
+		r.Header.Set("X-Amz-Content-Sha256", sigv4.ComputePayloadHash(nil))
+		signAsAgent(t, r, "", "s3", "us-east-1")
+
+		rec := httptest.NewRecorder()
+		b.handleGateway(context.Background(), &logical.Request{
+			Path: "gateway" + r.URL.Path[len("/v1/aws/gateway"):], HTTPRequest: r, ResponseWriter: rec,
+			RequestID: "rid-arn", Credential: gatewayCredential(),
+		})
+
+		if forwarded {
+			t.Errorf("%s: the request was forwarded", arnPath)
+		}
+	}
+}
+
+// offAWSProcessor names a target outside AWS, as a processor with a parsing
+// gap would.
+type offAWSProcessor struct{ processor.BaseProcessor }
+
+func (offAWSProcessor) CanProcess(*processor.ProcessorContext) bool { return true }
+func (offAWSProcessor) Metadata() *processor.ProcessorMetadata {
+	return &processor.ProcessorMetadata{ServiceNames: []string{"ec2"}}
+}
+func (p offAWSProcessor) Process(*processor.ProcessorContext) (*processor.ProcessorResult, error) {
+	return &processor.ProcessorResult{
+		TargetURL:  "https://ec2@attacker.example#.amazonaws.com",
+		TargetHost: "ec2@attacker.example#.amazonaws.com",
+	}, nil
+}
+
+// Whatever a processor builds, only an AWS host is reached: the gateway
+// refuses any other target before re-signing.
+func TestHandleGateway_RefusesTargetOutsideAWS(t *testing.T) {
+	var forwarded bool
+	b := newGatewayBackend(recordingUpstream(&forwarded))
+	b.SetMaxBodySize(framework.DefaultMaxBodySize)
+	registry := processor.NewProcessorRegistry()
+	registry.Register(&offAWSProcessor{processor.BaseProcessor{ProcName: "off-aws"}})
+	b.processorRegistry.Store(registry)
+
+	body := "Action=DescribeRegions&Version=2016-11-15"
+	r := httptest.NewRequest(http.MethodPost, "http://warden.test/v1/aws/gateway/", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+	signAsAgent(t, r, body, "ec2", "us-east-1")
+
+	rec := httptest.NewRecorder()
+	b.handleGateway(context.Background(), &logical.Request{
+		Path: "gateway/", HTTPRequest: r, ResponseWriter: rec,
+		RequestID: "rid-off", Credential: gatewayCredential(),
+	})
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.False(t, forwarded)
+}
+
+func TestIsAWSTarget(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"https://ec2.us-east-1.amazonaws.com":                            true,
+		"https://bucket.s3.cn-north-1.amazonaws.com.cn":                  true,
+		"https://ap-123456789012.s3-accesspoint.us-east-1.amazonaws.com": true,
+		"http://ec2.us-east-1.amazonaws.com":                             false,
+		"https://ec2.attacker.example":                                   false,
+		"https://ec2.attacker.example#.amazonaws.com":                    false,
+		"https://ec2@attacker.example#.amazonaws.com":                    false,
+		"https://x@ec2.us-east-1.amazonaws.com":                          false,
+		"https://ap.s3-accesspoint.attacker.example/.amazonaws.com":      false,
+		"https://ec2.us-east-1.amazonaws.com:8443":                       false,
+		"https://amazonaws.com.attacker.example":                         false,
+	} {
+		target, err := url.Parse(raw)
+		require.NoError(t, err)
+		host := strings.TrimPrefix(strings.TrimPrefix(raw, "https://"), "http://")
+		assert.Equal(t, want, isAWSTarget(target, host), raw)
+	}
+}
+
+// recordingUpstream answers 200 and records that a request reached it.
+func recordingUpstream(forwarded *bool) http.RoundTripper {
+	return roundTripFunc(func(*http.Request) (*http.Response, error) {
+		*forwarded = true
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+	})
+}
+
+// signAsAgent signs r as an agent's SDK does on the transparent path.
+func signAsAgent(t *testing.T, r *http.Request, body, service, region string) {
+	t.Helper()
+	creds := awssdk.Credentials{AccessKeyID: "gw-role", SecretAccessKey: gatewayJWT, SessionToken: gatewayJWT}
+	require.NoError(t, v4.NewSigner().SignHTTP(context.Background(), creds, r,
+		sigv4.ComputePayloadHash([]byte(body)), service, region, time.Now()))
+}
+
+// TestHandleGateway_FailuresAnsweredAsAWS drives each failure the gateway
+// raises itself through handleGateway, with requests signed as an AWS SDK signs
+// them, and checks each is answered as the service the request targets would
+// answer it — while a request that is not SigV4-signed keeps the plain text.
+func TestHandleGateway_FailuresAnsweredAsAWS(t *testing.T) {
+	now := time.Now()
+	stsCall := func(secret string, at time.Time) *http.Request {
+		return signedGatewayRequest(t, http.MethodPost, "sts",
+			http.Header{"Content-Type": {"application/x-www-form-urlencoded; charset=utf-8"}},
+			"Action=GetCallerIdentity&Version=2011-06-15", secret, at)
+	}
+	smCall := func(secret string) *http.Request {
+		return signedGatewayRequest(t, http.MethodPost, "secretsmanager",
+			http.Header{"Content-Type": {"application/x-amz-json-1.1"}, "X-Amz-Target": {"secretsmanager.ListSecrets"}},
+			"{}", secret, now)
+	}
+	s3Call := func(secret string, header http.Header) *http.Request {
+		return signedGatewayRequest(t, http.MethodGet, "s3", header, "", secret, now)
+	}
+	ec2Call := func(secret string) *http.Request {
+		return signedGatewayRequest(t, http.MethodPost, "ec2",
+			http.Header{"Content-Type": {"application/x-www-form-urlencoded; charset=utf-8"}},
+			"Action=DescribeRegions&Version=2016-11-15", secret, now)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		req      *http.Request
+		upstream http.RoundTripper
+		noCred   bool
+		maxBody  int64
+		timeout  time.Duration
+
+		status int
+		// shape is the error's wire shape: query (also restXml wrapped), ec2,
+		// s3, json, or plain for Warden's plain text.
+		shape   string
+		code    string
+		message string
+	}{
+		// Correctly signed requests reach the upstream: the signing above is
+		// what the gateway verifies, so the mismatches below are real ones.
+		{name: "sts forwarded", req: stsCall(gatewayJWT, now), status: http.StatusOK},
+		{name: "secretsmanager forwarded", req: smCall(gatewayJWT), status: http.StatusOK},
+		{name: "s3 forwarded", req: s3Call(gatewayJWT, nil), status: http.StatusOK},
+		{name: "ec2 forwarded", req: ec2Call(gatewayJWT), status: http.StatusOK},
+
+		{name: "signature mismatch, awsQuery", req: stsCall("eyJwrong", now),
+			status: http.StatusForbidden, shape: "query", code: "SignatureDoesNotMatch", message: "Warden: Signature does not match"},
+		{name: "signature mismatch, awsJson", req: smCall("eyJwrong"),
+			status: http.StatusForbidden, shape: "json", code: "InvalidSignatureException", message: "Warden: Signature does not match"},
+		{name: "signature mismatch, s3", req: s3Call("eyJwrong", nil),
+			status: http.StatusForbidden, shape: "s3", code: "SignatureDoesNotMatch", message: "Warden: Signature does not match"},
+		{name: "signature mismatch, ec2Query", req: ec2Call("eyJwrong"),
+			status: http.StatusForbidden, shape: "ec2", code: "AuthFailure", message: "Warden: Signature does not match"},
+		{name: "signature too old to verify", req: stsCall(gatewayJWT, now.Add(-20*time.Minute)),
+			status: http.StatusForbidden, shape: "query", code: "SignatureDoesNotMatch", message: "Warden: Signature verification failed"},
+		{name: "credential scope does not parse", req: func() *http.Request {
+			r := stsCall(gatewayJWT, now)
+			r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=broken, SignedHeaders=host, Signature=00")
+			return r
+		}(), status: http.StatusUnauthorized, shape: "query", code: "SignatureDoesNotMatch", message: "Warden: Unauthorized"},
+		{name: "body over the mount's limit", req: stsCall(gatewayJWT, now), maxBody: 8,
+			status: http.StatusBadRequest, shape: "query", code: "ValidationError", message: "Warden: Failed to read request body"},
+		{name: "no credential for the request", req: stsCall(gatewayJWT, now), noCred: true,
+			status: http.StatusUnauthorized, shape: "query", code: "InvalidClientTokenId", message: "Warden: Unauthorized"},
+		{name: "processor refuses the request", req: s3Call(gatewayJWT, http.Header{"X-Amz-Account-Id": {"123"}}),
+			status: http.StatusBadRequest, shape: "query", code: "ValidationError", message: "Warden: Failed to process request"},
+		{name: "upstream unreachable", req: stsCall(gatewayJWT, now), upstream: upstreamDown,
+			status: http.StatusBadGateway, shape: "query", code: "ServiceUnavailable", message: "Warden: Bad Gateway"},
+		{name: "upstream too slow for the mount's timeout", req: ec2Call(gatewayJWT), upstream: upstreamSilent, timeout: 20 * time.Millisecond,
+			status: http.StatusGatewayTimeout, shape: "ec2", code: "Unavailable", message: "Warden: Gateway Timeout"},
+		{name: "not SigV4-signed", req: func() *http.Request {
+			r := stsCall(gatewayJWT, now)
+			r.Header.Set("Authorization", "Bearer "+gatewayJWT)
+			return r
+		}(), status: http.StatusUnauthorized, shape: "plain", message: "Unauthorized"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := tc.upstream
+			if upstream == nil {
+				upstream = upstreamOK
+			}
+			b := newGatewayBackend(upstream)
+			b.SetMaxBodySize(tc.maxBody)
+			b.SetTimeout(tc.timeout)
+			req := &logical.Request{
+				Path: "gateway/", HTTPRequest: tc.req, ResponseWriter: httptest.NewRecorder(),
+				RequestID: "rid-gw", Credential: gatewayCredential(),
+			}
+			if tc.noCred {
+				req.Credential = nil
+			}
+			rec := req.ResponseWriter.(*httptest.ResponseRecorder)
+
+			b.handleGateway(context.Background(), req)
+
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			body := rec.Body.String()
+			switch tc.shape {
+			case "":
+				assert.Equal(t, "ok", body)
+				return
+			case "plain":
+				assert.Equal(t, "text/plain; charset=utf-8", rec.Header().Get("Content-Type"))
+				assert.Equal(t, tc.message+"\n", body)
+				return
+			case "query":
+				assert.Contains(t, body, "<ErrorResponse><Error>")
+				assert.Contains(t, body, "<RequestId>rid-gw</RequestId>")
+			case "ec2":
+				assert.Contains(t, body, "<Response><Errors><Error>")
+				assert.Contains(t, body, "<RequestID>rid-gw</RequestID>")
+			case "s3":
+				assert.Contains(t, body, "<Error><Code>")
+				assert.Equal(t, "rid-gw", rec.Header().Get("X-Amz-Request-Id"))
+			case "json":
+				assert.Equal(t, tc.code, rec.Header().Get("X-Amzn-ErrorType"))
+				assert.JSONEq(t, `{"__type":"`+tc.code+`","message":"`+tc.message+`"}`, body)
+			}
+			if tc.shape != "json" {
+				assert.Contains(t, body, "<Code>"+tc.code+"</Code>")
+				assert.Contains(t, body, "<Message>"+tc.message+"</Message>")
+			}
+			assert.Equal(t, "rid-gw", rec.Header().Get("X-Amzn-RequestId"))
+		})
+	}
+}
+
+// TestHandleGateway_BedrockRuntime drives Bedrock calls, signed as an AWS SDK
+// signs them, through handleGateway: runtime calls reach bedrock-runtime with
+// the model id as the client escaped it, control plane calls reach bedrock,
+// and both are re-signed as "bedrock" with a signature that holds over the
+// request as it leaves.
+func TestHandleGateway_BedrockRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		method   string
+		rawPath  string
+		body     string
+		wantHost string
+		wantPath string
+	}{
+		{"Converse", http.MethodPost, "/model/amazon.nova-lite-v1%3A0/converse",
+			`{"messages":[{"role":"user","content":[{"text":"Say hi"}]}]}`,
+			"bedrock-runtime.us-east-1.amazonaws.com", "/model/amazon.nova-lite-v1%3A0/converse"},
+		{"Converse on an inference profile ARN", http.MethodPost,
+			"/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A123456789012%3Ainference-profile%2Fus.amazon.nova-lite-v1%3A0/converse",
+			`{"messages":[]}`,
+			"bedrock-runtime.us-east-1.amazonaws.com",
+			"/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A123456789012%3Ainference-profile%2Fus.amazon.nova-lite-v1%3A0/converse"},
+		{"ListFoundationModels", http.MethodGet, "/foundation-models", "",
+			"bedrock.us-east-1.amazonaws.com", "/foundation-models"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var forwarded *http.Request
+			var forwardedBody []byte
+			b := newGatewayBackend(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				forwarded = r
+				if r.Body != nil {
+					forwardedBody, _ = io.ReadAll(r.Body)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+			}))
+			b.SetMaxBodySize(framework.DefaultMaxBodySize)
+
+			r := httptest.NewRequest(tc.method, "http://warden.test/v1/bedrock/gateway"+tc.rawPath, strings.NewReader(tc.body))
+			r.Header.Set("Content-Type", "application/json")
+			creds := awssdk.Credentials{AccessKeyID: "gw-role", SecretAccessKey: gatewayJWT, SessionToken: gatewayJWT}
+			require.NoError(t, v4.NewSigner().SignHTTP(context.Background(), creds, r,
+				sigv4.ComputePayloadHash([]byte(tc.body)), "bedrock", "us-east-1", time.Now()))
+
+			rec := httptest.NewRecorder()
+			b.handleGateway(context.Background(), &logical.Request{
+				Path:           "gateway" + r.URL.Path[len("/v1/bedrock/gateway"):],
+				HTTPRequest:    r,
+				ResponseWriter: rec,
+				RequestID:      "rid-bedrock",
+				Credential:     gatewayCredential(),
+			})
+
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.NotNil(t, forwarded)
+			assert.Equal(t, tc.wantHost, forwarded.URL.Host)
+			assert.Equal(t, tc.wantHost, forwarded.Host)
+			assert.Equal(t, tc.wantPath, forwarded.URL.EscapedPath())
+			assert.Equal(t, tc.body, string(forwardedBody))
+
+			auth := forwarded.Header.Get("Authorization")
+			assert.Contains(t, auth, "Credential=AKIAEXAMPLE/")
+			assert.Contains(t, auth, "/us-east-1/bedrock/aws4_request")
+
+			// Re-sign what left with the upstream credential: the same
+			// signature means the signed path is the path on the wire.
+			signedAt, err := sigv4.ParseAWSDate(forwarded.Header.Get("X-Amz-Date"))
+			require.NoError(t, err)
+			check := forwarded.Clone(context.Background())
+			check.Header.Del("Authorization")
+			upstream := awssdk.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "upstream-secret"}
+			require.NoError(t, v4.NewSigner().SignHTTP(context.Background(), upstream, check,
+				sigv4.ComputePayloadHash(forwardedBody), "bedrock", "us-east-1", signedAt))
+			assert.Equal(t, check.Header.Get("Authorization"), auth)
+		})
 	}
 }

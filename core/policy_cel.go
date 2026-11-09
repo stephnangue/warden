@@ -28,11 +28,11 @@ import (
 // evaluator.
 //
 // Design notes:
-//   - Two envs: a base env (request/token/now) for path-level conditions and an
-//     MCP env (base + call) for mcp{} conditions. Two envs make a path-level
+//   - Two envs: a base env (request/agent/now) for path-level conditions and an
+//     MCP env (base + call) for MCP policies conditions. Two envs make a path-level
 //     condition that references call.* a COMPILE error, not a silent runtime
 //     deny.
-//   - request/token/call are map(string, dyn): the env is shared across every
+//   - request/agent/call are map(string, dyn): the env is shared across every
 //     tool/path and cannot know an arbitrary argument's type. Type discipline is
 //     achieved at activation-build time (values typed from their source); a
 //     type-mismatched comparison surfaces as a runtime error → fail-closed deny.
@@ -46,13 +46,37 @@ import (
 //
 //	request.path, request.operation, request.client_ip,
 //	  request.mount_point, request.mount_type, request.mount_class,
-//	  request.mount_accessor, request.transparent, request.namespace,
-//	  request.data.<k>
-//	token.principal, token.role, token.type, token.namespace,
-//	  token.policies (list), token.metadata.<k>, token.actors (list of
-//	  {subject}), token.ttl_seconds, token.expires_at
+//	  request.mount_accessor, request.transparent, request.data_plane,
+//	  request.namespace, request.data.<k>
+//	agent.present, agent.principal, agent.role, agent.namespace,
+//	  agent.policies (list), agent.groups (list, sorted; empty when the
+//	  caller is in no group), agent.metadata.<k>, agent.actors (list of
+//	  {subject, issuer?}), agent.token_type, agent.token_ttl_seconds,
+//	  agent.token_expires_at
+//	user.<same, minus policies and groups>
 //	now (timestamp)
-//	call.method, call.tool, call.args.<k>, call.batch_index   (mcp{} only)
+//	call.method, call.tool, call.args.<k>, call.batch_index   (MCP policy only)
+//
+// `agent` is the request's authenticating principal and the sole authorizer.
+// `user` is the optional second principal it acts for, resolved before the
+// policy decision and identity-only — it never authorizes, which is why
+// user.policies is not exposed. user.present is false when no user credential
+// rode the request; that is tolerated by design, so a condition wanting one
+// must say `user.present && …`. Note a condition must evaluate to bool while a
+// dyn-map field types as dyn, so a bare `user.present` is rejected at write
+// time — use it as a guard (as above) or compare it explicitly.
+//
+// The three token_-prefixed fields describe the token a principal holds, not
+// the principal itself — token_type is identity_token (admitted by a
+// transparent auth method from a credential it presents) or service_token (a
+// bearer token Warden issued). It does not name the auth method that admitted
+// the principal: groups (whose rules select on the auth mount) and metadata do.
+//
+// Two caveats worth knowing before writing a `user` condition: the user leg is
+// resolved only for gateway (streaming) requests, so user.present is always
+// false elsewhere; and user.role is always empty — a user runs under no role —
+// while user.namespace always equals request.namespace. Gate on
+// user.metadata.<k>, the user auth mount's mapped facts.
 //
 // Secret material (token value, accessor, client token) is never exposed.
 
@@ -71,7 +95,7 @@ const (
 	maxConditionCost uint64 = 1_000_000
 
 	// celInputSizeBound is the size (map entries / string length) the cost
-	// estimator assumes for the dynamic-map variables (request/token/call) that
+	// estimator assumes for the dynamic-map variables (request/agent/call) that
 	// cel-go cannot size itself. It is a heuristic for the *write-time* check —
 	// large enough to admit reasonable expressions, small enough to reject
 	// pathological ones (e.g. nested comprehensions, ~size² cost). It is
@@ -94,24 +118,65 @@ type celRequestInput struct {
 	MountClass    string
 	MountAccessor string
 	Transparent   bool
+	DataPlane     bool
 	Namespace     string
 	Data          map[string]any
 }
 
-// celTokenInput is the non-secret token context mapped into the `token`
-// namespace. Decoupled from *logical.TokenEntry so the activation builder stays
-// unit-testable; the wiring layer adapts the token entry into this.
-type celTokenInput struct {
+// celPrincipalInput is the non-secret principal context mapped into the `agent`
+// and `user` namespaces. Decoupled from *logical.TokenEntry so the activation
+// builder stays unit-testable; the wiring layer adapts the token entry into this.
+type celPrincipalInput struct {
+	// Present is false when no principal occupied this leg.
+	//
+	// It is how a condition requires *a* user without depending on any
+	// particular claim — `user.present && agent.principal == "x"` has nothing
+	// else to carry the requirement. The alternative, `user.principal != ""`,
+	// leans on zero-value semantics to mean absence, which is exactly the
+	// implicitness this field removes.
+	//
+	// It also keeps absence a clean deny rather than a no_such_key error, which
+	// matters for how the audit record reads — though both now reach the same
+	// 401 and user challenge, since ConditionResult.UserAbsent is set from the
+	// whole condition list rather than from which branch produced the denial.
+	//
+	// On the agent leg it is always true wherever a condition evaluates, since
+	// CheckToken has a token entry by then.
+	Present       bool
 	Principal     string
 	Role          string
 	Type          string
-	NamespacePath string
+	NamespacePath string // "" for root; the warden_namespace assertion claim renders it "root"
 	Policies      []string
 	Metadata      map[string]string
 	Actors        []logical.ActorRef
 	TTLSeconds    int64
 	ExpiresAtUnix int64
+
+	// Groups are the agent's groups, sorted, from the request's role grant.
+	// Shared with the cached membership: read only. Nil reads as no groups.
+	Groups []string
+
+	// Alias is the native identity the agent's credential presented (its
+	// mount's alias_name_source, which need not be the principal), and Entity
+	// the entity of record that claims it (nil when none does). The entity is
+	// a published one: read only.
+	Alias  string
+	Entity *logical.Entity
 }
+
+// principalLeg distinguishes the two principals that share buildPrincipalNS. It
+// gates the fields that exist on only one of them.
+//
+// Named legAgent/legUser rather than agentLeg/userLeg because this package
+// already uses `userLeg bool` for a different thing — whether a mount is a
+// protected resource, so Authorization carries the user (see ExtractTokens).
+type principalLeg bool
+
+const (
+	legAgent principalLeg = false
+	legUser  principalLeg = true
+)
 
 // buildCELEnv constructs a CEL environment. When mcp is true the env also
 // declares the per-call `call` namespace, producing the MCP env; otherwise it
@@ -120,7 +185,8 @@ func buildCELEnv(mcp bool) (*cel.Env, error) {
 	opts := []cel.EnvOption{
 		// request-wide namespaces; dyn maps (see design note).
 		cel.Variable("request", cel.MapType(cel.StringType, cel.DynType)),
-		cel.Variable("token", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("agent", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("user", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("now", cel.TimestampType),
 
 		// Optional types for concise optional-arg access: call.args.?x.orValue(d).
@@ -170,6 +236,11 @@ func celCIDRContainsFunc() cel.EnvOption {
 
 // celCostEstimator supplies input size bounds for our dynamic-map variables so
 // env.EstimateCost can bound an expression's worst-case cost at compile time.
+// Every dynamic-map root must appear in EstimateSize below. A root omitted here
+// gets no size from us, and cel-go falls through to UnknownSizeEstimate
+// (max = MaxUint64) — so any size-dependent expression over that root estimates
+// as effectively infinite and is REJECTED at write time, even when it is
+// perfectly reasonable. The failure is a spurious rejection, not a missed bound.
 // cel-go owns the per-operation base costs; this only feeds the sizes cel-go
 // cannot infer.
 type celCostEstimator struct {
@@ -179,7 +250,7 @@ type celCostEstimator struct {
 func (e celCostEstimator) EstimateSize(node checker.AstNode) *checker.SizeEstimate {
 	if path := node.Path(); len(path) > 0 {
 		switch path[0] {
-		case "request", "token", "call":
+		case "request", "agent", "user", "call":
 			return &checker.SizeEstimate{Min: 0, Max: e.maxSize}
 		}
 	}
@@ -206,7 +277,7 @@ func compileCELCondition(env *cel.Env, src string) (*compiledCondition, error) {
 func compileCELConditionWithLimits(env *cel.Env, src string, maxCost, sizeBound uint64) (*compiledCondition, error) {
 	ast, iss := env.Compile(src)
 	if iss != nil && iss.Err() != nil {
-		return nil, fmt.Errorf("condition does not compile: %w", iss.Err())
+		return nil, fmt.Errorf("condition does not compile: %w", celRenameHint(iss.Err()))
 	}
 	if !ast.OutputType().IsExactType(cel.BoolType) {
 		return nil, fmt.Errorf("condition must evaluate to bool, got %s", ast.OutputType())
@@ -237,16 +308,37 @@ func compileCELConditionWithLimits(env *cel.Env, src string, maxCost, sizeBound 
 	if err != nil {
 		return nil, fmt.Errorf("condition program construction failed: %w", err)
 	}
-	paths, segs, reqF, tokF, callF := celAnalyzeRefs(ast)
+	paths, segs, reqF, agtF, usrF, callF := celAnalyzeRefs(ast)
 	return &compiledCondition{
-		Source:     src,
+		Source:     logical.StripControlChars(src),
 		Program:    prg,
 		RefPaths:   paths,
 		RefSegs:    segs,
 		ReqFields:  reqF,
-		TokFields:  tokF,
+		AgtFields:  agtF,
+		UsrFields:  usrF,
 		CallFields: callF,
 	}, nil
+}
+
+// celRenameHint appends migration guidance when a compile failure is an
+// undeclared reference to `token` — the namespace `agent` replaced. Both the
+// policy-write path and the policy-load path surface compile errors, so an
+// operator upgrading with stored `token.*` conditions meets this error at the
+// moment they most need to be told what changed, rather than a bare
+// "undeclared reference".
+func celRenameHint(err error) error {
+	if err == nil {
+		return nil
+	}
+	s := err.Error()
+	if !strings.Contains(s, "undeclared reference to 'token'") {
+		return err
+	}
+	return fmt.Errorf("%w (the `token` namespace was renamed to `agent`: "+
+		"token.principal/role/namespace/policies/metadata/actors are now agent.*, "+
+		"and token.type/ttl_seconds/expires_at are now "+
+		"agent.token_type/token_ttl_seconds/token_expires_at)", err)
 }
 
 // celCostIsSizeDependent reports whether an expression's worst-case cost grows
@@ -303,7 +395,7 @@ func unionFieldSets(a, b fieldSet) fieldSet {
 }
 
 // celAnalyzeRefs walks the checked AST once and returns both (a) the dotted
-// audit paths an expression reads — e.g. token.metadata.env — and (b) the
+// audit paths an expression reads — e.g. agent.metadata.env — and (b) the
 // top-level field-sets per root used to prune the activation.
 //
 // Audit paths capture only clean, Ident-rooted field-selection chains; has()
@@ -317,8 +409,8 @@ func unionFieldSets(a, b fieldSet) fieldSet {
 // A bare root Ident that is not a Select operand sets all=true for that root, so
 // pruning never drops a field the expression needs (an under-built field would
 // be a missing key → fail-closed deny).
-func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call fieldSet) {
-	req, tok, call = fieldSet{fields: map[string]bool{}}, fieldSet{fields: map[string]bool{}}, fieldSet{fields: map[string]bool{}}
+func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, agt, usr, call fieldSet) {
+	req, agt, usr, call = fieldSet{fields: map[string]bool{}}, fieldSet{fields: map[string]bool{}}, fieldSet{fields: map[string]bool{}}, fieldSet{fields: map[string]bool{}}
 	native := a.NativeRep()
 	if native == nil || native.Expr() == nil {
 		return
@@ -328,7 +420,7 @@ func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call
 	consumed := map[int64]bool{}     // operand of some Select — an intermediate node
 	skip := map[int64]bool{}         // container of an index/optional access — not a field path
 	identCovered := map[int64]bool{} // root-Ident IDs that are a Select operand
-	var rootIdents []celast.Expr     // Idents named request/token/call
+	var rootIdents []celast.Expr     // Idents named request/agent/user/call
 	celast.PostOrderVisit(native.Expr(), celast.NewExprVisitor(func(e celast.Expr) {
 		switch e.Kind() {
 		case celast.SelectKind:
@@ -341,8 +433,11 @@ func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call
 				case "request":
 					req.fields[s.FieldName()] = true
 					identCovered[op.ID()] = true
-				case "token":
-					tok.fields[s.FieldName()] = true
+				case "agent":
+					agt.fields[s.FieldName()] = true
+					identCovered[op.ID()] = true
+				case "user":
+					usr.fields[s.FieldName()] = true
 					identCovered[op.ID()] = true
 				case "call":
 					call.fields[s.FieldName()] = true
@@ -351,7 +446,7 @@ func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call
 			}
 		case celast.IdentKind:
 			switch e.AsIdent() {
-			case "request", "token", "call":
+			case "request", "agent", "user", "call":
 				rootIdents = append(rootIdents, e)
 			}
 		case celast.CallKind:
@@ -395,8 +490,10 @@ func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call
 		switch id.AsIdent() {
 		case "request":
 			req.all = true
-		case "token":
-			tok.all = true
+		case "agent":
+			agt.all = true
+		case "user":
+			usr.all = true
 		case "call":
 			call.all = true
 		}
@@ -405,8 +502,13 @@ func celAnalyzeRefs(a *cel.Ast) (paths []string, segs [][]string, req, tok, call
 }
 
 // celSelectPath reconstructs the dotted path for a Select chain top (e.g.
-// token.metadata.env). Returns ok=false if the chain contains a test-only
-// select (has()) or does not bottom out on a request/token/call Ident.
+// agent.metadata.env). Returns ok=false if the chain contains a test-only
+// select (has()) or does not bottom out on a request/agent/user/call Ident.
+//
+// The returned path is the operator's own spelling and is what lands in
+// ConditionResult.Inputs — and therefore what an audit device's salt_fields
+// entry must match verbatim. Renaming a namespace or field here renames the
+// audit key with it.
 func celSelectPath(e celast.Expr) (string, bool) {
 	var fields []string
 	cur := e
@@ -422,7 +524,7 @@ func celSelectPath(e celast.Expr) (string, bool) {
 		return "", false
 	}
 	switch cur.AsIdent() {
-	case "request", "token", "call":
+	case "request", "agent", "user", "call":
 	default:
 		return "", false
 	}
@@ -452,35 +554,40 @@ func evalCELCondition(prg cel.Program, activation any) (bool, error) {
 
 // buildRequestNS builds the `request` namespace, including only the fields f
 // marks as referenced (all fields when f.all). data is always non-nil so
-// has(request.data.x) is false rather than a nil-deref.
+// has(request.data.x) is false rather than a nil-deref. Strings are stored as
+// CEL values: boxed once here, where a Go string would be converted again at
+// each reference.
 func buildRequestNS(req celRequestInput, f fieldSet) map[string]any {
 	m := make(map[string]any, len(f.fields))
 	if f.has("path") {
-		m["path"] = req.Path
+		m["path"] = types.String(req.Path)
 	}
 	if f.has("operation") {
-		m["operation"] = req.Operation
+		m["operation"] = types.String(req.Operation)
 	}
 	if f.has("client_ip") {
-		m["client_ip"] = req.ClientIP
+		m["client_ip"] = types.String(req.ClientIP)
 	}
 	if f.has("mount_point") {
-		m["mount_point"] = req.MountPoint
+		m["mount_point"] = types.String(req.MountPoint)
 	}
 	if f.has("mount_type") {
-		m["mount_type"] = req.MountType
+		m["mount_type"] = types.String(req.MountType)
 	}
 	if f.has("mount_class") {
-		m["mount_class"] = req.MountClass
+		m["mount_class"] = types.String(req.MountClass)
 	}
 	if f.has("mount_accessor") {
-		m["mount_accessor"] = req.MountAccessor
+		m["mount_accessor"] = types.String(req.MountAccessor)
 	}
 	if f.has("transparent") {
 		m["transparent"] = req.Transparent
 	}
+	if f.has("data_plane") {
+		m["data_plane"] = req.DataPlane
+	}
 	if f.has("namespace") {
-		m["namespace"] = req.Namespace
+		m["namespace"] = types.String(req.Namespace)
 	}
 	if f.has("data") {
 		data := req.Data
@@ -492,95 +599,178 @@ func buildRequestNS(req celRequestInput, f fieldSet) map[string]any {
 	return m
 }
 
-// emptyStringMap is a shared, never-mutated empty map bound to token.metadata
-// when a token carries none — non-nil (so absent-key access fails closed)
+// emptyStringMap is a shared, never-mutated empty map bound to agent.metadata
+// when a principal carries none — non-nil (so absent-key access fails closed)
 // without a per-request allocation.
 var emptyStringMap = map[string]string{}
 
-// buildTokenNS builds the `token` namespace, including only the fields f marks
-// as referenced (all fields when f.all). The expensive fields (metadata copy,
-// actors/policies slices) are built only when referenced. metadata is non-nil.
-func buildTokenNS(tok celTokenInput, f fieldSet) map[string]any {
+// buildPrincipalNS builds a principal namespace, including only the fields f
+// marks as referenced (all fields when f.all). The expensive fields (metadata
+// copy, actors/policies slices) are built only when referenced. metadata is
+// non-nil.
+//
+// The token_-prefixed keys describe the token rather than the principal:
+// token_type is identity_token or service_token, a kind of token, not a kind of
+// principal.
+func buildPrincipalNS(p celPrincipalInput, f fieldSet, leg principalLeg) map[string]any {
 	m := make(map[string]any, len(f.fields))
+	if f.has("present") {
+		m["present"] = p.Present
+	}
 	if f.has("principal") {
-		m["principal"] = tok.Principal
+		m["principal"] = p.Principal
 	}
 	if f.has("role") {
-		m["role"] = tok.Role
+		m["role"] = p.Role
 	}
-	if f.has("type") {
-		m["type"] = tok.Type
+	if f.has("token_type") {
+		m["token_type"] = p.Type
 	}
 	if f.has("namespace") {
-		m["namespace"] = tok.NamespacePath
+		m["namespace"] = p.NamespacePath
 	}
 	if f.has("metadata") {
 		// Bind the string map by reference — CEL adapts it via reflection — rather
 		// than copying into a map[string]any. emptyStringMap keeps it non-nil (so
-		// has(token.metadata.x) is false and absent-key access fails closed)
+		// has(agent.metadata.x) is false and absent-key access fails closed)
 		// without allocating.
-		if tok.Metadata != nil {
-			m["metadata"] = tok.Metadata
+		//
+		// Safe only because a TokenEntry's Metadata map is never mutated: it is
+		// shared with the cached entry, or for an admission token with the
+		// membership every request of the credential reads, so a write would
+		// be a data race against concurrent evaluations.
+		if p.Metadata != nil {
+			m["metadata"] = p.Metadata
 		} else {
 			m["metadata"] = emptyStringMap
 		}
 	}
 	if f.has("actors") {
-		acts := make([]any, 0, len(tok.Actors))
-		for _, a := range tok.Actors {
-			acts = append(acts, map[string]any{
-				"subject": a.Subject,
-			})
+		acts := make([]any, 0, len(p.Actors))
+		for _, a := range p.Actors {
+			// issuer is present only when the inbound act layer carried one, as in
+			// the audit JSON: an actor with none renders exactly as it did before
+			// the key existed, so a condition's audited Inputs do not change for
+			// it. Read it behind has(a.issuer); an unguarded read of an absent key
+			// errors, which fails closed.
+			actor := map[string]any{"subject": a.Subject}
+			if a.Issuer != "" {
+				actor["issuer"] = a.Issuer
+			}
+			acts = append(acts, actor)
 		}
 		m["actors"] = acts
 	}
-	if f.has("policies") {
-		policies := make([]any, 0, len(tok.Policies))
-		for _, p := range tok.Policies {
-			policies = append(policies, p)
+	// The user principal never authorizes — CBP is evaluated against the agent's
+	// token alone — so `"admin" in user.policies` would read like an authorization
+	// check that it is not. Suppressed at the builder rather than by withholding
+	// the field from the caller's fieldSet, so a future field-set path cannot
+	// reintroduce it by forgetting. Absent means a runtime no-such-key deny, not a
+	// compile error: `user` is a dyn map.
+	if f.has("policies") && leg != legUser {
+		policies := make([]any, 0, len(p.Policies))
+		for _, pol := range p.Policies {
+			policies = append(policies, pol)
 		}
 		m["policies"] = policies
 	}
-	if f.has("ttl_seconds") {
-		m["ttl_seconds"] = tok.TTLSeconds
+	// Groups, like policies, are the agent's alone: the user leg is granted no
+	// role, so it has no groups to show. Bound by reference (CEL adapts a
+	// []string without copying) and never nil, so 'x' in agent.groups is false
+	// rather than an error when the caller has none.
+	if f.has("groups") && leg != legUser {
+		if p.Groups != nil {
+			m["groups"] = p.Groups
+		} else {
+			m["groups"] = noGroups
+		}
 	}
-	if f.has("expires_at") {
-		m["expires_at"] = tok.ExpiresAtUnix
+	// The agent's native identity and its entity of record, the agent's alone
+	// like its groups. Each is absent when there is none, so a condition
+	// reading it unguarded fails closed (no_such_key); has(agent.entity)
+	// tests for one.
+	if f.has("alias") && leg != legUser && p.Alias != "" {
+		m["alias"] = p.Alias
+	}
+	if f.has("entity") && leg != legUser && p.Entity != nil {
+		m["entity"] = celEntity(p.Entity)
+	}
+	if f.has("token_ttl_seconds") {
+		m["token_ttl_seconds"] = p.TTLSeconds
+	}
+	if f.has("token_expires_at") {
+		m["token_expires_at"] = p.ExpiresAtUnix
 	}
 	return m
+}
+
+// celEntity renders an entity of record for a condition: agent.entity.{id,
+// name, kind, state, governed_by, metadata, profile}. The metadata map is
+// bound by reference (a published entity is never written); profile lists
+// only the fields the entity sets.
+func celEntity(e *logical.Entity) map[string]any {
+	metadata := e.Metadata
+	if metadata == nil {
+		metadata = emptyStringMap
+	}
+	profile := map[string]string{}
+	if p := e.Profile; p != nil {
+		if p.Purpose != "" {
+			profile["purpose"] = p.Purpose
+		}
+		if p.Runtime != "" {
+			profile["runtime"] = p.Runtime
+		}
+		if p.Publisher != "" {
+			profile["publisher"] = p.Publisher
+		}
+	}
+	return map[string]any{
+		"id":          e.ID,
+		"name":        e.Name,
+		"kind":        e.Kind,
+		"state":       string(e.State),
+		"governed_by": e.GovernedBy(),
+		"metadata":    metadata,
+		"profile":     profile,
+	}
 }
 
 // buildBaseActivation eagerly builds the full activation map. Retained for unit
 // tests; the request path uses celActivation (lazy) to avoid building
 // namespaces an expression never references.
-func buildBaseActivation(req celRequestInput, tok celTokenInput, now time.Time) map[string]any {
+func buildBaseActivation(req celRequestInput, agt, usr celPrincipalInput, now time.Time) map[string]any {
 	return map[string]any{
 		"request": buildRequestNS(req, fieldSet{all: true}),
-		"token":   buildTokenNS(tok, fieldSet{all: true}),
+		"agent":   buildPrincipalNS(agt, fieldSet{all: true}, legAgent),
+		"user":    buildPrincipalNS(usr, fieldSet{all: true}, legUser),
 		"now":     now,
 	}
 }
 
 // celActivation is a lazy interpreter.Activation: it builds each top-level
-// namespace (request/token/call) only when the expression resolves it, so an
+// namespace (request/agent/call) only when the expression resolves it, so an
 // expression touching only one namespace doesn't allocate the others. One
 // activation is built per evaluation (never shared), so the memoization is not
 // a concurrency concern.
 type celActivation struct {
 	req        celRequestInput
 	reqFields  fieldSet
-	tok        celTokenInput
-	tokFields  fieldSet
+	agt        celPrincipalInput
+	agtFields  fieldSet
+	usr        celPrincipalInput
+	usrFields  fieldSet
 	callFields fieldSet // used when building the per-call namespace (MCP)
 	now        time.Time
 	call       map[string]any // nil for path-level conditions
 
 	reqNS map[string]any
-	tokNS map[string]any
+	agtNS map[string]any
+	usrNS map[string]any
 }
 
-func newCELActivation(req celRequestInput, reqFields fieldSet, tok celTokenInput, tokFields fieldSet, now time.Time, call map[string]any) *celActivation {
-	return &celActivation{req: req, reqFields: reqFields, tok: tok, tokFields: tokFields, now: now, call: call}
+func newCELActivation(req celRequestInput, reqFields fieldSet, agt celPrincipalInput, agtFields fieldSet, usr celPrincipalInput, usrFields fieldSet, now time.Time, call map[string]any) *celActivation {
+	return &celActivation{req: req, reqFields: reqFields, agt: agt, agtFields: agtFields, usr: usr, usrFields: usrFields, now: now, call: call}
 }
 
 func (a *celActivation) Parent() interpreter.Activation { return nil }
@@ -592,11 +782,16 @@ func (a *celActivation) ResolveName(name string) (any, bool) {
 			a.reqNS = buildRequestNS(a.req, a.reqFields)
 		}
 		return a.reqNS, true
-	case "token":
-		if a.tokNS == nil {
-			a.tokNS = buildTokenNS(a.tok, a.tokFields)
+	case "agent":
+		if a.agtNS == nil {
+			a.agtNS = buildPrincipalNS(a.agt, a.agtFields, legAgent)
 		}
-		return a.tokNS, true
+		return a.agtNS, true
+	case "user":
+		if a.usrNS == nil {
+			a.usrNS = buildPrincipalNS(a.usr, a.usrFields, legUser)
+		}
+		return a.usrNS, true
 	case "now":
 		return a.now, true
 	case "call":
@@ -610,7 +805,7 @@ func (a *celActivation) ResolveName(name string) (any, bool) {
 }
 
 // addCallToActivation layers the per-call `call` namespace onto a base
-// activation for an mcp{} condition. args are typed from ParamValue.Kind;
+// activation for an MCP Policy condition. args are typed from ParamValue.Kind;
 // non-scalar / null / missing values are omitted so absent-key access fails
 // closed. Mutates and returns base.
 func addCallToActivation(base map[string]any, method, tool string, matchArgs map[string]logical.ParamValue, batchIndex int) map[string]any {
@@ -670,22 +865,26 @@ func paramValueToCEL(pv logical.ParamValue) (any, bool) {
 // evaluate. Program is immutable and safe for concurrent Eval, so it is shared
 // (not deep-copied) when merged into a CBP.
 type compiledCondition struct {
+	// Source is the expression as audited: its control characters, a
+	// multi-line condition's newlines among them, are stripped once here so
+	// that ConditionResult.Sanitize finds none to strip on every evaluation.
 	Source  string
 	Program cel.Program
-	// RefPaths are the dotted request/token/call variable paths the expression
+	// RefPaths are the dotted request/agent/user/call variable paths the expression
 	// reads, snapshotted into the audited ConditionResult.Inputs at eval time.
 	// RefSegs is the pre-split form (compile-time) so eval avoids strings.Split.
 	RefPaths []string
 	RefSegs  [][]string
-	// ReqFields/TokFields/CallFields are the top-level namespace fields the
-	// expression reads, used to build only the referenced parts of the activation.
+	// ReqFields/AgtFields/UsrFields/CallFields are the top-level namespace fields
+	// the expression reads, used to build only the referenced parts of the activation.
 	ReqFields  fieldSet
-	TokFields  fieldSet
+	AgtFields  fieldSet
+	UsrFields  fieldSet
 	CallFields fieldSet
 }
 
 // Package-level envs, built once and reused. The base env compiles path-level
-// conditions; the MCP env (base + call.*) compiles mcp{} conditions.
+// conditions; the MCP env (base + call.*) compiles MCP policy conditions.
 var (
 	baseEnvOnce sync.Once
 	baseEnv     *cel.Env
@@ -709,7 +908,7 @@ func mcpCELEnv() (*cel.Env, error) {
 // celRequestInputFromRequest adapts a *logical.Request into the request context
 // exposed to expressions. All fields are populated before policy evaluation.
 // nsPath is the request's target namespace (namespace.FromContext at eval),
-// exposed as request.namespace — distinct from token.namespace (where the token
+// exposed as request.namespace — distinct from agent.namespace (where the token
 // was minted). It is not derivable from mount_point, which concatenates the
 // namespace prefix with the mount path.
 func celRequestInputFromRequest(req *logical.Request, nsPath string) celRequestInput {
@@ -725,24 +924,26 @@ func celRequestInputFromRequest(req *logical.Request, nsPath string) celRequestI
 		MountClass:    req.MountClass,
 		MountAccessor: req.MountAccessor,
 		Transparent:   req.Transparent,
+		DataPlane:     req.DataPlane,
 		Namespace:     nsPath,
 		Data:          req.Data,
 	}
 }
 
-// celTokenInputFromEntry adapts a *logical.TokenEntry into the non-secret token
-// context exposed to expressions. now is the once-per-request snapshot used to
-// derive the remaining TTL.
-func celTokenInputFromEntry(te *logical.TokenEntry, now time.Time) celTokenInput {
+// celPrincipalInputFromEntry adapts a *logical.TokenEntry into the non-secret
+// principal context exposed to expressions. now is the once-per-request
+// snapshot used to derive the remaining TTL.
+func celPrincipalInputFromEntry(te *logical.TokenEntry, now time.Time) celPrincipalInput {
 	if te == nil {
-		return celTokenInput{}
+		return celPrincipalInput{}
 	}
 	var ttl, expires int64
 	if !te.ExpireAt.IsZero() {
 		ttl = int64(te.ExpireAt.Sub(now).Seconds())
 		expires = te.ExpireAt.Unix()
 	}
-	return celTokenInput{
+	return celPrincipalInput{
+		Present:       true,
 		Principal:     te.PrincipalID,
 		Role:          te.RoleName,
 		Type:          te.Type,
@@ -753,6 +954,51 @@ func celTokenInputFromEntry(te *logical.TokenEntry, now time.Time) celTokenInput
 		TTLSeconds:    ttl,
 		ExpiresAtUnix: expires,
 	}
+}
+
+// celAgentInput is celPrincipalInputFromEntry for the request's agent, with
+// the groups its role grant recorded. req may be nil.
+func celAgentInput(req *logical.Request, te *logical.TokenEntry, now time.Time) celPrincipalInput {
+	// An anonymous discovery request presented no identity: its entry only
+	// carries the built-in policies it runs under, so no agent is present.
+	if req != nil && req.Discovery != nil && req.Discovery.Anonymous {
+		return celPrincipalInput{}
+	}
+	in := celPrincipalInputFromEntry(te, now)
+	if rg := req.RoleGrant(); rg != nil {
+		in.Groups = rg.Groups
+	}
+	if te != nil {
+		if te.Admission != nil {
+			in.Alias = te.Admission.AliasName
+		}
+		in.Entity = te.Entity
+	}
+	return in
+}
+
+// celUserInputFromPrincipal adapts a *logical.UserPrincipal into the non-secret
+// principal context exposed as `user`. A nil principal — or one carrying no
+// validated token entry — yields {Present: false} rather than a zero value that
+// would read as an anonymous user.
+//
+// UserPrincipal.RawToken is deliberately not read: it is a bearer secret, kept
+// off audit serialization, and must never reach an activation.
+func celUserInputFromPrincipal(up *logical.UserPrincipal, now time.Time) celPrincipalInput {
+	if up == nil {
+		return celPrincipalInput{}
+	}
+	return celPrincipalInputFromEntry(up.TokenEntry, now)
+}
+
+// celUserInputFromRequest is celUserInputFromPrincipal over a request that may
+// itself be nil — the condition evaluators tolerate a nil request (see
+// celRequestInputFromRequest), so reading req.User bare would panic there.
+func celUserInputFromRequest(req *logical.Request, now time.Time) celPrincipalInput {
+	if req == nil {
+		return celPrincipalInput{}
+	}
+	return celUserInputFromPrincipal(req.User, now)
 }
 
 // celErrorKind maps a CEL evaluation error to a coarse, sanitized category for
@@ -771,22 +1017,29 @@ func celErrorKind(err error) string {
 	}
 }
 
-// evaluatePathConditions evaluates the merged path-level conditions with OR
-// semantics: the gate passes if any condition is true. An empty list is
-// unconditional. Evaluation is fail-closed — an erroring condition denies, and
-// if no condition passes the deciding result is recorded for audit (Sanitized).
-func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) (bool, *logical.ConditionResult) {
+// evaluatePathConditions evaluates the conditions of the stanzas granting a
+// capability with OR semantics: the gate passes if any condition is true, and
+// the third result is that condition. An empty list is unconditional.
+// Evaluation is fail-closed — an erroring condition denies, and if no condition
+// passes the deciding result is recorded for audit (Sanitized).
+func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) (bool, *logical.ConditionResult, *compiledCondition) {
 	if len(conds) == 0 {
-		return true, nil
+		return true, nil, nil
 	}
 	// Build the activation pruned to the union of fields the conditions read.
 	// The common single-condition case reuses its field-sets with no allocation.
-	reqF, tokF := conds[0].ReqFields, conds[0].TokFields
+	reqF, agtF, usrF := conds[0].ReqFields, conds[0].AgtFields, conds[0].UsrFields
 	for _, c := range conds[1:] {
 		reqF = unionFieldSets(reqF, c.ReqFields)
-		tokF = unionFieldSets(tokF, c.TokFields)
+		agtF = unionFieldSets(agtF, c.AgtFields)
+		usrF = unionFieldSets(usrF, c.UsrFields)
 	}
-	act := newCELActivation(celRequestInputFromRequest(req, nsPath), reqF, celTokenInputFromEntry(te, now), tokF, now, nil)
+	usr := celUserInputFromRequest(req, now)
+	act := newCELActivation(
+		celRequestInputFromRequest(req, nsPath), reqF,
+		celAgentInput(req, te, now), agtF,
+		usr, usrF,
+		now, nil)
 
 	var deciding *logical.ConditionResult
 	for _, c := range conds {
@@ -800,14 +1053,65 @@ func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te
 		if ok {
 			res := &logical.ConditionResult{Decision: "allow", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, c.RefSegs, act)}
 			res.Sanitize()
-			return true, res
+			return true, res, c
 		}
 		if deciding == nil {
 			deciding = &logical.ConditionResult{Decision: "deny", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, c.RefSegs, act)}
 		}
 	}
+	// Set here, at the single deny return, rather than where `deciding` is
+	// built. There are two construction sites — the error branch above and the
+	// false branch — and an unguarded `user.metadata.x == …` takes the ERROR one
+	// when no user is present (metadata binds to emptyStringMap, so the access is
+	// a no_such_key), while the guarded `user.present && …` takes the false one.
+	// Setting the flag in either branch alone would hand one of the two most
+	// common policy shapes a bare 403 while the other got a challenge.
+	//
+	// Sanitize only rewrites strings, so the flag survives it either way.
+	deciding.UserAbsent = !usr.Present && conditionsReferenceUser(conds)
 	deciding.Sanitize()
-	return false, deciding
+	return false, deciding, nil
+}
+
+// evaluateDenyCondition reports whether a conditional deny fires, and the
+// result to audit when it does. A true condition fires it, and so does an
+// erroring one: the rule could not be shown not to apply. A false condition
+// leaves the request to the rest of the policy and records nothing.
+func evaluateDenyCondition(c *compiledCondition, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) (bool, *logical.ConditionResult) {
+	usr := celUserInputFromRequest(req, now)
+	act := newCELActivation(
+		celRequestInputFromRequest(req, nsPath), c.ReqFields,
+		celAgentInput(req, te, now), c.AgtFields,
+		usr, c.UsrFields,
+		now, nil)
+	ok, err := evalCELCondition(c.Program, act)
+	if err == nil && !ok {
+		return false, nil
+	}
+	res := &logical.ConditionResult{Decision: "deny", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, c.RefSegs, act)}
+	if err != nil {
+		res.ErrorKind = celErrorKind(err)
+	}
+	res.UserAbsent = !usr.Present && conditionsReferenceUser([]*compiledCondition{c})
+	res.Sanitize()
+	return true, res
+}
+
+// conditionsReferenceUser reports whether any condition reads the `user`
+// namespace. Because the gate ORs, a deny means every condition failed — so a
+// user credential can only change the outcome if at least one of them looks at
+// the user at all.
+//
+// This is a compile-time reference check, not a satisfiability one: it answers
+// "might a user matter here", never "would a user pass". See
+// ConditionResult.UserAbsent.
+func conditionsReferenceUser(conds []*compiledCondition) bool {
+	for _, c := range conds {
+		if c.UsrFields.all || len(c.UsrFields.fields) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveConditionInputs snapshots the values of the expression's referenced
@@ -830,7 +1134,7 @@ func resolveConditionInputs(refPaths []string, refSegs [][]string, act *celActiv
 			case map[string]any:
 				cur, ok = mm[s]
 			case map[string]string:
-				// token.metadata is bound as a string map (see buildTokenNS).
+				// agent.metadata is bound as a string map (see buildPrincipalNS).
 				cur, ok = mm[s]
 			default:
 				cur, ok = nil, false
@@ -851,12 +1155,14 @@ func resolveConditionInputs(refPaths []string, refSegs [][]string, act *celActiv
 }
 
 // formatCELValue renders a resolved activation value as an audit string.
-// Scalars format precisely; non-scalars (lists/maps such as token.policies /
-// token.actors) fall back to %v.
+// Scalars format precisely; non-scalars (lists/maps such as agent.policies /
+// agent.actors) fall back to %v.
 func formatCELValue(v any) string {
 	switch t := v.(type) {
 	case string:
 		return t
+	case types.String:
+		return string(t)
 	case bool:
 		return strconv.FormatBool(t)
 	case float64:

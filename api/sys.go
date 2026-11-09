@@ -34,7 +34,7 @@ type InitRequest struct {
 	// This must be less than or equal to SecretShares.
 	SecretThreshold int `json:"secret_threshold,omitempty"`
 
-	// StoredShares specifies the number of shares that should be encrypted by the HSM and stored for auto-unsealing.
+	// StoredShares specifies the number of shares that should be encrypted by the seal and stored for auto-unsealing.
 	// Currently must be the same as SecretShares. Only supported when using Auto Unseal.
 	StoredShares int `json:"stored_shares,omitempty"`
 
@@ -205,28 +205,4 @@ func (c *Sys) HealthWithContext(ctx context.Context) (*HealthResponse, error) {
 		return nil, err
 	}
 	return out, nil
-}
-
-// RevokeRootToken revokes the current root token.
-func (c *Sys) RevokeRootToken() error {
-	return c.RevokeRootTokenWithContext(context.Background())
-}
-
-// RevokeRootTokenWithContext revokes the current root token with context.
-func (c *Sys) RevokeRootTokenWithContext(ctx context.Context) error {
-	ctx, cancelFunc := c.c.withConfiguredTimeout(ctx)
-	defer cancelFunc()
-
-	r := c.c.NewRequest(http.MethodPost, "/v1/sys/revoke-root-token")
-	if err := r.SetJSONBody(map[string]any{}); err != nil {
-		return err
-	}
-
-	resp, err := c.c.rawRequestWithContext(ctx, r)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	return nil
 }

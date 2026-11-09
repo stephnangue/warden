@@ -63,7 +63,7 @@ func TestAPIKeyCredType_ValidateConfig_AWSSource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, credential.SourceTypeAWS)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), credential.SourceTypeAWS)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -155,6 +155,156 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			wantErr:    true,
 			errMsg:     "api_key",
 		},
+		// --- Sources that create the key upstream ---
+		//
+		// These carry no api_key in the spec: the driver creates a fresh key at
+		// the upstream on every mint. Their absence from the allowlist made all
+		// three drivers unreachable, since nothing else accepts their source.
+		{
+			name:       "elastic source - no api_key required",
+			config:     map[string]string{},
+			sourceType: credential.SourceTypeElastic,
+			wantErr:    false,
+		},
+		{
+			name: "elastic source - full mint config",
+			config: map[string]string{
+				"key_name":         "ingest-writer",
+				"expiration":       "30d",
+				"role_descriptors": `{"reader":{"indices":[{"names":["logs-*"],"privileges":["read"]}]}}`,
+			},
+			sourceType: credential.SourceTypeElastic,
+			wantErr:    false,
+		},
+		{
+			name:       "elastic source - empty expiration is refused",
+			config:     map[string]string{"expiration": ""},
+			sourceType: credential.SourceTypeElastic,
+			wantErr:    true,
+			errMsg:     "must not be empty",
+		},
+		{
+			name:       "elastic source - Go duration notation is refused",
+			config:     map[string]string{"expiration": "1h30m"},
+			sourceType: credential.SourceTypeElastic,
+			wantErr:    true,
+			errMsg:     "not an Elasticsearch time value",
+		},
+		{
+			name:       "elastic source - malformed role_descriptors",
+			config:     map[string]string{"role_descriptors": "{not json"},
+			sourceType: credential.SourceTypeElastic,
+			wantErr:    true,
+			errMsg:     "role_descriptors",
+		},
+		{
+			// elastic chains at the source, not the spec: the fetched key
+			// authenticates the source's own Security API calls. "not supported"
+			// would be false, so the message says where it belongs.
+			name:       "elastic source - spec-level secret_spec points at the source",
+			config:     map[string]string{credential.ConfigSecretSpec: "es-cluster-key"},
+			sourceType: credential.SourceTypeElastic,
+			wantErr:    true,
+			errMsg:     "set secret_spec on the source",
+		},
+		{
+			name:       "grafana source - no api_key required",
+			config:     map[string]string{"service_account_id": "42"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    false,
+		},
+		{
+			name: "grafana source - full mint config",
+			config: map[string]string{
+				"service_account_id": "42",
+				"token_expiry":       "30m",
+				"name_prefix":        "warden-team-a-",
+			},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    false,
+		},
+		{
+			// The sweep reclaims only names carrying the default prefix, so a
+			// prefix outside it mints tokens nothing ever removes.
+			name:       "grafana source - a name_prefix outside the swept namespace is refused",
+			config:     map[string]string{"service_account_id": "42", "name_prefix": "acme-"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "must start with",
+		},
+		{
+			// The id may come from the source instead, which this method cannot
+			// see — so presence is the store's check, shape is this one's.
+			name:       "grafana source - a silent spec is fine here",
+			config:     map[string]string{},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    false,
+		},
+		{
+			name:       "grafana source - non-numeric service_account_id",
+			config:     map[string]string{"service_account_id": "my-account"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "positive integer",
+		},
+		{
+			// Warden mints on an account the operator provisioned, and that
+			// account's role is the credential's privilege. Removing the field from
+			// the schema would only make it unrecognised — and therefore masked on
+			// read — so it is refused by name.
+			name:       "grafana source - role is refused with guidance",
+			config:     map[string]string{"service_account_id": "42", "role": "Admin"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "'role' is not settable",
+		},
+		{
+			name:       "grafana source - org_id is refused with guidance",
+			config:     map[string]string{"service_account_id": "42", "org_id": "1"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "'org_id' is not settable",
+		},
+		{
+			// GetDuration swallows a parse error and hands back the default, so an
+			// unchecked "60" mints a 1h token while the spec says otherwise.
+			name:       "grafana source - unitless token_expiry is refused",
+			config:     map[string]string{"service_account_id": "42", "token_expiry": "60"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "is not a duration",
+		},
+		{
+			// Grafana reads secondsToLive=0 as "never expires".
+			name:       "grafana source - zero token_expiry is refused",
+			config:     map[string]string{"service_account_id": "42", "token_expiry": "0s"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "must be at least 1s",
+		},
+		{
+			name:       "grafana source - sub-second token_expiry is refused",
+			config:     map[string]string{"service_account_id": "42", "token_expiry": "500ms"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "must be at least 1s",
+		},
+		{
+			name:       "grafana source - empty token_expiry is refused",
+			config:     map[string]string{"service_account_id": "42", "token_expiry": ""},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "must not be empty",
+		},
+		{
+			// grafana chains at the source, not the spec: the fetched token
+			// authenticates the source's own service-account calls.
+			name:       "grafana source - spec-level secret_spec points at the source",
+			config:     map[string]string{credential.ConfigSecretSpec: "grafana-admin-token"},
+			sourceType: credential.SourceTypeGrafana,
+			wantErr:    true,
+			errMsg:     "set secret_spec on the source",
+		},
 		// --- Unsupported source types ---
 		{
 			name: "unsupported source type - github",
@@ -163,7 +313,17 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: "github",
 			wantErr:    true,
-			errMsg:     "require an apikey, local, vault, or aws source",
+			errMsg:     "require an apikey, local, vault, aws, elastic, or grafana source",
+		},
+		{
+			// The honeycomb source driver was removed: its keys are served from a
+			// vault through an apikey source instead. A spec still naming it must be
+			// refused here rather than reaching a driver that no longer registers.
+			name:       "unsupported source type - honeycomb",
+			config:     map[string]string{"key_type": "ingest"},
+			sourceType: "honeycomb",
+			wantErr:    true,
+			errMsg:     "require an apikey, local, vault, aws, elastic, or grafana source",
 		},
 		// --- Vault source ---
 		{
@@ -259,7 +419,7 @@ func TestAPIKeyCredType_ValidateConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ct.ValidateConfig(tt.config, tt.sourceType)
+			err := ct.ValidateConfig(credential.NewConfig(tt.config), tt.sourceType)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -465,21 +625,25 @@ func TestAPIKeyCredType_SensitiveConfigFields(t *testing.T) {
 func TestAPIKeyCredType_SensitiveConfigFieldsFor(t *testing.T) {
 	ct := NewAPIKeyCredType()
 
-	fields := ct.SensitiveConfigFieldsFor(map[string]string{
+	fields := ct.SensitiveConfigFieldsFor(credential.NewConfig(map[string]string{
 		"api_key":         "sk-xxxx",
 		"application_key": "app-xxxx",
 		"organization_id": "org-1",
+		"workspace_id":    "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ",
 		"mint_method":     "static_apikey",
 		"secret_path":     "apikeys/thing",
 		"totally_unknown": "could be anything",
-	})
+	}))
 
 	// Known secrets.
 	assert.Contains(t, fields, "api_key")
 	assert.Contains(t, fields, "application_key")
 
-	// Declared adjunct: readable, because the type knows what it is.
+	// Declared adjuncts: readable, because the type knows what they are. The
+	// workspace is the one an operator most needs to read back, since it decides
+	// where a spec's spend lands.
 	assert.NotContains(t, fields, "organization_id")
+	assert.NotContains(t, fields, "workspace_id")
 
 	// Mint locators: readable, because masking where a credential comes from
 	// hides useful information and protects nothing.
@@ -488,6 +652,28 @@ func TestAPIKeyCredType_SensitiveConfigFieldsFor(t *testing.T) {
 
 	// Undeclared: the type cannot vouch for it, so it fails safe.
 	assert.Contains(t, fields, "totally_unknown")
+}
+
+// TestAPIKeyCredType_SensitiveConfigFieldsFor_AssertionProfileReadable pins why
+// assertion_profile has to be in reservedSpecConfigKeys, which is not bookkeeping:
+// an api_key spec masks every key it does not recognise, so without the reserved
+// entry an operator reading back a spec would find the profile name redacted — a
+// claim-shape selector, not a secret.
+func TestAPIKeyCredType_SensitiveConfigFieldsFor_AssertionProfileReadable(t *testing.T) {
+	ct := NewAPIKeyCredType()
+
+	fields := ct.SensitiveConfigFieldsFor(credential.NewConfig(map[string]string{
+		"api_key":                         "sk-xxxx",
+		"mint_method":                     "static_apikey",
+		credential.ConfigAssertionProfile: credential.DefaultAssertionProfileName,
+		credential.ConfigAssertionTTL:     "2m",
+	}))
+
+	assert.Contains(t, fields, "api_key", "the actual secret still masks")
+	assert.NotContains(t, fields, credential.ConfigAssertionProfile,
+		"assertion_profile is a claim-shape selector and must read back in the clear")
+	assert.NotContains(t, fields, credential.ConfigAssertionTTL,
+		"assertion_ttl is a lifetime request and must read back in the clear")
 }
 
 // TestAPIKeyCredType_SensitiveConfigFieldsFor_UnderscorePrefixIsNotTrusted pins
@@ -499,11 +685,11 @@ func TestAPIKeyCredType_SensitiveConfigFieldsFor(t *testing.T) {
 // unknown key that reads back in the clear.
 func TestAPIKeyCredType_SensitiveConfigFieldsFor_UnderscorePrefixIsNotTrusted(t *testing.T) {
 	ct := NewAPIKeyCredType()
-	fields := ct.SensitiveConfigFieldsFor(map[string]string{
+	fields := ct.SensitiveConfigFieldsFor(credential.NewConfig(map[string]string{
 		"api_key":          "sk-xxxx",
 		"__adjunct_fields": "organization_id",
 		"__anything":       "could be a secret",
-	})
+	}))
 	assert.Contains(t, fields, "__adjunct_fields")
 	assert.Contains(t, fields, "__anything")
 }
@@ -536,5 +722,64 @@ func TestAPIKeyCredType_KnownAdjunctFieldsAreDeclared(t *testing.T) {
 
 	for _, field := range ct.KnownAdjunctFields() {
 		assert.True(t, declared[field], "adjunct %q must be declared in ConfigSchema", field)
+	}
+}
+
+// A mint parameter reads back in the clear only because it is declared. Left out
+// of the schema, grafana's token_expiry was displayed to an operator as a secret.
+func TestAPIKeyCredType_SensitiveConfigFieldsFor_GrafanaMintParams(t *testing.T) {
+	ct := NewAPIKeyCredType()
+
+	fields := ct.SensitiveConfigFieldsFor(credential.NewConfig(map[string]string{
+		"service_account_id": "42",
+		"name_prefix":        "warden-team-a-",
+		"token_expiry":       "1h",
+	}))
+
+	for _, key := range []string{"service_account_id", "name_prefix", "token_expiry"} {
+		assert.NotContains(t, fields, key, "%s shapes the mint and is not a secret", key)
+	}
+}
+
+func TestValidateGrafanaTokenExpiry(t *testing.T) {
+	for _, v := range []string{"1s", "30m", "1h", "24h", "90s500ms"} {
+		t.Run("valid/"+v, func(t *testing.T) {
+			assert.NoError(t, validateGrafanaTokenExpiry(v))
+		})
+	}
+	// "" is the key present and empty, "60" is the unitless trap GetDuration would
+	// swallow, and anything under a second becomes a token Grafana never expires.
+	for _, v := range []string{"", "60", "1hour", "0s", "0", "500ms", "-1h"} {
+		t.Run("invalid/"+v, func(t *testing.T) {
+			assert.Error(t, validateGrafanaTokenExpiry(v))
+		})
+	}
+}
+
+func TestValidateGrafanaServiceAccountID(t *testing.T) {
+	for _, v := range []string{"1", "42", "999999"} {
+		assert.NoError(t, validateGrafanaServiceAccountID(v), "id %q", v)
+	}
+	for _, v := range []string{"", "0", "-1", "abc", "4.2", "../42"} {
+		assert.Error(t, validateGrafanaServiceAccountID(v), "id %q must be refused", v)
+	}
+}
+
+func TestValidateElasticTimeValue(t *testing.T) {
+	valid := []string{"1h", "24h", "30d", "90m", "45s", "500ms", "1000micros", "5nanos"}
+	for _, v := range valid {
+		t.Run("valid/"+v, func(t *testing.T) {
+			assert.NoError(t, validateElasticTimeValue(v))
+		})
+	}
+
+	// The Go-notation values are the point of having a parser of our own:
+	// time.ParseDuration accepts the last three and rejects "30d", which is the
+	// value the driver documentation leads with.
+	invalid := []string{"", "30", "d", "1.5h", "-1h", "1h30m", "30 days", "forever", "0h"}
+	for _, v := range invalid {
+		t.Run("invalid/"+v, func(t *testing.T) {
+			assert.Error(t, validateElasticTimeValue(v))
+		})
 	}
 }

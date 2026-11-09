@@ -2,9 +2,14 @@ package drivers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,142 +38,178 @@ func TestVaultDriverFactory_ValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr bool
 		errMsg  string
 	}{
 		{
-			name: "valid minimal config (no auth)",
-			config: map[string]string{
+			// Without one the client would log in with the server environment's
+			// VAULT_TOKEN, sent to whatever vault_address this config names.
+			name: "auth_method is required",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
+			}),
+			wantErr: true,
+			errMsg:  "auth_method",
+		},
+		{
+			name: "http vault_address is refused without tls_skip_verify",
+			config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+				"auth_method":   "oidc_federation",
+				"jwt_role":      "warden-agents",
+			}),
+			wantErr: true,
+			errMsg:  "https://",
+		},
+		{
+			name: "http vault_address is accepted with tls_skip_verify",
+			config: credential.NewConfig(map[string]string{
+				"vault_address":   "http://127.0.0.1:8200",
+				"tls_skip_verify": "true",
+				"auth_method":     "oidc_federation",
+				"jwt_role":        "warden-agents",
+			}),
 			wantErr: false,
 		},
 		{
+			name: "ca_data must be base64 PEM",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
+				"auth_method":   "oidc_federation",
+				"jwt_role":      "warden-agents",
+				"ca_data":       "not base64!",
+			}),
+			wantErr: true,
+			errMsg:  "ca_data",
+		},
+		{
 			name: "valid config with approle auth",
-			config: map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "approle",
 				"role_id":       "test-role-id",
 				"secret_id":     "test-secret-id",
 				"approle_mount": "warden_approle",
 				"role_name":     "test-role",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "valid config with namespace",
-			config: map[string]string{
-				"vault_address":   "http://127.0.0.1:8200",
+			config: credential.NewConfig(map[string]string{
+				"vault_address":   "https://127.0.0.1:8200",
 				"vault_namespace": "admin/team",
-			},
+				"auth_method":     "oidc_federation",
+				"jwt_role":        "warden-agents",
+			}),
 			wantErr: false,
 		},
 		{
 			name:    "missing vault_address",
-			config:  map[string]string{},
+			config:  credential.NewConfig(map[string]string{}),
 			wantErr: true,
 			errMsg:  "vault_address",
 		},
 		{
 			name: "unsupported auth_method",
-			config: map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "userpass",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "must be one of",
 		},
 		{
 			name: "approle missing role_id",
-			config: map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "approle",
 				"secret_id":     "test-secret-id",
 				"approle_mount": "warden_approle",
 				"role_name":     "test-role",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "role_id",
 		},
 		{
 			name: "approle missing secret_id",
-			config: map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "approle",
 				"role_id":       "test-role-id",
 				"approle_mount": "warden_approle",
 				"role_name":     "test-role",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "secret_id",
 		},
 		{
 			name: "approle missing approle_mount",
-			config: map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "approle",
 				"role_id":       "test-role-id",
 				"secret_id":     "test-secret-id",
 				"role_name":     "test-role",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "approle_mount",
 		},
 		{
 			name: "approle missing role_name",
-			config: map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "approle",
 				"role_id":       "test-role-id",
 				"secret_id":     "test-secret-id",
 				"approle_mount": "warden_approle",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "role_name",
 		},
 		{
 			name: "valid oidc_federation config",
-			config: map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "oidc_federation",
 				"jwt_role":      "warden-agents",
 				"jwt_mount":     "jwt",
 				"audience":      "https://vault.example.com/warden",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "oidc_federation missing jwt_role",
-			config: map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "oidc_federation",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "jwt_role",
 		},
 		{
 			name: "oidc_federation rejects approle secret_id",
-			config: map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "oidc_federation",
 				"jwt_role":      "warden-agents",
 				"secret_id":     "leftover",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "must not be set for auth_method=oidc_federation",
 		},
 		{
 			name: "approle rejects federation jwt_role",
-			config: map[string]string{
-				"vault_address": "http://127.0.0.1:8200",
+			config: credential.NewConfig(map[string]string{
+				"vault_address": "https://127.0.0.1:8200",
 				"auth_method":   "approle",
 				"role_id":       "test-role-id",
 				"secret_id":     "test-secret-id",
 				"approle_mount": "warden_approle",
 				"role_name":     "test-role",
 				"jwt_role":      "warden-agents",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "only valid for auth_method=oidc_federation",
 		},
@@ -191,7 +232,7 @@ func TestVaultDriver_Type(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeVault,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.Equal(t, credential.SourceTypeVault, driver.Type())
@@ -201,7 +242,7 @@ func TestVaultDriver_Cleanup(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeVault,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	err := driver.Cleanup(context.TODO())
@@ -212,7 +253,7 @@ func TestVaultDriver_Revoke_EmptyLeaseID(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeVault,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	// Empty lease ID should be a no-op
@@ -223,41 +264,41 @@ func TestVaultDriver_Revoke_EmptyLeaseID(t *testing.T) {
 func TestVaultDriver_SupportsRotation(t *testing.T) {
 	tests := []struct {
 		name       string
-		config     map[string]string
+		config     credential.Config
 		wantResult bool
 	}{
 		{
 			name: "approle with role_name supports rotation",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"auth_method": "approle",
 				"role_name":   "test-role",
-			},
+			}),
 			wantResult: true,
 		},
 		{
 			name: "approle without role_name does not support rotation",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"auth_method": "approle",
-			},
+			}),
 			wantResult: false,
 		},
 		{
 			name: "no auth_method does not support rotation",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 			wantResult: false,
 		},
 		{
 			name:       "empty config does not support rotation",
-			config:     map[string]string{},
+			config:     credential.NewConfig(map[string]string{}),
 			wantResult: false,
 		},
 		{
 			name: "token auth does not support rotation",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"auth_method": "token",
-			},
+			}),
 			wantResult: false,
 		},
 	}
@@ -301,9 +342,9 @@ func TestVaultDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -311,7 +352,7 @@ func TestVaultDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:   "test-spec",
 		Type:   credential.TypeAWSAccessKeys,
-		Config: map[string]string{},
+		Config: credential.NewConfig(map[string]string{}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
@@ -321,9 +362,9 @@ func TestVaultDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	spec2 := &credential.CredSpec{
 		Name: "test-spec",
 		Type: credential.TypeAWSAccessKeys,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "invalid",
-		},
+		}),
 	}
 	_, _, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
@@ -334,9 +375,9 @@ func TestVaultDriver_MintCredential_StaticRouting(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -344,9 +385,9 @@ func TestVaultDriver_MintCredential_StaticRouting(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-static-aws",
 		Type: credential.TypeAWSAccessKeys,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "static_aws",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
@@ -356,9 +397,9 @@ func TestVaultDriver_MintCredential_StaticRouting(t *testing.T) {
 	spec2 := &credential.CredSpec{
 		Name: "test-static-apikey",
 		Type: credential.TypeAPIKey,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "static_apikey",
-		},
+		}),
 	}
 	_, _, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
@@ -369,9 +410,9 @@ func TestVaultDriver_MintCredential_AWSRouting(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -379,9 +420,9 @@ func TestVaultDriver_MintCredential_AWSRouting(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-aws",
 		Type: credential.TypeAWSAccessKeys,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "static_aws",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
@@ -391,10 +432,10 @@ func TestVaultDriver_MintCredential_AWSRouting(t *testing.T) {
 	spec2 := &credential.CredSpec{
 		Name: "test-aws-dynamic",
 		Type: credential.TypeAWSAccessKeys,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "dynamic_aws",
 			"aws_mount":   "aws",
-		},
+		}),
 	}
 	_, _, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
@@ -405,9 +446,9 @@ func TestVaultDriver_MintCredential_VaultTokenRouting(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -415,9 +456,9 @@ func TestVaultDriver_MintCredential_VaultTokenRouting(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-token",
 		Type: credential.TypeVaultToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "vault_token",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
@@ -459,16 +500,16 @@ func TestVaultDriver_FetchDynamicVaultToken_Metadata(t *testing.T) {
 				vault: client,
 				credSource: &credential.CredSource{
 					Type:   credential.SourceTypeVault,
-					Config: map[string]string{"vault_address": srv.URL},
+					Config: credential.NewConfig(map[string]string{"vault_address": srv.URL}),
 				},
 			}
 			spec := &credential.CredSpec{
 				Name: "test-token",
 				Type: credential.TypeVaultToken,
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"mint_method": "vault_token",
 					"token_role":  "ci-deployer",
-				},
+				}),
 			}
 
 			rawData, metadata, _, leaseID, err := driver.fetchDynamicVaultToken(context.TODO(), client, spec)
@@ -497,9 +538,9 @@ func TestVaultDriver_MintCredential_DynamicGCPRouting(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -507,9 +548,9 @@ func TestVaultDriver_MintCredential_DynamicGCPRouting(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-gcp",
 		Type: credential.TypeGCPAccessToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "dynamic_gcp",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
@@ -519,12 +560,12 @@ func TestVaultDriver_MintCredential_DynamicGCPRouting(t *testing.T) {
 	spec2 := &credential.CredSpec{
 		Name: "test-gcp-bad-type",
 		Type: credential.TypeGCPAccessToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "dynamic_gcp",
 			"gcp_mount":   "gcp",
 			"role_name":   "my-role",
 			"role_type":   "invalid",
-		},
+		}),
 	}
 	_, _, _, _, err = driver.MintCredential(context.TODO(), spec2)
 	require.Error(t, err)
@@ -535,9 +576,9 @@ func TestVaultDriver_MintCredential_DynamicIBMRouting(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -545,9 +586,9 @@ func TestVaultDriver_MintCredential_DynamicIBMRouting(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-ibm",
 		Type: credential.TypeIBMCloudKeys,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "dynamic_ibm",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
@@ -558,9 +599,9 @@ func TestVaultDriver_MintCredential_OAuth2Routing(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -568,9 +609,9 @@ func TestVaultDriver_MintCredential_OAuth2Routing(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-oauth2",
 		Type: credential.TypeOAuthBearerToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "oauth2",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
@@ -600,7 +641,7 @@ func TestVaultDriverFactory_InferCredentialType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			credType, err := factory.InferCredentialType(map[string]string{"mint_method": tt.mintMethod})
+			credType, err := factory.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": tt.mintMethod}))
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
@@ -615,21 +656,21 @@ func TestVaultDriver_FetchDynamicAWSCreds_InvalidTTL(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
 	spec := &credential.CredSpec{
 		Name: "test-aws-bad-ttl",
 		Type: credential.TypeAWSAccessKeys,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "dynamic_aws",
 			"aws_mount":   "aws",
 			"role_name":   "test-role",
 			"ttl":         "not-a-duration",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
@@ -640,20 +681,20 @@ func TestVaultDriver_FetchDynamicVaultToken_InvalidTTL(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
 	spec := &credential.CredSpec{
 		Name: "test-token-bad-ttl",
 		Type: credential.TypeVaultToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "vault_token",
 			"token_role":  "test-role",
 			"ttl":         "bad",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
@@ -664,9 +705,9 @@ func TestVaultDriver_Authenticate_UnsupportedMethod(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"auth_method": "userpass",
-			},
+			}),
 		},
 	}
 
@@ -679,9 +720,9 @@ func TestVaultDriver_Authenticate_NoMethod(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -694,9 +735,9 @@ func TestVaultDriver_PrepareRotation_NonApprole(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -709,10 +750,10 @@ func TestVaultDriver_PrepareRotation_MissingRoleName(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
 				"auth_method":   "approle",
-			},
+			}),
 		},
 	}
 
@@ -721,13 +762,50 @@ func TestVaultDriver_PrepareRotation_MissingRoleName(t *testing.T) {
 	assert.Contains(t, err.Error(), "role_name is required")
 }
 
+// A 5xx can follow a secret_id already generated, and the client's own retries
+// would replay it into a second one that nothing tracks. It is sent once, and the
+// error names the role whose accessors to check.
+func TestVaultDriver_PrepareRotation_SecretIDGenerationIsNotRetried(t *testing.T) {
+	var generations atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/login"):
+			_, _ = w.Write([]byte(`{"auth":{"client_token":"s.source","accessor":"acc","lease_duration":3600}}`))
+		case strings.HasSuffix(r.URL.Path, "/secret-id"):
+			generations.Add(1)
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"errors":["upstream connect error"]}`))
+		default:
+			_, _ = w.Write([]byte(`{"data":{"token_ttl":3600}}`))
+		}
+	}))
+	defer srv.Close()
+
+	raw, err := (&VaultDriverFactory{}).Create(credential.NewConfig(map[string]string{
+		"vault_address":   srv.URL,
+		"tls_skip_verify": "true",
+		"auth_method":     "approle",
+		"role_id":         "role-id",
+		"secret_id":       "secret-id",
+		"approle_mount":   "approle",
+		"role_name":       "warden-source-role",
+	}), testGatedLogger())
+	require.NoError(t, err)
+
+	_, _, _, err = raw.(*VaultDriver).PrepareRotation(context.TODO())
+	require.Error(t, err)
+	assert.EqualValues(t, 1, generations.Load(), "the secret_id generation was replayed")
+	assert.Contains(t, err.Error(), `may still have been generated on role "warden-source-role"`)
+}
+
 func TestVaultDriver_CleanupRotation_EmptyAccessor(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -746,9 +824,9 @@ func TestVaultDriver_FetchDynamicAWSCreds_TTLBelowMinimum(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -756,12 +834,12 @@ func TestVaultDriver_FetchDynamicAWSCreds_TTLBelowMinimum(t *testing.T) {
 		Name:   "test-aws-min-ttl",
 		Type:   credential.TypeAWSAccessKeys,
 		MinTTL: 2 * time.Hour,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "dynamic_aws",
 			"aws_mount":   "aws",
 			"role_name":   "test-role",
 			"ttl":         "30m", // Below MinTTL of 2h
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
@@ -773,9 +851,9 @@ func TestVaultDriver_FetchDynamicAWSCreds_TTLExceedsMaximum(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -783,12 +861,12 @@ func TestVaultDriver_FetchDynamicAWSCreds_TTLExceedsMaximum(t *testing.T) {
 		Name:   "test-aws-max-ttl",
 		Type:   credential.TypeAWSAccessKeys,
 		MaxTTL: 1 * time.Hour,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "dynamic_aws",
 			"aws_mount":   "aws",
 			"role_name":   "test-role",
 			"ttl":         "4h", // Above MaxTTL of 1h
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
@@ -800,9 +878,9 @@ func TestVaultDriver_FetchDynamicVaultToken_TTLBelowMinimum(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -810,11 +888,11 @@ func TestVaultDriver_FetchDynamicVaultToken_TTLBelowMinimum(t *testing.T) {
 		Name:   "test-token-min-ttl",
 		Type:   credential.TypeVaultToken,
 		MinTTL: 2 * time.Hour,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "vault_token",
 			"token_role":  "test-role",
 			"ttl":         "30m", // Below MinTTL of 2h
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
@@ -826,9 +904,9 @@ func TestVaultDriver_FetchDynamicVaultToken_TTLExceedsMaximum(t *testing.T) {
 	driver := &VaultDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": "http://127.0.0.1:8200",
-			},
+			}),
 		},
 	}
 
@@ -836,11 +914,11 @@ func TestVaultDriver_FetchDynamicVaultToken_TTLExceedsMaximum(t *testing.T) {
 		Name:   "test-token-max-ttl",
 		Type:   credential.TypeVaultToken,
 		MaxTTL: 1 * time.Hour,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "vault_token",
 			"token_role":  "test-role",
 			"ttl":         "4h", // Above MaxTTL of 1h
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.TODO(), spec)
@@ -858,13 +936,13 @@ func federationDriver(t *testing.T, srvURL string) *VaultDriver {
 		vault: client,
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"vault_address": srvURL,
 				"auth_method":   "oidc_federation",
 				"jwt_role":      "warden-agents",
 				"jwt_mount":     "jwt",
 				"audience":      "https://vault.example.com/warden",
-			},
+			}),
 		},
 	}
 }
@@ -877,12 +955,12 @@ func verifiedInputs() *credential.ExchangeInputs {
 }
 
 func TestVaultDriver_MintCredentialWithExchange_Guards(t *testing.T) {
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "vault_token"}}
+	spec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": "vault_token"})}
 
 	// Non-federation source rejects the exchange path.
 	static := &VaultDriver{credSource: &credential.CredSource{
 		Type:   credential.SourceTypeVault,
-		Config: map[string]string{"auth_method": "approle"},
+		Config: credential.NewConfig(map[string]string{"auth_method": "approle"}),
 	}}
 	_, _, _, _, err := static.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
 	require.Error(t, err)
@@ -890,7 +968,7 @@ func TestVaultDriver_MintCredentialWithExchange_Guards(t *testing.T) {
 
 	fed := &VaultDriver{credSource: &credential.CredSource{
 		Type:   credential.SourceTypeVault,
-		Config: map[string]string{"auth_method": "oidc_federation", "jwt_role": "warden-agents"},
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "jwt_role": "warden-agents"}),
 	}}
 
 	// Empty subject token.
@@ -928,7 +1006,7 @@ func TestVaultDriver_MintCredentialWithExchange_VaultToken(t *testing.T) {
 	defer srv.Close()
 
 	driver := federationDriver(t, srv.URL)
-	spec := &credential.CredSpec{Name: "vault-session", Config: map[string]string{"mint_method": "vault_token"}}
+	spec := &credential.CredSpec{Name: "vault-session", Config: credential.NewConfig(map[string]string{"mint_method": "vault_token"})}
 
 	rawData, metadata, ttl, leaseID, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
 	require.NoError(t, err)
@@ -983,11 +1061,11 @@ func TestVaultDriver_MintCredentialWithExchange_DynamicAWS_CapsTTLAndEmptyLease(
 	driver := federationDriver(t, srv.URL)
 	spec := &credential.CredSpec{
 		Name: "aws-dynamic",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "dynamic_aws",
 			"aws_mount":   "aws",
 			"role_name":   "dev-role",
-		},
+		}),
 	}
 
 	rawData, _, ttl, leaseID, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
@@ -1031,11 +1109,11 @@ func TestVaultDriver_MintCredentialWithExchange_StaticKV_EmptyLease(t *testing.T
 	driver := federationDriver(t, srv.URL)
 	spec := &credential.CredSpec{
 		Name: "kv-static",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "static_aws",
 			"kv2_mount":   "secret",
 			"secret_path": "prod/aws",
-		},
+		}),
 	}
 
 	rawData, _, ttl, leaseID, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
@@ -1078,11 +1156,11 @@ func TestVaultDriver_MintCredentialWithExchange_StaticKV_BatchTokenSkipsRevoke(t
 	driver := federationDriver(t, srv.URL)
 	spec := &credential.CredSpec{
 		Name: "kv-static",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "static_aws",
 			"kv2_mount":   "secret",
 			"secret_path": "prod/aws",
-		},
+		}),
 	}
 
 	rawData, _, _, leaseID, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
@@ -1098,13 +1176,13 @@ func TestVaultDriver_MintCredentialWithExchange_MissingJWTRole(t *testing.T) {
 		vault: func() *api.Client { c, _ := api.NewClient(&api.Config{Address: "http://127.0.0.1:8200"}); return c }(),
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeVault,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"auth_method": "oidc_federation",
 				// jwt_role deliberately omitted
-			},
+			}),
 		},
 	}
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "vault_token"}}
+	spec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": "vault_token"})}
 	_, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "jwt_role is required")
@@ -1124,62 +1202,12 @@ func TestVaultDriver_MintCredentialWithExchange_UnsupportedMintMethod(t *testing
 	defer srv.Close()
 
 	driver := federationDriver(t, srv.URL)
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"mint_method": "not_a_method"}}
+	spec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": "not_a_method"})}
 	_, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not supported over auth_method=oidc_federation")
 }
 
-// TestResolveSecretPath covers per-user secret_path templating and its fail-closed
-// sanitization (the security boundary that keeps one user from reading another's
-// secret or escaping the intended path).
-func TestResolveSecretPath(t *testing.T) {
-	claims := map[string]string{"username": "alice", "email": "alice@example.com", "dept": "eng-team"}
-	tests := []struct {
-		name    string
-		path    string
-		claims  map[string]string
-		want    string
-		wantErr string
-	}{
-		{"no template returned verbatim", "slack/refresh_token", claims, "slack/refresh_token", ""},
-		{"no template needs no claims", "slack/refresh_token", nil, "slack/refresh_token", ""},
-		{"single substitution", "slack/{{user.username}}/refresh_token", claims, "slack/alice/refresh_token", ""},
-		{"multiple tokens resolved", "{{user.username}}/{{user.dept}}", claims, "alice/eng-team", ""},
-		{"email value allowed", "kv/{{user.email}}", claims, "kv/alice@example.com", ""},
-		{"hyphen value allowed", "kv/{{user.dept}}", claims, "kv/eng-team", ""},
-		{"literal dots within a segment allowed", "kv/{{user.username}}", map[string]string{"username": "a..b"}, "kv/a..b", ""},
-		// Both are spec/config mismatches, not missing-user cases: claims are
-		// projected only when the spec asks for them, and core rejects a
-		// user-less request before the driver runs. Neither is fixed by
-		// authenticating, so neither may carry a 401 challenge.
-		{"absent claim fails closed", "slack/{{user.missing}}/x", claims, "", "absent"},
-		{"nil claims with template fails closed", "slack/{{user.username}}/x", nil, "", "absent"},
-		{"slash in value rejected", "kv/{{user.username}}", map[string]string{"username": "a/b"}, "", "allow-list"},
-		{"curly brace in value rejected", "kv/{{user.username}}", map[string]string{"username": "a{b"}, "", "allow-list"},
-		{"empty value rejected", "kv/{{user.username}}", map[string]string{"username": ""}, "", "allow-list"},
-		// The security boundary: values that compose a "." or ".." segment which the
-		// Vault client's path.Clean would resolve into a shared/parent path.
-		{"dot value collapses a segment", "slack/{{user.username}}/rt", map[string]string{"username": "."}, "", "traversal"},
-		{"dotdot value traverses", "slack/{{user.username}}/rt", map[string]string{"username": ".."}, "", "traversal"},
-		{"adjacent tokens compose dotdot", "slack/{{user.a}}{{user.b}}/rt", map[string]string{"a": ".", "b": "."}, "", "traversal"},
-		{"unresolved fragment fails closed", "slack/{{user.username}/rt", map[string]string{"username": "alice"}, "", "unresolved"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveSecretPath(tt.path, tt.claims)
-			if tt.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
-// TestVaultDriver_OAuth2_PerUserCredentialName proves the oauth2 mint method templates
 // credential_name from the caller's projected claims — one spec, per-user OpenBao OAuth
 // engine credentials (scoped by a templated policy on oauth2/creds/<sub>).
 func TestVaultDriver_OAuth2_PerUserCredentialName(t *testing.T) {
@@ -1202,9 +1230,9 @@ func TestVaultDriver_OAuth2_PerUserCredentialName(t *testing.T) {
 	defer srv.Close()
 
 	driver := federationDriver(t, srv.URL)
-	spec := &credential.CredSpec{Name: "gh-oauth", Config: map[string]string{
+	spec := &credential.CredSpec{Name: "gh-oauth", Config: credential.NewConfig(map[string]string{
 		"mint_method": "oauth2", "oauth2_mount": "oauth2", "credential_name": "{{user.sub}}",
-	}}
+	})}
 	inputs := &credential.ExchangeInputs{
 		SubjectToken:     "eyJhbGciOiJSUzI1NiJ9.assertion.sig",
 		SubjectTokenType: credential.TokenTypeJWT,
@@ -1220,11 +1248,11 @@ func TestVaultDriver_OAuth2_PerUserCredentialName(t *testing.T) {
 
 // A templated credential_name on the non-federation path (no user claims) fails closed.
 func TestVaultDriver_OAuth2_TemplatedNameFailsClosedWithoutClaims(t *testing.T) {
-	driver := &VaultDriver{credSource: &credential.CredSource{Type: credential.SourceTypeVault, Config: map[string]string{}}}
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{
+	driver := &VaultDriver{credSource: &credential.CredSource{Type: credential.SourceTypeVault, Config: credential.NewConfig(map[string]string{})}}
+	spec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{
 		"mint_method": "oauth2", "oauth2_mount": "oauth2", "credential_name": "{{user.sub}}",
-	}}
-	_, _, _, _, err := driver.fetchOAuth2Creds(context.TODO(), nil, spec, nil)
+	})}
+	_, _, _, _, err := driver.fetchOAuth2Creds(context.TODO(), nil, spec, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential_name")
 	assert.Contains(t, err.Error(), "absent")
@@ -1232,4 +1260,358 @@ func TestVaultDriver_OAuth2_TemplatedNameFailsClosedWithoutClaims(t *testing.T) 
 	// the missing-user sentinel here would turn it into a 401 challenge and send
 	// the caller into an OAuth loop that cannot fix a spec.
 	assert.NotErrorIs(t, err, credential.ErrUserRequired)
+}
+
+// staticKVServer serves one multi-key secret, recording the version query the driver
+// sent so a pinned read can be told apart from a current-revision one.
+func staticKVServer(t *testing.T, gotVersion *string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/jwt/login":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"auth": map[string]interface{}{"client_token": "hvs.childtoken", "accessor": "acc-123", "lease_duration": 900},
+			})
+		case "/v1/secret/data/team/shared":
+			*gotVersion = r.URL.Query().Get("version")
+			if *gotVersion == "99" {
+				// A destroyed or never-written revision comes back as a 404 with
+				// no body, which the client surfaces as "secret not found".
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"errors": []string{}})
+				return
+			}
+			if *gotVersion == "42" {
+				// A soft-deleted revision answers 200 with its metadata and a null
+				// data block, so the read succeeds and carries nothing.
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"data": map[string]interface{}{
+						"data": nil,
+						"metadata": map[string]interface{}{
+							"version":       42,
+							"deletion_time": "2026-01-02T03:04:05Z",
+						},
+					},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"data": map[string]interface{}{
+						"token":       "sk-abc123",
+						"accessKeyId": "AKIA123",
+						"admin_token": "root-secret",
+					},
+					"metadata": map[string]interface{}{"version": 1},
+				},
+			})
+		case "/v1/auth/token/revoke-self":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+}
+
+// A static KV read projects through json_key_map: the spec selects which of the
+// stored secret's fields it vends and renames them to what the credential type
+// expects. Fields the spec does not name are not vended at all. The same body backs
+// static_aws, static_apikey and kv2_read, so all three are covered here.
+func TestVaultDriver_StaticKVSecret_JSONKeyMap(t *testing.T) {
+	tests := []struct {
+		name       string
+		mintMethod string
+		keyMap     string
+		expected   map[string]interface{}
+	}{
+		{
+			name:       "kv2_read selects one field out of a shared path",
+			mintMethod: "kv2_read",
+			keyMap:     "token=slack_token",
+			expected:   map[string]interface{}{"slack_token": "sk-abc123"},
+		},
+		{
+			name:       "static_apikey renames into the type's primary field",
+			mintMethod: "static_apikey",
+			keyMap:     "token=api_key",
+			expected:   map[string]interface{}{"api_key": "sk-abc123"},
+		},
+		{
+			name:       "static_aws renames into the type's fields",
+			mintMethod: "static_aws",
+			keyMap:     "accessKeyId=access_key_id,token=secret_access_key",
+			expected:   map[string]interface{}{"access_key_id": "AKIA123", "secret_access_key": "sk-abc123"},
+		},
+		{
+			name:       "no selection vends the stored payload verbatim",
+			mintMethod: "kv2_read",
+			keyMap:     "",
+			expected: map[string]interface{}{
+				"token":       "sk-abc123",
+				"accessKeyId": "AKIA123",
+				"admin_token": "root-secret",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotVersion string
+			srv := staticKVServer(t, &gotVersion)
+			defer srv.Close()
+
+			driver := federationDriver(t, srv.URL)
+			spec := &credential.CredSpec{
+				Name: "kv-mapped",
+				Config: credential.NewConfig(map[string]string{
+					"mint_method":  tt.mintMethod,
+					"kv2_mount":    "secret",
+					"secret_path":  "team/shared",
+					"json_key_map": tt.keyMap,
+				}),
+			}
+
+			rawData, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, rawData)
+			// Unpinned specs read the current revision.
+			assert.Empty(t, gotVersion)
+		})
+	}
+}
+
+// A spec may pin a numbered revision of the stored secret; without one it reads the
+// current revision.
+func TestVaultDriver_StaticKVSecret_Version(t *testing.T) {
+	t.Run("pinned revision is requested", func(t *testing.T) {
+		var gotVersion string
+		srv := staticKVServer(t, &gotVersion)
+		defer srv.Close()
+
+		driver := federationDriver(t, srv.URL)
+		spec := &credential.CredSpec{
+			Name: "kv-pinned",
+			Config: credential.NewConfig(map[string]string{
+				"mint_method":    "kv2_read",
+				"kv2_mount":      "secret",
+				"secret_path":    "team/shared",
+				"secret_version": "3",
+			}),
+		}
+
+		rawData, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+		require.NoError(t, err)
+		assert.Equal(t, "3", gotVersion)
+		assert.Equal(t, "sk-abc123", rawData["token"])
+	})
+
+	t.Run("a missing revision surfaces the error", func(t *testing.T) {
+		var gotVersion string
+		srv := staticKVServer(t, &gotVersion)
+		defer srv.Close()
+
+		driver := federationDriver(t, srv.URL)
+		spec := &credential.CredSpec{
+			Name: "kv-pinned",
+			Config: credential.NewConfig(map[string]string{
+				"mint_method":    "kv2_read",
+				"kv2_mount":      "secret",
+				"secret_path":    "team/shared",
+				"secret_version": "99",
+			}),
+		}
+
+		_, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "version 99")
+	})
+
+	// A soft-deleted revision reads back successfully with no data, so the failure
+	// has to name the revision — the path it was read from is fine, and pointing at
+	// the path sends the operator looking in the wrong place.
+	t.Run("a soft-deleted revision names the revision, not the path", func(t *testing.T) {
+		var gotVersion string
+		srv := staticKVServer(t, &gotVersion)
+		defer srv.Close()
+
+		driver := federationDriver(t, srv.URL)
+		spec := &credential.CredSpec{
+			Name: "kv-pinned",
+			Config: credential.NewConfig(map[string]string{
+				"mint_method":    "kv2_read",
+				"kv2_mount":      "secret",
+				"secret_path":    "team/shared",
+				"secret_version": "42",
+			}),
+		}
+
+		_, _, _, _, err := driver.MintCredentialWithExchange(context.TODO(), spec, verifiedInputs())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "version 42")
+		assert.Contains(t, err.Error(), "deleted")
+	})
+}
+
+// vaultEnvRecorder is a Vault stand-in that records the headers of the last request
+// and answers a JWT login and any read.
+type vaultEnvRecorder struct {
+	mu   sync.Mutex
+	last http.Header
+}
+
+func (v *vaultEnvRecorder) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v.mu.Lock()
+		v.last = r.Header.Clone()
+		v.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/login") {
+			_, _ = w.Write([]byte(`{"auth":{"client_token":"s.login","accessor":"acc","lease_duration":60}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
+	})
+}
+
+func (v *vaultEnvRecorder) lastHeader() http.Header {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.last
+}
+
+// setVaultEnvironment fills every VAULT_* variable that could steer, widen or
+// authenticate a client built from the process environment.
+func setVaultEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("VAULT_TOKEN", "hvs.server-token")
+	t.Setenv("VAULT_NAMESPACE", "tenant-from-the-environment")
+	t.Setenv("VAULT_HEADERS", `{"X-Leak":"from-the-environment"}`)
+	t.Setenv("VAULT_AGENT_ADDR", "http://127.0.0.1:1")
+	t.Setenv("VAULT_WRAP_TTL", "5m")
+	t.Setenv("VAULT_SKIP_VERIFY", "true")
+}
+
+func caDataFor(srv *httptest.Server) string {
+	return base64.StdEncoding.EncodeToString(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}))
+}
+
+// A source's Vault client is built from the source's config alone. The server
+// process's VAULT_* environment would otherwise send the server's own token, and its
+// headers and namespace, to the vault_address the source's author chose, steer the
+// request to an agent address, wrap the response, and switch TLS verification off.
+func TestNewVaultAPIClient_IgnoresTheServerEnvironment(t *testing.T) {
+	setVaultEnvironment(t)
+	rec := &vaultEnvRecorder{}
+	srv := httptest.NewTLSServer(rec.handler())
+	t.Cleanup(srv.Close)
+
+	federated := func(extra map[string]string) credential.Config {
+		m := map[string]string{
+			"vault_address": srv.URL,
+			"auth_method":   vaultAuthMethodOIDCFederation,
+			"jwt_role":      "agents",
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return credential.NewConfig(m)
+	}
+
+	t.Run("VAULT_SKIP_VERIFY does not switch verification off", func(t *testing.T) {
+		client, err := newVaultAPIClient(federated(nil))
+		require.NoError(t, err)
+		_, err = client.Logical().ReadWithContext(context.Background(), "secret/x")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "certificate")
+	})
+
+	t.Run("ca_data is honoured and nothing from the environment is sent", func(t *testing.T) {
+		client, err := newVaultAPIClient(federated(map[string]string{"ca_data": caDataFor(srv)}))
+		require.NoError(t, err)
+		_, err = client.Logical().ReadWithContext(context.Background(), "secret/x")
+		require.NoError(t, err, "the request must reach vault_address, not VAULT_AGENT_ADDR")
+
+		got := rec.lastHeader()
+		assert.Empty(t, got.Get("X-Vault-Token"), "the server's VAULT_TOKEN left the process")
+		assert.Empty(t, got.Get("X-Vault-Namespace"))
+		assert.Empty(t, got.Get("X-Leak"))
+		assert.Empty(t, got.Get("X-Vault-Wrap-TTL"))
+		assert.Equal(t, "true", got.Get(api.RequestHeaderName))
+	})
+
+	t.Run("vault_namespace still applies", func(t *testing.T) {
+		client, err := newVaultAPIClient(federated(map[string]string{"ca_data": caDataFor(srv), "vault_namespace": "team"}))
+		require.NoError(t, err)
+		_, err = client.Logical().ReadWithContext(context.Background(), "secret/x")
+		require.NoError(t, err)
+		assert.Equal(t, "team", rec.lastHeader().Get("X-Vault-Namespace"))
+	})
+
+	t.Run("the per-request JWT login clone stays isolated", func(t *testing.T) {
+		raw, err := (&VaultDriverFactory{}).Create(federated(map[string]string{"ca_data": caDataFor(srv)}), testGatedLogger())
+		require.NoError(t, err)
+		d := raw.(*VaultDriver)
+		_, _, err = d.loginViaJWT(context.Background(), &credential.CredSpec{Config: credential.NewConfig(nil)}, "assertion")
+		require.NoError(t, err)
+
+		got := rec.lastHeader()
+		assert.Empty(t, got.Get("X-Vault-Token"))
+		assert.Empty(t, got.Get("X-Vault-Wrap-TTL"), "a clone does not inherit the pinned wrapping lookup")
+		assert.Empty(t, got.Get("X-Leak"))
+	})
+}
+
+// A source stored before auth_method became required has no credential but the
+// environment's token, so it keeps the environment-derived client and keeps minting.
+// Writes refuse such a source, so no new one can point that token anywhere.
+func TestNewVaultAPIClient_LegacySourceKeepsTheEnvironmentToken(t *testing.T) {
+	t.Setenv("VAULT_TOKEN", "hvs.server-token")
+	rec := &vaultEnvRecorder{}
+	srv := httptest.NewServer(rec.handler())
+	t.Cleanup(srv.Close)
+
+	client, err := newVaultAPIClient(credential.NewConfig(map[string]string{"vault_address": srv.URL}))
+	require.NoError(t, err)
+	_, err = client.Logical().ReadWithContext(context.Background(), "secret/x")
+	require.NoError(t, err)
+	assert.Equal(t, "hvs.server-token", rec.lastHeader().Get("X-Vault-Token"))
+}
+
+// Revoking the accessor of a token already expired or revoked answers 400 "token
+// not found"; that is the lease being gone. Any other refusal is a real failure.
+func TestIsTokenGone(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		errs   []string
+		want   bool
+	}{
+		{"token not found", http.StatusBadRequest, []string{"token not found"}, true},
+		{"another bad request", http.StatusBadRequest, []string{"missing accessor"}, false},
+		{"permission denied", http.StatusForbidden, []string{"permission denied"}, false},
+		{"server error", http.StatusInternalServerError, []string{"token not found"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/v1/auth/token/revoke-accessor", r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"errors": tc.errs})
+			}))
+			t.Cleanup(srv.Close)
+
+			cfg := api.DefaultConfig()
+			cfg.Address = srv.URL
+			cfg.MaxRetries = 0
+			client, err := api.NewClient(cfg)
+			require.NoError(t, err)
+			client.SetToken("hvs.test")
+
+			err = client.Auth().Token().RevokeAccessorWithContext(context.Background(), "acc-123")
+			require.Error(t, err)
+			assert.Equal(t, tc.want, isTokenGone(err))
+		})
+	}
+	assert.False(t, isTokenGone(nil))
 }

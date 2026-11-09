@@ -2,9 +2,13 @@ package dualgateway
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -150,4 +154,52 @@ func TestPathConfig_Write_Persists(t *testing.T) {
 	resp, err = b.handleConfigRead(context.Background(), &logical.Request{}, makeFieldData(path, nil))
 	require.NoError(t, err)
 	assert.Equal(t, "https://persisted.test.com", resp.Data["test_url"])
+}
+
+// failingStorage refuses every write.
+type failingStorage struct{ *inmemStorage }
+
+func (failingStorage) Put(context.Context, *sdklogical.StorageEntry) error {
+	return errors.New("storage unavailable")
+}
+
+// A write that cannot be persisted is not applied either: the mount keeps
+// serving what storage holds. Before, the new URL, timeout, transparent config
+// and transport were live by the time the storage write failed.
+func TestPathConfig_Write_UnpersistedWriteNotApplied(t *testing.T) {
+	b := createBackendWithConfig(t, extraKeySpec, map[string]any{
+		"extra_url":      "https://custom.test.com",
+		"account_id":     "abc123",
+		"auto_auth_path": "auth/jwt/",
+	})
+	b.StorageView = failingStorage{newInmemStorage()}
+
+	resp, err := b.handleConfigWrite(context.Background(), &logical.Request{},
+		makeFieldData(b.pathConfig(), map[string]any{
+			"extra_url":       "https://moved.test.com",
+			"account_id":      "other",
+			"timeout":         99,
+			"tls_skip_verify": true,
+			"auto_auth_path":  "auth/other/",
+		}))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	got := readConfig(t, b)
+	assert.Equal(t, "https://custom.test.com", got["extra_url"])
+	assert.Equal(t, "abc123", got["account_id"])
+	assert.Equal(t, extraKeySpec.DefaultTimeout.String(), got["timeout"])
+	assert.Equal(t, "auth/jwt/", got["auto_auth_path"])
+	assert.Equal(t, false, got["tls_skip_verify"])
+	assert.Nil(t, b.installedTransport)
+	b.mu.RLock()
+	state := b.extraState["account_id"]
+	b.mu.RUnlock()
+	assert.Equal(t, "abc123", state)
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	_, err = roundTrip(t, b, srv.URL)
+	var verifyErr *tls.CertificateVerificationError
+	assert.ErrorAs(t, err, &verifyErr, "an unpersisted write must not have turned TLS verification off")
 }

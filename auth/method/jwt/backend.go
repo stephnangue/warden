@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/cap/jwt"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -34,19 +35,31 @@ type JWTAuthConfig struct {
 	JWTValidationPubKeys []string `json:"jwt_validation_pubkeys,omitempty"`
 
 	// Validation
-	BoundIssuer       string         `json:"bound_issuer,omitempty"`
-	BoundAudiences    []string       `json:"bound_audiences,omitempty"`
-	BoundSubject      string         `json:"bound_subject,omitempty"`
-	BoundClaims       map[string]any `json:"bound_claims,omitempty"`
-	UserClaim         string         `json:"user_claim,omitempty" default:"sub"`
-	GroupsClaim       string         `json:"groups_claim,omitempty"`
-	GroupPolicyPrefix string         `json:"group_policy_prefix,omitempty"`
+	BoundIssuer    string         `json:"bound_issuer,omitempty"`
+	BoundAudiences []string       `json:"bound_audiences,omitempty"`
+	BoundSubject   string         `json:"bound_subject,omitempty"`
+	BoundClaims    map[string]any `json:"bound_claims,omitempty"`
+	UserClaim      string         `json:"user_claim,omitempty" default:"sub"`
 
 	// Token settings
 	TokenTTL time.Duration `json:"token_ttl" default:"1h"`
 
-	// Default role for transparent operations when no role is specified
-	DefaultRole string `json:"default_role,omitempty"`
+	// MaxAge bounds a JWT's age at admission, from its iat: one older, or
+	// without an iat, is not admitted. Zero is unset. Validated (not
+	// negative) and enforced by admitToken, through helper.CheckMaxAge.
+	MaxAge time.Duration `json:"max_age,omitempty"`
+
+	// removed names the removed keys (helper.RemovedConfigKeys) the config
+	// was built from, which it ignores; a config read warns about each.
+	removed []string
+
+	// Facts: entity_kind, and the claims (a name or a JSON pointer) the mount
+	// publishes beyond its built-in facts. Compiled in buildJWTConfig. A
+	// config write refuses facts that do not compile, so they are never
+	// stored; ones that still fail at load (the mount table's, or storage
+	// written under looser rules) are installed with a nil naming: the mount
+	// answers no fact, so nothing that reads facts can match it.
+	helper.FactsConfig
 
 	// Internal
 	validator *jwt.Validator `json:"-"`
@@ -56,10 +69,20 @@ type JWTAuthConfig struct {
 // jwtAuthBackend is the framework-based JWT authentication backend
 type jwtAuthBackend struct {
 	*framework.Backend
-	config      *JWTAuthConfig
-	configMu    sync.RWMutex
-	logger      *logger.GatedLogger
-	storageView sdklogical.Storage
+	config   *JWTAuthConfig
+	configMu sync.RWMutex
+	// configWriteMu serializes config writes and the storage load: a write
+	// merges onto the live config, so two racing would lose one writer's keys.
+	configWriteMu sync.Mutex
+	logger        *logger.GatedLogger
+	storageView   sdklogical.Storage
+
+	// mountFacts holds the naming in force and is shared by pointer with
+	// every admission this mount produces. installConfig publishes it under
+	// configMu together with the config it was compiled from, so a reader
+	// holding configMu sees the two agree; admissions and FactNames load it
+	// without a lock and see one published naming, whole.
+	mountFacts *logical.MountFacts
 }
 
 var _ logical.Factory = Factory
@@ -69,6 +92,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	b := &jwtAuthBackend{
 		logger:      conf.Logger,
 		storageView: conf.StorageView,
+		mountFacts:  &logical.MountFacts{},
 	}
 
 	b.Backend = &framework.Backend{
@@ -78,16 +102,13 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		PathsSpecial: &logical.Paths{
 			Unauthenticated: []string{
 				"login",
-				"introspect/roles",
 			},
 		},
-		Paths: []*framework.Path{
+		Paths: append([]*framework.Path{
 			b.pathLogin(),
 			b.pathConfig(),
-			b.pathRole(),
-			b.pathRoleList(),
-			b.pathIntrospect(),
-		},
+			helper.AdmitPath(b.admit),
+		}, pathRoles()...),
 	}
 
 	// Setup the backend with configuration
@@ -105,12 +126,52 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	return b, nil
 }
 
-// setupJWTConfig initializes the JWT configuration
+// setupJWTConfig builds the JWT configuration and installs it. It serves the
+// mount table's config when the mount is set up and the stored config when it
+// is loaded, which a failure here would turn into a failed mount (and, at
+// unseal, a failed unseal). Facts that do not compile are therefore logged and
+// installed as a nil naming, which answers no fact: closed for every reader of
+// facts, while the config stays readable and rewritable.
 func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any) error {
-	config, err := mapToJWTAuthConfig(conf)
+	config, err := buildJWTConfig(ctx, conf)
 	if err != nil {
 		return err
 	}
+	if err := config.FactsConfig.Err(); err != nil {
+		b.logger.Error(helper.FactsDoNotCompileLog, logger.Err(err))
+	}
+	if err := helper.RequireAgentAudiences(config.EntityKind, config.BoundAudiences); err != nil {
+		b.logger.Warn("auth mount admits no JWT until its config is rewritten", logger.Err(err))
+	}
+	if len(config.removed) > 0 {
+		b.logger.Warn("auth mount config sets removed keys, which are ignored", logger.Any("keys", config.removed))
+	}
+	b.installConfig(config)
+	return nil
+}
+
+// installConfig makes config the live configuration and publishes its naming
+// (nil when it does not compile, which answers no fact) in the same critical
+// section. It cannot fail.
+func (b *jwtAuthBackend) installConfig(config *JWTAuthConfig) {
+	b.configMu.Lock()
+	b.config = config
+	b.mountFacts.Publish(config.Naming())
+	b.configMu.Unlock()
+}
+
+// buildJWTConfig parses and validates conf and builds its key set and
+// validator, without touching the backend.
+func buildJWTConfig(ctx context.Context, conf map[string]any) (*JWTAuthConfig, error) {
+	config, err := mapToJWTAuthConfig(conf)
+	if err != nil {
+		return nil, err
+	}
+	config.removed = helper.RemovedConfigKeys(conf)
+
+	// Facts that do not compile are kept on the config, not returned: the
+	// caller decides whether to refuse them or fail closed.
+	config.Compile(jwtBuiltinFacts(), jwtAliasPolicy)
 
 	var keySet jwt.KeySet
 
@@ -139,38 +200,38 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 		sourcesSet++
 	}
 	if sourcesSet != 1 {
-		return fmt.Errorf("exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys must be set (got %d)", sourcesSet)
+		return nil, fmt.Errorf("exactly one of oidc_discovery_url, jwks_url, or jwt_validation_pubkeys must be set (got %d)", sourcesSet)
 	}
 
 	switch {
 	case hasOIDC:
 		if err := verifyOIDCDiscoveryURLReachable(ctx, config.OIDCDiscoveryURL, config.OIDCDiscoveryCA); err != nil {
-			return fmt.Errorf("oidc_discovery_url is not reachable: %v", err)
+			return nil, fmt.Errorf("oidc_discovery_url is not reachable: %v", err)
 		}
 		keySet, err = jwt.NewOIDCDiscoveryKeySet(ctx, config.OIDCDiscoveryURL, config.OIDCDiscoveryCA)
 		if err != nil {
-			return fmt.Errorf("failed to create OIDC discovery keyset: %v", err)
+			return nil, fmt.Errorf("failed to create OIDC discovery keyset: %v", err)
 		}
 	case hasJWKS:
 		if err := verifyJWKSURLReachable(ctx, config.JWKSURL, config.JWKSCA); err != nil {
-			return fmt.Errorf("jwks_url is not reachable: %v", err)
+			return nil, fmt.Errorf("jwks_url is not reachable: %v", err)
 		}
 		keySet, err = jwt.NewJSONWebKeySet(ctx, config.JWKSURL, config.JWKSCA)
 		if err != nil {
-			return fmt.Errorf("failed to create JWKS keyset: %v", err)
+			return nil, fmt.Errorf("failed to create JWKS keyset: %v", err)
 		}
 	case hasPubKeys:
 		pubKeys := make([]crypto.PublicKey, 0, len(config.JWTValidationPubKeys))
 		for i, pemStr := range config.JWTValidationPubKeys {
 			pubKey, err := jwt.ParsePublicKeyPEM([]byte(pemStr))
 			if err != nil {
-				return fmt.Errorf("jwt_validation_pubkeys[%d]: failed to parse PEM: %v", i, err)
+				return nil, fmt.Errorf("jwt_validation_pubkeys[%d]: failed to parse PEM: %v", i, err)
 			}
 			pubKeys = append(pubKeys, pubKey)
 		}
 		keySet, err = jwt.NewStaticKeySet(pubKeys)
 		if err != nil {
-			return fmt.Errorf("failed to create static keyset: %v", err)
+			return nil, fmt.Errorf("failed to create static keyset: %v", err)
 		}
 	}
 
@@ -179,14 +240,34 @@ func (b *jwtAuthBackend) setupJWTConfig(ctx context.Context, conf map[string]any
 	// Create validator
 	validator, err := jwt.NewValidator(keySet)
 	if err != nil {
-		return fmt.Errorf("failed to create validator: %v", err)
+		return nil, fmt.Errorf("failed to create validator: %v", err)
 	}
 	config.validator = validator
 
-	b.configMu.Lock()
-	b.config = config
-	b.configMu.Unlock()
-	return nil
+	return config, nil
+}
+
+// normalizedJWTConfig is config in the form storage holds, so that on restart
+// the parser always sees consistent types (e.g., token_ttl is always a
+// duration string, never a raw int from an HTTP request).
+func normalizedJWTConfig(config *JWTAuthConfig) map[string]any {
+	return map[string]any{
+		"oidc_discovery_url":     config.OIDCDiscoveryURL,
+		"oidc_discovery_ca_pem":  config.OIDCDiscoveryCA,
+		"jwks_url":               config.JWKSURL,
+		"jwks_ca_pem":            config.JWKSCA,
+		"jwt_validation_pubkeys": config.JWTValidationPubKeys,
+		"bound_issuer":           config.BoundIssuer,
+		"bound_audiences":        config.BoundAudiences,
+		"bound_subject":          config.BoundSubject,
+		"bound_claims":           config.BoundClaims,
+		"user_claim":             config.UserClaim,
+		"token_ttl":              config.TokenTTL.String(),
+		"max_age":                config.MaxAge.String(),
+		"entity_kind":            config.EntityKind,
+		"facts":                  config.Facts,
+		"alias_name_source":      config.AliasNameSource,
+	}
 }
 
 // Initialize loads persisted config from storage
@@ -194,6 +275,11 @@ func (b *jwtAuthBackend) Initialize(ctx context.Context) error {
 	if b.storageView == nil {
 		return nil
 	}
+
+	// The mount is routed before it is initialized, so a config write can
+	// already be under way; loading storage over it would undo it.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	// Load persisted config from storage
 	entry, err := b.storageView.Get(ctx, "config")

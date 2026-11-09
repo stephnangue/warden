@@ -7,7 +7,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net/http"
+	"strings"
 
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
@@ -20,18 +23,25 @@ import (
 // tri-state contract:
 //
 //  1. Nil — backend does not implement MCPPolicyEnforced at all. If an
-//     mcp{} block is bound to such a path that's an operator misconfig
+//     MCP contract is bound to such a path that's an operator misconfig
 //     and decideMCP fails closed with missing_body.
 //
 //  2. Non-nil, empty (Calls nil, ParseErr nil) — backend implements
 //     the interface but ShouldEnforceMCPPolicy returned enforce=false
-//     for THIS request (typically a non-POST verb on a multi-method
-//     MCP endpoint, or a non-JSON Content-Type). mcp{} is body-
-//     authoritative and cannot meaningfully gate a body-less request,
-//     so decideMCP skips evaluation and lets the cap-level policy
-//     decide. This is the path that lets MCP Streamable HTTP's GET
-//     (notification SSE stream) and DELETE (session terminate) verbs
-//     share the same URL with the POST that carries JSON-RPC.
+//     for THIS request (a non-POST verb on a multi-method MCP endpoint;
+//     every POST is enforced, whatever its Content-Type). A contract is
+//     body-authoritative and
+//     cannot meaningfully gate a body-less request, so decideMCP skips
+//     evaluation and lets the cap-level policy decide.
+//
+//     This is what lets Streamable HTTP's GET (notification stream) and
+//     DELETE (session terminate) share a URL with the POST that carries
+//     JSON-RPC. Both verbs are legacy-era: 2026-07-28 removed the GET
+//     endpoint in favour of subscriptions/listen and has no session to
+//     terminate, so a modern server answers them 405. The sentinel stays
+//     because Warden still fronts upstreams that serve them — and the
+//     GET, being the legacy notification channel, takes listen_timeout
+//     rather than the unary one.
 //
 //  3. Non-nil with Calls or ParseErr populated — backend opted in and
 //     extraction either succeeded (Calls) or failed in a typed way
@@ -68,6 +78,9 @@ func (c *Core) extractMCPDescriptor(_ context.Context, req *logical.Request, bac
 	}
 
 	desc := &logical.MCPRequestDescriptor{}
+	if _, ok := backend.(logical.MCPInProcessServer); ok {
+		desc.InProcess = true
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			// Drop any partial Calls so the matcher's invariant
@@ -112,7 +125,7 @@ func (c *Core) extractMCPDescriptor(_ context.Context, req *logical.Request, bac
 		return
 	}
 
-	reqs, perr := ParseJSONRPCStrict(body)
+	reqs, isBatch, perr := ParseJSONRPCStrictBody(body)
 	if perr != nil {
 		desc.ParseErr = &logical.MCPParseError{
 			Kind: string(perr.Kind),
@@ -120,16 +133,91 @@ func (c *Core) extractMCPDescriptor(_ context.Context, req *logical.Request, bac
 		}
 		return
 	}
+	desc.IsBatch = isBatch
+	if len(reqs) > 0 {
+		// One body, one client: the self-description rides every call, so the
+		// first is as good as any and the descriptor carries it once. Recorded
+		// before any refusal below — the client that sent a body Warden
+		// rejected is exactly the one an operator wants named.
+		desc.ClientInfoName = reqs[0].ClientInfoName
+		desc.ClientInfoVersion = reqs[0].ClientInfoVersion
+	}
 
-	desc.Calls = make([]logical.MCPCall, len(reqs))
-	for i, r := range reqs {
-		desc.Calls[i] = logical.MCPCall{
-			Method:     r.Method,
-			Name:       r.Name,
-			MatchArgs:  classifyArgs(r.Arguments),
-			BatchIndex: i,
+	// JSON-RPC batching left the spec in 2025-06-18, so a client announcing a
+	// revision that postdates its removal while sending one is contradicting
+	// itself. Refuse it here, in the extractor, so it is refused as a batch
+	// rather than reaching the header validator and being reported as a
+	// header mismatch — the client would then go looking at its headers, which
+	// are not the problem.
+	//
+	// The parser itself is untouched: an upstream of the legacy era still
+	// gets its batches, which is most of why Warden can front both eras.
+	if isBatch && announcesHeaderEra(req.HTTPRequest, reqs) {
+		desc.ParseErr = &logical.MCPParseError{
+			Kind: logical.MCPParseKindBatchUnsupported,
+			Msg:  "batch request from a client announcing a revision that dropped batching",
+		}
+		return
+	}
+
+	// An in-process server answers each call of a batch in full, so it caps
+	// how many one body may carry. Refused here, as a body that cannot be
+	// served, before policy, admission or any call runs.
+	if inproc, ok := backend.(logical.MCPInProcessServer); ok && isBatch && len(reqs) > inproc.MaxMCPBatch() {
+		desc.ParseErr = &logical.MCPParseError{
+			Kind: logical.MCPParseKindBatchTooLarge,
+			Msg:  fmt.Sprintf("JSON-RPC batch exceeds %d messages", inproc.MaxMCPBatch()),
+		}
+		return
+	}
+
+	desc.Calls = mcpCallsFromParsed(reqs)
+}
+
+// announcesHeaderEra reports whether a client claimed a modern revision, in
+// either place it can make that claim.
+//
+// The body counts, not only the transport header. The header validator
+// refuses a single call that declares a modern revision in params._meta while
+// the transport declares none — but it skips batches, having no single method
+// to compare against. Reading only the header here would leave that exact
+// combination as the way through: declare modernity in _meta, send two
+// elements, and be neither refused as a batch nor caught as a mismatch.
+func announcesHeaderEra(r *http.Request, reqs []JSONRPCRequest) bool {
+	if r != nil && isHeaderEraRevision(strings.TrimSpace(r.Header.Get(mcpProtocolVersionHeader))) {
+		return true
+	}
+	for _, req := range reqs {
+		if isHeaderEraRevision(req.MetaProtocolVersion) {
+			return true
 		}
 	}
+	return false
+}
+
+// mcpCallsFromParsed maps strictly-parsed JSON-RPC requests onto the
+// descriptor's calls, stamping BatchIndex in array order.
+//
+// It is a named function rather than a loop inlined above because tests
+// build descriptors from a body too, and a second copy of this mapping is a
+// trap: a field added to one and not the other still passes every evaluator
+// test while production sees a zero value. For URIs in particular that zero
+// value means "subscribes to nothing", which allows.
+func mcpCallsFromParsed(reqs []JSONRPCRequest) []logical.MCPCall {
+	calls := make([]logical.MCPCall, len(reqs))
+	for i, r := range reqs {
+		calls[i] = logical.MCPCall{
+			Method:              r.Method,
+			Name:                r.Name,
+			MatchArgs:           classifyArgs(r.Arguments),
+			URIs:                r.URIs,
+			RawID:               r.RawID,
+			IDPresent:           r.IDPresent,
+			MetaProtocolVersion: r.MetaProtocolVersion,
+			BatchIndex:          i,
+		}
+	}
+	return calls
 }
 
 // classifyArgs typifies each tools/call argument from raw JSON bytes

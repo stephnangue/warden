@@ -130,3 +130,20 @@ func TestConditionResult_Sanitize(t *testing.T) {
 	// values, which may echo adversary-influenced request data, are CTL-stripped.
 	assert.Equal(t, map[string]string{"call.args.x": "abcd"}, c.Inputs)
 }
+
+// ActorRef is persisted inside stored token entries. An actor with no issuer must
+// encode exactly as it did before the Issuer field existed, and an entry stored then
+// must decode unchanged.
+func TestActorRef_JSONCompat(t *testing.T) {
+	b, err := json.Marshal(ActorRef{Subject: "broker-beta"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"Subject":"broker-beta"}`, string(b))
+
+	var old ActorRef
+	require.NoError(t, json.Unmarshal([]byte(`{"Subject":"broker-beta"}`), &old))
+	assert.Equal(t, ActorRef{Subject: "broker-beta"}, old)
+
+	b, err = json.Marshal(ActorRef{Subject: "broker-beta", Issuer: "https://idp.example"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"Subject":"broker-beta","Issuer":"https://idp.example"}`, string(b))
+}

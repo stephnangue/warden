@@ -35,10 +35,12 @@ short-lived and rotates automatically; no key or certificate is written to disk.
 The presented SVID — X.509-SVID via the TLS handshake, or JWT-SVID on
 `Authorization: Bearer` — is validated by the `spiffe` auth method against the
 trust-domain bundles (static or federated). With no `X-Warden-Token`, Warden
-uses [transparent authentication](/concepts/authentication/#transparent-authentication)
-and resolves the SPIFFE ID to a role per request. SPIFFE relies on short-lived
+uses [implicit authentication](/identity/authentication/#implicit-authentication):
+the mount admits the SVID, and on every request the [groups](/identity/groups/)
+whose rules match its SPIFFE ID decide whether the role the request names is
+granted. SPIFFE relies on short-lived
 SVIDs and bundle rotation rather than revocation lists. See
-[Authentication](/concepts/authentication/#auth-methods).
+[Authentication](/identity/authentication/).
 
 ## In practice
 
@@ -46,8 +48,8 @@ An autonomous remediation agent written in Go runs in a SPIRE-enabled cluster. A
 startup it uses the `go-spiffe` Workload API client to obtain its X.509-SVID, then
 opens a mutually-authenticated connection straight to Warden — no sidecar in the
 path. The SVID rotates in memory on its own and the agent writes no key to disk.
-Warden validates the SVID's SPIFFE ID through the `spiffe` method and maps it to a
-role scoped to exactly what the agent may do — for instance, restart a single
+Warden validates the SVID through the `spiffe` method, and a group whose rule
+matches its SPIFFE ID grants a role scoped to exactly what the agent may do — for instance, restart a single
 named Kubernetes deployment and nothing else.
 
 ## When to choose it
@@ -73,5 +75,5 @@ named Kubernetes deployment and nothing else.
   sidecar originates the mTLS leg so the agent stays identity-unaware.
 - [Platform Token Relay](/agent-identity/platform-issued-token/) — the agent presents identity
   itself here too, but relays a platform token instead of minting an SVID.
-- [Authentication](/concepts/authentication/) — transparent auth and the
+- [Authentication](/identity/authentication/) — implicit authentication and the
   `spiffe` method.

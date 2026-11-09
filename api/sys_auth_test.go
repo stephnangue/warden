@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -566,6 +567,53 @@ func TestSys_DisableAuth(t *testing.T) {
 		err = client.Sys().DisableAuth("userpass")
 		if err == nil {
 			t.Error("expected error for 500 status")
+		}
+	})
+}
+
+func TestSys_DisableAuthWithWarnings(t *testing.T) {
+	t.Run("returns the server's warnings", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodDelete || r.URL.Path != "/v1/sys/auth/jwt" {
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"data":{"message":"Successfully unmounted jwt","warnings":["1 group(s) have a rule whose mount selector names auth/jwt/"]}}`))
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		warnings, err := client.Sys().DisableAuthWithWarnings(context.Background(), "jwt")
+		if err != nil {
+			t.Fatalf("DisableAuthWithWarnings failed: %v", err)
+		}
+		if len(warnings) != 1 || !strings.Contains(warnings[0], "auth/jwt/") {
+			t.Fatalf("warnings = %q, want the group warning", warnings)
+		}
+	})
+
+	t.Run("no body means no warnings", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
+
+		config := DefaultConfig()
+		config.Address = server.URL
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatalf("NewClient failed: %v", err)
+		}
+
+		warnings, err := client.Sys().DisableAuthWithWarnings(context.Background(), "jwt")
+		if err != nil || warnings != nil {
+			t.Fatalf("got (%q, %v), want (nil, nil)", warnings, err)
 		}
 	})
 }

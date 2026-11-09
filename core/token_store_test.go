@@ -4,11 +4,15 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/internal/cachesize"
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,22 +27,22 @@ func TestTokenStore_GenerateToken(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 		Policies:    []string{"default", "admin"},
 		ClientIP:    "192.168.1.100",
 	}
 
 	// Generate token
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 	require.NotNil(t, entry)
 
 	assert.NotEmpty(t, entry.ID)
 	assert.NotEmpty(t, entry.Accessor)
-	assert.Equal(t, TypeWardenToken, entry.Type)
+	assert.Equal(t, TypeServiceToken, entry.Type)
 	assert.Equal(t, "test-user", entry.PrincipalID)
-	assert.Equal(t, "test-role", entry.RoleName)
+	assert.Empty(t, entry.RoleName, "no token is issued with a role")
+	assert.Empty(t, entry.CredentialSpec, "no token is issued with a spec")
 	assert.Equal(t, namespace.RootNamespaceID, entry.NamespaceID)
 	assert.Equal(t, []string{"default", "admin"}, entry.Policies)
 	assert.Equal(t, "192.168.1.100", entry.CreatedByIP)
@@ -55,14 +59,13 @@ func TestTokenStore_GenerateToken_DifferentTypes(t *testing.T) {
 		name      string
 		tokenType string
 	}{
-		{"WardenToken", TypeWardenToken},
+		{"ServiceToken", TypeServiceToken},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			authData := &AuthData{
 				PrincipalID: "test-user-" + tt.tokenType,
-				RoleName:    "test-role",
 				ExpireAt:    time.Now().Add(24 * time.Hour),
 			}
 
@@ -83,7 +86,6 @@ func TestTokenStore_GenerateToken_UnsupportedType(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
@@ -99,7 +101,7 @@ func TestTokenStore_GenerateToken_NilAuthData(t *testing.T) {
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	_, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, nil)
+	_, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "authData cannot be nil")
 }
@@ -111,11 +113,10 @@ func TestTokenStore_GenerateToken_NoNamespace(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
-	_, err := core.tokenStore.GenerateToken(context.Background(), TypeWardenToken, authData)
+	_, err := core.tokenStore.GenerateToken(context.Background(), TypeServiceToken, authData)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "namespace not found")
 }
@@ -129,12 +130,11 @@ func TestTokenStore_ResolveToken(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	// Get token value
@@ -142,10 +142,9 @@ func TestTokenStore_ResolveToken(t *testing.T) {
 	require.NotEmpty(t, tokenValue)
 
 	// Resolve token
-	principalID, roleName, err := core.tokenStore.ResolveToken(ctx, tokenValue)
+	principalID, err := core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.NoError(t, err)
 	assert.Equal(t, "test-user", principalID)
-	assert.Equal(t, "test-role", roleName)
 }
 
 // TestTokenStore_ResolveToken_NotFound tests resolving a non-existent token
@@ -155,7 +154,7 @@ func TestTokenStore_ResolveToken_NotFound(t *testing.T) {
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	_, _, err := core.tokenStore.ResolveToken(ctx, "nonexistent_token")
+	_, err := core.tokenStore.ResolveToken(ctx, "nonexistent_token")
 	require.Error(t, err)
 }
 
@@ -168,11 +167,10 @@ func TestTokenStore_ResolveToken_Expired(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(-1 * time.Hour), // Already expired
 	}
 
-	_, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	_, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "token already expired")
 }
@@ -186,13 +184,12 @@ func TestTokenStore_LookupToken(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 		Policies:    []string{"default"},
 	}
 
 	// Generate token
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	tokenValue := entry.Data["token"]
@@ -220,13 +217,12 @@ func TestTokenStore_Metadata_RoundTrip(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 		Policies:    []string{"default"},
 		Metadata:    map[string]string{"env": "prod", "team": "platform-core"},
 	}
 
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 	assert.Equal(t, authData.Metadata, entry.Metadata)
 
@@ -250,13 +246,12 @@ func TestTokenStore_MountAccessor_RoundTrip(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID:   "test-user",
-		RoleName:      "test-role",
 		ExpireAt:      time.Now().Add(24 * time.Hour),
 		Policies:      []string{"default"},
 		MountAccessor: "auth_jwt_abc123",
 	}
 
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 	assert.Equal(t, "auth_jwt_abc123", entry.MountAccessor)
 
@@ -289,11 +284,10 @@ func TestTokenStore_LookupToken_Expired(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(50 * time.Millisecond), // Short expiration
 	}
 
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	tokenValue := entry.Data["token"]
@@ -315,12 +309,11 @@ func TestTokenStore_LookupToken_SameOriginViolation(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 		ClientIP:    "192.168.1.100",
 	}
 
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	tokenValue := entry.Data["token"]
@@ -341,12 +334,11 @@ func TestTokenStore_LookupToken_SameOriginPass(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 		ClientIP:    "192.168.1.100",
 	}
 
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	tokenValue := entry.Data["token"]
@@ -367,11 +359,10 @@ func TestTokenStore_LookupToken_NoNamespace(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	tokenValue := entry.Data["token"]
@@ -391,12 +382,11 @@ func TestTokenStore_LookupByAccessor(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	// Lookup by accessor
@@ -430,12 +420,11 @@ func TestTokenStore_RevokeByAccessor(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	// Revoke by accessor
@@ -493,6 +482,160 @@ func TestTokenStore_RevokeRootToken(t *testing.T) {
 	assert.Contains(t, err.Error(), "no root token exists")
 }
 
+// simulateRestart drops everything the token store holds in memory, the root
+// token manager included, and reloads the persisted tokens, as a fresh
+// process does on unseal.
+func simulateRestart(t *testing.T, s *TokenStore) {
+	t.Helper()
+	s.UnloadFromCache()
+	s.rootTokenManager = NewRootTokenManager()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	require.NoError(t, s.LoadFromStorage(ctx))
+}
+
+// Root recognition at load does not depend on the type name, never takes a
+// transparent entry or one an auth mount issued; the earliest releases issued
+// the root token to "root".
+func TestTokenStore_IsRootTokenEntry(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	tests := []struct {
+		name  string
+		entry *TokenEntry
+		want  bool
+	}{
+		{"root namespace principal", &TokenEntry{Type: TypeServiceToken, PrincipalID: namespace.RootNamespaceUUID}, true},
+		{"earliest releases principal", &TokenEntry{Type: TypeServiceToken, PrincipalID: "root"}, true},
+		{"legacy type name", &TokenEntry{Type: "warden_token", PrincipalID: namespace.RootNamespaceUUID}, true},
+		{"legacy type name, earliest releases principal", &TokenEntry{Type: "warden_token", PrincipalID: "root"}, true},
+		{"independent of the type name", &TokenEntry{Type: "renamed_token", PrincipalID: namespace.RootNamespaceUUID}, true},
+		{"issued by an auth mount", &TokenEntry{Type: TypeServiceToken, PrincipalID: namespace.RootNamespaceUUID, MountAccessor: "auth_jwt_1234"}, false},
+		{"issued by an auth mount, literal root", &TokenEntry{Type: TypeServiceToken, PrincipalID: "root", MountAccessor: "auth_jwt_1234"}, false},
+		{"issued by an auth mount, legacy type name", &TokenEntry{Type: "warden_token", PrincipalID: namespace.RootNamespaceUUID, MountAccessor: "auth_jwt_1234"}, false},
+		{"identity token", &TokenEntry{Type: TypeIdentityToken, PrincipalID: namespace.RootNamespaceUUID}, false},
+		{"identity token, literal root", &TokenEntry{Type: TypeIdentityToken, PrincipalID: "root"}, false},
+		{"other principal", &TokenEntry{Type: TypeServiceToken, PrincipalID: "alice"}, false},
+		{"nil entry", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, core.tokenStore.isRootTokenEntry(tt.entry))
+		})
+	}
+}
+
+// The persisted root token is registered with the root token manager again
+// after a restart, so it can still be revoked.
+func TestTokenStore_RootTokenRecognisedAfterRestart(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	s := core.tokenStore
+
+	rootToken, err := s.GenerateRootToken()
+	require.NoError(t, err)
+	rootID := s.rootTokenManager.GetCurrentRootTokenID()
+
+	simulateRestart(t, s)
+
+	require.True(t, s.rootTokenManager.HasRootToken(), "the persisted root must be recognised after a reload")
+	assert.Equal(t, rootID, s.rootTokenManager.GetCurrentRootTokenID())
+	assert.True(t, s.rootTokenManager.IsRootToken(rootToken))
+
+	require.NoError(t, s.RevokeRootToken())
+	assert.False(t, s.rootTokenManager.HasRootToken())
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	_, err = s.ResolveToken(ctx, rootToken)
+	require.Error(t, err, "the revoked root must no longer resolve")
+
+	// The revocation reached storage: the root does not come back on the
+	// next restart.
+	simulateRestart(t, s)
+	assert.False(t, s.rootTokenManager.HasRootToken())
+	_, err = s.ResolveToken(ctx, rootToken)
+	require.Error(t, err)
+}
+
+// The reloaded root can be replaced with a custom value, and the old value
+// stops working.
+func TestTokenStore_RootTokenReplaceableAfterRestart(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	s := core.tokenStore
+
+	rootToken, err := s.GenerateRootToken()
+	require.NoError(t, err)
+
+	simulateRestart(t, s)
+
+	require.NoError(t, s.ReplaceRootTokenValue("my-dev-token"))
+	assert.True(t, s.rootTokenManager.IsRootToken("my-dev-token"))
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	_, err = s.ResolveToken(ctx, rootToken)
+	require.Error(t, err, "the replaced root value must no longer resolve")
+
+	simulateRestart(t, s)
+	assert.True(t, s.rootTokenManager.IsRootToken("my-dev-token"), "the replacement is the root after the next restart")
+}
+
+// A token an auth mount issued is never taken for the root, even when its
+// identity provider mapped it to a root-like principal.
+func TestTokenStore_MountIssuedTokenNotRootAfterRestart(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	s := core.tokenStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	for _, principal := range []string{namespace.RootNamespaceUUID, "root"} {
+		_, err := s.GenerateToken(ctx, TypeServiceToken, &AuthData{
+			PrincipalID:   principal,
+			MountAccessor: "auth_jwt_1234",
+			ExpireAt:      time.Now().Add(time.Hour),
+		})
+		require.NoError(t, err)
+	}
+
+	simulateRestart(t, s)
+
+	assert.False(t, s.rootTokenManager.HasRootToken())
+}
+
+// When storage holds more than one root candidate, the load warns with both
+// token IDs and keeps the last one loaded.
+func TestTokenStore_SecondRootCandidateWarns(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+	s := core.tokenStore
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	_, err := s.GenerateRootToken()
+	require.NoError(t, err)
+	firstID := s.rootTokenManager.GetCurrentRootTokenID()
+
+	second, err := s.GenerateToken(ctx, TypeServiceToken, &AuthData{
+		PrincipalID: namespace.RootNamespaceUUID,
+		Policies:    []string{"root"},
+	})
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+	s.logger = log
+
+	simulateRestart(t, s)
+
+	out := buf.String()
+	require.Contains(t, out, "more than one root token in storage")
+	assert.Contains(t, out, firstID)
+	assert.Contains(t, out, second.ID)
+
+	kept := s.rootTokenManager.GetCurrentRootTokenID()
+	assert.Contains(t, []string{firstID, second.ID}, kept)
+	assert.Equal(t, 1, strings.Count(out, "more than one root token in storage"))
+}
+
 // TestTokenStore_GetMetrics tests metrics retrieval
 func TestTokenStore_GetMetrics(t *testing.T) {
 	core := createTestCore(t)
@@ -504,10 +647,9 @@ func TestTokenStore_GetMetrics(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		authData := &AuthData{
 			PrincipalID: "test-user",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 		}
-		_, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+		_, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 		require.NoError(t, err)
 	}
 
@@ -526,7 +668,7 @@ func TestTokenStore_ListTokenTypes(t *testing.T) {
 	require.NotEmpty(t, types)
 
 	// Check built-in types are registered
-	assert.Contains(t, types, TypeWardenToken)
+	assert.Contains(t, types, TypeServiceToken)
 }
 
 // TestTokenStore_Close tests closing the token store
@@ -538,12 +680,11 @@ func TestTokenStore_Close(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Attempting to generate after close should fail
-	_, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	_, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.Error(t, err)
 	assert.Equal(t, ErrStoreClosed, err)
 }
@@ -557,11 +698,10 @@ func TestTokenStore_Sealed(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	tokenValue := entry.Data["token"]
@@ -585,24 +725,22 @@ func TestTokenStore_WardenToken(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "warden-user",
-		RoleName:    "warden-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate Warden token
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 	require.NotNil(t, entry)
 
-	assert.Equal(t, TypeWardenToken, entry.Type)
+	assert.Equal(t, TypeServiceToken, entry.Type)
 	assert.NotEmpty(t, entry.Data["token"])
 
 	// Resolve by token
 	token := entry.Data["token"]
-	principalID, roleName, err := core.tokenStore.ResolveToken(ctx, token)
+	principalID, err := core.tokenStore.ResolveToken(ctx, token)
 	require.NoError(t, err)
 	assert.Equal(t, "warden-user", principalID)
-	assert.Equal(t, "warden-role", roleName)
 }
 
 // TestTokenStore_ConcurrentAccess tests thread safety of the token store
@@ -622,11 +760,10 @@ func TestTokenStore_ConcurrentAccess(t *testing.T) {
 			for j := 0; j < tokensPerGoroutine; j++ {
 				authData := &AuthData{
 					PrincipalID: "user",
-					RoleName:    "role",
 					ExpireAt:    time.Now().Add(24 * time.Hour),
 				}
 
-				entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+				entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 				if err != nil {
 					t.Errorf("goroutine %d: failed to generate token: %v", id, err)
 					done <- false
@@ -634,7 +771,7 @@ func TestTokenStore_ConcurrentAccess(t *testing.T) {
 				}
 
 				tokenValue := entry.Data["token"]
-				_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+				_, err = core.tokenStore.ResolveToken(ctx, tokenValue)
 				if err != nil {
 					t.Errorf("goroutine %d: failed to resolve token: %v", id, err)
 					done <- false
@@ -665,11 +802,10 @@ func TestTokenStore_TokenWithNoExpiration(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		// No ExpireAt - infinite TTL
 	}
 
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 	require.NotNil(t, entry)
 
@@ -677,7 +813,7 @@ func TestTokenStore_TokenWithNoExpiration(t *testing.T) {
 
 	// Should still be resolvable
 	tokenValue := entry.Data["token"]
-	principalID, _, err := core.tokenStore.ResolveToken(ctx, tokenValue)
+	principalID, err := core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.NoError(t, err)
 	assert.Equal(t, "test-user", principalID)
 }
@@ -692,11 +828,10 @@ func TestTokenStore_LoadFromStorage(t *testing.T) {
 	// Generate a token
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	// Unload from cache
@@ -708,7 +843,7 @@ func TestTokenStore_LoadFromStorage(t *testing.T) {
 
 	// Token should still be accessible
 	tokenValue := entry.Data["token"]
-	principalID, _, err := core.tokenStore.ResolveToken(ctx, tokenValue)
+	principalID, err := core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.NoError(t, err)
 	assert.Equal(t, "test-user", principalID)
 }
@@ -726,17 +861,16 @@ func TestTokenStore_RevokeByExpiration(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	// Verify token is accessible
 	tokenValue := entry.Data["token"]
-	_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+	_, err = core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.NoError(t, err)
 
 	// Revoke by expiration (simulates ExpirationManager callback)
@@ -744,7 +878,7 @@ func TestTokenStore_RevokeByExpiration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Token should no longer be accessible
-	_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+	_, err = core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.Error(t, err)
 	assert.Equal(t, ErrTokenNotFound, err)
 }
@@ -768,12 +902,11 @@ func TestTokenStore_RevokeByExpiration_CleansAccessor(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	// Verify accessor lookup works
@@ -800,12 +933,11 @@ func TestTokenStore_RevokeByExpiration_CleansStorage(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 	tokenValue := entry.Data["token"]
 
@@ -817,7 +949,7 @@ func TestTokenStore_RevokeByExpiration_CleansStorage(t *testing.T) {
 	core.tokenStore.UnloadFromCache()
 
 	// Token should not be found even from storage
-	_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+	_, err = core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.Error(t, err)
 }
 
@@ -830,12 +962,11 @@ func TestTokenStore_RevokeByExpiration_MultipleTimes(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	// Revoke multiple times - should be idempotent
@@ -854,12 +985,11 @@ func TestTokenStore_ExpirationManagerRevoker(t *testing.T) {
 
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
 	// Generate token
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	// Create expiration entry as ExpirationManager would
@@ -881,7 +1011,7 @@ func TestTokenStore_ExpirationManagerRevoker(t *testing.T) {
 
 	// Verify token is gone
 	tokenValue := entry.Data["token"]
-	_, _, err = core.tokenStore.ResolveToken(ctx, tokenValue)
+	_, err = core.tokenStore.ResolveToken(ctx, tokenValue)
 	require.Error(t, err)
 }
 
@@ -892,17 +1022,16 @@ func TestTokenStore_RevokeByExpiration_JWTToken(t *testing.T) {
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	// Create a JWT role token
+	// Create an identity token
 	authData := &AuthData{
 		PrincipalID: "jwt-user",
-		RoleName:    "jwt-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 	}
 
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, authData)
 	require.NoError(t, err)
 	require.NotNil(t, entry)
-	assert.Equal(t, TypeJWTRole, entry.Type)
+	assert.Equal(t, TypeIdentityToken, entry.Type)
 
 	// Revoke by expiration
 	err = core.tokenStore.RevokeByExpiration(entry.ID)
@@ -927,11 +1056,10 @@ func TestTokenStore_RevokeByExpiration_ConcurrentRevocation(t *testing.T) {
 	for i := 0; i < numTokens; i++ {
 		authData := &AuthData{
 			PrincipalID: "test-user",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 		}
 
-		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+		entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 		require.NoError(t, err)
 		entries[i] = entry
 	}
@@ -953,7 +1081,7 @@ func TestTokenStore_RevokeByExpiration_ConcurrentRevocation(t *testing.T) {
 	// Verify all tokens are revoked
 	for _, entry := range entries {
 		tokenValue := entry.Data["token"]
-		_, _, err := core.tokenStore.ResolveToken(ctx, tokenValue)
+		_, err := core.tokenStore.ResolveToken(ctx, tokenValue)
 		assert.Error(t, err, "token %s should be revoked", entry.ID)
 	}
 }
@@ -1017,12 +1145,11 @@ func TestIPBindingPolicy_Disabled(t *testing.T) {
 	// Create token with IP binding
 	authData := &AuthData{
 		PrincipalID: "test-user",
-		RoleName:    "test-role",
 		ExpireAt:    time.Now().Add(24 * time.Hour),
 		ClientIP:    "192.168.1.100",
 	}
 
-	entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+	entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	tokenValue := entry.Data["token"]
@@ -1046,12 +1173,11 @@ func TestIPBindingPolicy_Optional(t *testing.T) {
 	t.Run("both IPs present and match", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-1",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			ClientIP:    "192.168.1.100",
 		}
 
-		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+		entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 		require.NoError(t, err)
 
 		tokenValue := entry.Data["token"]
@@ -1063,12 +1189,11 @@ func TestIPBindingPolicy_Optional(t *testing.T) {
 	t.Run("both IPs present but mismatch", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-2",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			ClientIP:    "192.168.1.100",
 		}
 
-		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+		entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 		require.NoError(t, err)
 
 		tokenValue := entry.Data["token"]
@@ -1081,12 +1206,11 @@ func TestIPBindingPolicy_Optional(t *testing.T) {
 	t.Run("no creation IP allows any request IP", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-3",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			// No ClientIP
 		}
 
-		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+		entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 		require.NoError(t, err)
 
 		tokenValue := entry.Data["token"]
@@ -1098,12 +1222,11 @@ func TestIPBindingPolicy_Optional(t *testing.T) {
 	t.Run("no request IP allows access", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-4",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			ClientIP:    "192.168.1.100",
 		}
 
-		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+		entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 		require.NoError(t, err)
 
 		tokenValue := entry.Data["token"]
@@ -1126,12 +1249,11 @@ func TestIPBindingPolicy_Required(t *testing.T) {
 	t.Run("both IPs present and match succeeds", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-req-1",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			ClientIP:    "192.168.1.100",
 		}
 
-		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+		entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 		require.NoError(t, err)
 
 		tokenValue := entry.Data["token"]
@@ -1143,12 +1265,11 @@ func TestIPBindingPolicy_Required(t *testing.T) {
 	t.Run("no creation IP fails", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-req-2",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			// No ClientIP
 		}
 
-		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+		entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 		require.NoError(t, err)
 
 		tokenValue := entry.Data["token"]
@@ -1161,12 +1282,11 @@ func TestIPBindingPolicy_Required(t *testing.T) {
 	t.Run("no request IP fails", func(t *testing.T) {
 		authData := &AuthData{
 			PrincipalID: "test-user-req-3",
-			RoleName:    "test-role",
 			ExpireAt:    time.Now().Add(24 * time.Hour),
 			ClientIP:    "192.168.1.100",
 		}
 
-		entry, err := core.tokenStore.GenerateToken(ctx, TypeWardenToken, authData)
+		entry, err := core.tokenStore.GenerateToken(ctx, TypeServiceToken, authData)
 		require.NoError(t, err)
 
 		tokenValue := entry.Data["token"]
@@ -1238,22 +1358,20 @@ func TestTokenStore_RevokeByNamespace(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		authData := &AuthData{
 			PrincipalID: "user",
-			RoleName:    "role",
 			ExpireAt:    time.Now().Add(1 * time.Hour),
 			Policies:    []string{"default"},
 		}
-		_, err := core.tokenStore.GenerateToken(ctx1, TypeWardenToken, authData)
+		_, err := core.tokenStore.GenerateToken(ctx1, TypeServiceToken, authData)
 		require.NoError(t, err)
 	}
 
 	// Generate token in ns2
 	authData := &AuthData{
 		PrincipalID: "user",
-		RoleName:    "role",
 		ExpireAt:    time.Now().Add(1 * time.Hour),
 		Policies:    []string{"default"},
 	}
-	ns2Entry, err := core.tokenStore.GenerateToken(ctx2, TypeWardenToken, authData)
+	ns2Entry, err := core.tokenStore.GenerateToken(ctx2, TypeServiceToken, authData)
 	require.NoError(t, err)
 
 	// Revoke all ns1 tokens
@@ -1288,14 +1406,14 @@ func TestTokenStore_RevokeByNamespace_Empty(t *testing.T) {
 
 // TestTokenStore_LookupToken_CustomDevRootToken tests that LookupToken works with
 // a custom dev root token that does not have a standard prefix (e.g., "my-dev-token"
-// instead of "cws.xxx"). This is the dev-mode fallback path.
+// instead of "wds.xxx"). This is the dev-mode fallback path.
 func TestTokenStore_LookupToken_CustomDevRootToken(t *testing.T) {
 	core := createTestCore(t)
 	defer core.tokenStore.Close()
 
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
-	// Generate a standard root token (has "cws." prefix)
+	// Generate a standard root token (has "wds." prefix)
 	_, err := core.tokenStore.GenerateRootToken()
 	require.NoError(t, err)
 
@@ -1309,7 +1427,7 @@ func TestTokenStore_LookupToken_CustomDevRootToken(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, entry)
 
-	assert.Equal(t, TypeWardenToken, entry.Type)
+	assert.Equal(t, TypeServiceToken, entry.Type)
 	assert.Equal(t, []string{"root"}, entry.Policies)
 	assert.Equal(t, customToken, entry.Data["token"])
 }
@@ -1331,7 +1449,7 @@ func TestTokenStore_LookupToken_CustomDevRootToken_NotInCache(t *testing.T) {
 	require.NoError(t, err)
 
 	// Evict from cache to force the storage fallback path
-	wt := &WardenTokenType{}
+	wt := &ServiceTokenType{}
 	tokenID := wt.ComputeID(customToken)
 	core.tokenStore.byID.Del(tokenID)
 	core.tokenStore.byID.Wait()
@@ -1362,9 +1480,62 @@ func TestTokenStore_LookupToken_CustomDevRootToken_NonExistent(t *testing.T) {
 func TestDefaultTokenStoreConfig(t *testing.T) {
 	config := DefaultTokenStoreConfig()
 
-	assert.Equal(t, int64(100<<20), config.CacheMaxCost, "default cache max cost should be 100MB")
-	assert.Equal(t, int64(1e7), config.CacheNumCounters, "default cache num counters should be 10 million")
+	assert.Equal(t, int64(100<<20), config.CacheMaxCost, "default cache budget should be 100 MiB")
+	assert.Zero(t, config.CacheNumCounters, "counters derived from the entries the cache holds")
 	assert.True(t, config.EnableMetrics, "metrics should be enabled by default")
 	assert.Equal(t, IPBindingOptional, config.IPBindingPolicy, "default IP binding policy should be optional")
 	assert.Equal(t, 5*time.Minute, config.CacheMinRetention, "default cache min retention should be 5 minutes")
+}
+
+// The accessor index holds as many entries as the primary cache can, so it
+// does not run out of room first.
+func TestNewTokenStore_AccessorIndexMatchesThePrimaryCache(t *testing.T) {
+	c := createTestCore(t)
+	ts := c.tokenStore
+	assert.Equal(t, int64(100<<20), ts.byID.MaxCost())
+	assert.Equal(t, cachesize.MaxEntries(100<<20, tokenEntryStructBytes), ts.byAccessor.MaxCost())
+	t.Logf("100 MiB holds at most %d entries", ts.byAccessor.MaxCost())
+}
+
+// benchServiceToken returns a core holding one service token, and its entry.
+func benchServiceToken(b *testing.B) (*Core, *TokenEntry) {
+	b.Helper()
+	c := createTestCore(b)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	entry, err := c.tokenStore.GenerateToken(ctx, TypeServiceToken, &AuthData{
+		PrincipalID: "bench-user",
+		ExpireAt:    time.Now().Add(time.Hour),
+		Policies:    []string{"default"},
+	})
+	require.NoError(b, err)
+	c.tokenStore.byID.Wait()
+	return c, entry
+}
+
+// A service token found in the cache.
+func BenchmarkLookupTokenHit(b *testing.B) {
+	c, entry := benchServiceToken(b)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	value := entry.Data["token"]
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := c.LookupToken(ctx, value); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// A service token missing from the cache, read from storage and cached again:
+// the path that charges entryCost on a lookup.
+func BenchmarkLookupTokenMiss(b *testing.B) {
+	c, entry := benchServiceToken(b)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	value := entry.Data["token"]
+	b.ReportAllocs()
+	for b.Loop() {
+		c.tokenStore.byID.Del(entry.ID)
+		if _, err := c.LookupToken(ctx, value); err != nil {
+			b.Fatal(err)
+		}
+	}
 }

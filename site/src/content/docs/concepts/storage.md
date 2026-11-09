@@ -24,6 +24,11 @@ through a **barrier view** — a prefix-scoped slice of the barrier, like a `chr
 UUID-keyed prefix. That prefixing is what gives namespaces their hard storage
 isolation.
 
+A namespace's own record (its path, metadata and settings) is stored under its
+**parent's** prefix, whichever namespace the request that wrote it came from; the
+namespace's prefix holds only what lives in it. See
+[Namespaces](/concepts/namespaces/).
+
 ## Supported Backends
 
 A backend is selected by the `type` label of the [storage stanza](#configuring-storage):

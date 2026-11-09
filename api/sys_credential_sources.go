@@ -36,6 +36,9 @@ type CreateCredentialSourceOutput struct {
 	Config         map[string]string `json:"config,omitempty"`
 	RotationPeriod time.Duration     `json:"rotation_period,omitempty"`
 	Message        string            `json:"message"`
+	// Warnings are non-fatal notices about the write, such as a secret it left
+	// stored under keyless_enforcement_level=warn. Nil when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // CredentialSourceInfo represents credential source metadata
@@ -46,6 +49,9 @@ type CredentialSourceInfo struct {
 	RotationPeriod time.Duration     `json:"rotation_period,omitempty"`
 	NextRotation   string            `json:"next_rotation,omitempty"`
 	LastRotation   string            `json:"last_rotation,omitempty"`
+	// StoredSecrets names the long-lived secrets the source holds; nil when it
+	// is keyless.
+	StoredSecrets []string `json:"stored_secrets,omitempty"`
 }
 
 // UpdateCredentialSourceInput represents the input for updating a credential source
@@ -57,6 +63,9 @@ type UpdateCredentialSourceInput struct {
 type UpdateCredentialSourceOutput struct {
 	Name    string `json:"name"`
 	Message string `json:"message"`
+	// Warnings are non-fatal notices about the write, such as a secret it left
+	// stored under keyless_enforcement_level=warn. Nil when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // CreateCredentialSource creates a new credential source
@@ -109,6 +118,7 @@ func (c *Sys) CreateCredentialSourceWithContext(ctx context.Context, name string
 	if rp, ok := resource.Data["rotation_period"]; ok {
 		output.RotationPeriod = parseDurationFromSeconds(rp)
 	}
+	output.Warnings = parseWarnings(resource.Data["warnings"])
 
 	return output, nil
 }
@@ -158,6 +168,7 @@ func (c *Sys) GetCredentialSourceWithContext(ctx context.Context, name string) (
 	if lr, ok := resource.Data["last_rotation"].(string); ok {
 		source.LastRotation = lr
 	}
+	source.StoredSecrets = parseStringList(resource.Data["stored_secrets"])
 
 	return source, nil
 }
@@ -215,6 +226,7 @@ func (c *Sys) ListCredentialSourcesWithContext(ctx context.Context) ([]*Credenti
 		if rp, ok := sourceMap["rotation_period"]; ok {
 			source.RotationPeriod = parseDurationFromSeconds(rp)
 		}
+		source.StoredSecrets = parseStringList(sourceMap["stored_secrets"])
 
 		sources = append(sources, source)
 	}
@@ -263,6 +275,7 @@ func (c *Sys) UpdateCredentialSourceWithContext(ctx context.Context, name string
 	if msg, ok := resource.Data["message"].(string); ok {
 		output.Message = msg
 	}
+	output.Warnings = parseWarnings(resource.Data["warnings"])
 
 	return output, nil
 }

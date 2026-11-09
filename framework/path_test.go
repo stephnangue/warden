@@ -173,7 +173,6 @@ func TestFieldType_Zero(t *testing.T) {
 	}{
 		{TypeString, ""},
 		{TypeNameString, ""},
-		{TypeLowerCaseString, ""},
 		{TypeInt, 0},
 		{TypeInt64, int64(0)},
 		{TypeBool, false},

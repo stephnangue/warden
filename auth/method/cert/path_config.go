@@ -2,53 +2,56 @@ package cert
 
 import (
 	"context"
+	"encoding/pem"
+	"fmt"
+	"maps"
 	"net/http"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 )
 
 // pathConfig returns the config path definition
 func (b *certAuthBackend) pathConfig() *framework.Path {
+	fields := map[string]*framework.FieldSchema{
+		"trusted_ca_pem": {
+			Type:        framework.TypeString,
+			Description: "PEM-encoded trusted CA certificates",
+		},
+		"principal_claim": {
+			Type:          framework.TypeString,
+			Description:   "Identity source from certificate: cn (default), dns_san, email_san, uri_san, serial",
+			Default:       "cn",
+			AllowedValues: principalClaimAllowedValues(),
+		},
+		"token_ttl": {
+			Type:        framework.TypeDurationSecond,
+			Description: "Default token TTL (default: 1h)",
+		},
+		"revocation_mode": {
+			Type:        framework.TypeString,
+			Description: "Certificate revocation checking mode: none (default), crl, ocsp, best_effort",
+			Default:     "none",
+		},
+		"crl_cache_ttl": {
+			Type:        framework.TypeString,
+			Description: "CRL cache TTL (default: 1h). Example: 30m, 2h",
+			Default:     "1h",
+		},
+		"ocsp_timeout": {
+			Type:        framework.TypeString,
+			Description: "OCSP request timeout (default: 5s). Example: 3s, 10s",
+			Default:     "5s",
+		},
+	}
+	maps.Copy(fields, helper.FactsFieldSchemas(factsSources, certAliasSources))
+
 	return &framework.Path{
 		Pattern: "config",
-		Fields: map[string]*framework.FieldSchema{
-			"trusted_ca_pem": {
-				Type:        framework.TypeString,
-				Description: "PEM-encoded trusted CA certificates",
-			},
-			"principal_claim": {
-				Type:          framework.TypeString,
-				Description:   "Identity source from certificate: cn (default), dns_san, email_san, uri_san, serial",
-				Default:       "cn",
-				AllowedValues: principalClaimAllowedValues(),
-			},
-			"token_ttl": {
-				Type:        framework.TypeDurationSecond,
-				Description: "Default token TTL (default: 1h)",
-			},
-			"revocation_mode": {
-				Type:        framework.TypeString,
-				Description: "Certificate revocation checking mode: none (default), crl, ocsp, best_effort",
-				Default:     "none",
-			},
-			"crl_cache_ttl": {
-				Type:        framework.TypeString,
-				Description: "CRL cache TTL (default: 1h). Example: 30m, 2h",
-				Default:     "1h",
-			},
-			"ocsp_timeout": {
-				Type:        framework.TypeString,
-				Description: "OCSP request timeout (default: 5s). Example: 3s, 10s",
-				Default:     "5s",
-			},
-			"default_role": {
-				Type:        framework.TypeString,
-				Description: "Default role for transparent operations when no role is specified",
-			},
-		},
+		Fields:  fields,
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{
 				Callback: b.handleConfigRead,
@@ -64,7 +67,13 @@ func (b *certAuthBackend) pathConfig() *framework.Path {
 
 Set 'trusted_ca_pem' to the CA bundle that signs client certificates and
 'principal_claim' to the identity field (cn, dns_san, email_san, uri_san, or
-serial).`,
+serial).
+
+'entity_kind' (agent or human, default agent) names what the mount admits.
+'facts' maps certificate fields to the fact names the mount publishes beyond
+its built-in facts (ca, cn, dns_san, email_san, org, ou, serial, uri_san; ca
+is the SHA-256 fingerprint of each trust anchor the certificate verified to); a
+write replaces the whole map.`,
 	}
 }
 
@@ -85,36 +94,70 @@ func (b *certAuthBackend) handleConfigRead(ctx context.Context, req *logical.Req
 		certCount = parsePEMCertificates(b.config.TrustedCAPEM)
 	}
 
-	return &logical.Response{
-		StatusCode: http.StatusOK,
-		Data: map[string]any{
-			"trusted_ca_pem":   b.config.TrustedCAPEM,
-			"principal_claim":  b.config.PrincipalClaim,
-			"trusted_ca_count": certCount,
-			"token_ttl":        b.config.TokenTTL.String(),
-			"revocation_mode":  b.config.RevocationMode,
-			"crl_cache_ttl":    b.config.CRLCacheTTL,
-			"ocsp_timeout":     b.config.OCSPTimeout,
-			"default_role":     b.config.DefaultRole,
-		},
-	}, nil
+	data := map[string]any{
+		"trusted_ca_pem":    b.config.TrustedCAPEM,
+		"principal_claim":   b.config.PrincipalClaim,
+		"trusted_ca_count":  certCount,
+		"token_ttl":         b.config.TokenTTL.String(),
+		"revocation_mode":   b.config.RevocationMode,
+		"crl_cache_ttl":     b.config.CRLCacheTTL,
+		"ocsp_timeout":      b.config.OCSPTimeout,
+		"entity_kind":       b.config.EntityKind,
+		"facts":             maps.Clone(b.config.Facts),
+		"alias_name_source": b.config.AliasNameSource,
+	}
+	helper.SetWarnings(data, helper.RemovedConfigWarnings(b.config.removed))
+	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
 }
 
-// handleConfigWrite handles writing the configuration
+// handleConfigWrite handles writing the configuration.
+//
+// The write is built, persisted, and only then installed, so a write that is
+// refused or cannot be stored leaves the mount authenticating against what
+// storage holds. Writes are serialized, so each merges onto the configuration
+// the previous one left.
 func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
+	// Keys of the role era are refused, not ignored: the write would otherwise
+	// succeed while doing nothing the operator asked for. The stored config
+	// never carries them, so this write also removes any it still did.
+	if err := helper.RefuseRemovedConfigKeys(d.Raw); err != nil {
+		return logical.ErrorResponse(err), nil
+	}
+
 	// Build config map from field data
 	conf := make(map[string]any)
+
+	_, factsSent := d.GetOk("facts")
+	_, kindSent := d.GetOk("entity_kind")
+	_, aliasSent := d.GetOk("alias_name_source")
+	factsTouched := factsSent || kindSent || aliasSent
 
 	// Copy existing config if present
 	b.configMu.RLock()
 	if b.config != nil {
+		// Stored facts that do not compile would fail a write that leaves
+		// them in place, whatever else it changes; say how to replace them.
+		if !factsTouched {
+			if err := helper.FactsWriteError(&b.config.FactsConfig, false); err != nil {
+				b.configMu.RUnlock()
+				return &logical.Response{
+					StatusCode: http.StatusBadRequest,
+					Err:        err,
+				}, nil
+			}
+		}
 		conf["trusted_ca_pem"] = b.config.TrustedCAPEM
 		conf["principal_claim"] = b.config.PrincipalClaim
 		conf["token_ttl"] = b.config.TokenTTL
 		conf["revocation_mode"] = b.config.RevocationMode
 		conf["crl_cache_ttl"] = b.config.CRLCacheTTL
 		conf["ocsp_timeout"] = b.config.OCSPTimeout
-		conf["default_role"] = b.config.DefaultRole
+		conf["entity_kind"] = b.config.EntityKind
+		conf["facts"] = b.config.Facts
+		conf["alias_name_source"] = b.config.AliasNameSource
 	}
 	b.configMu.RUnlock()
 
@@ -125,31 +168,38 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		}
 	}
 
-	// Setup new config
-	if err := b.setupCertConfig(ctx, conf); err != nil {
+	// A facts write replaces the whole mapping; every name must be a string.
+	if raw, ok := d.GetOk("facts"); ok {
+		facts, err := helper.ParseFactsField(raw)
+		if err != nil {
+			return &logical.Response{
+				StatusCode: http.StatusBadRequest,
+				Err:        err,
+			}, nil
+		}
+		conf["facts"] = facts
+	}
+
+	// Build new config
+	config, err := buildCertConfig(ctx, conf)
+	if err != nil {
+		return &logical.Response{
+			StatusCode: http.StatusBadRequest,
+			Err:        err,
+		}, nil
+	}
+	// A write is the one place facts can be refused outright; storage and
+	// load only ever see a config that compiled here.
+	if err := helper.FactsWriteError(&config.FactsConfig, factsTouched); err != nil {
 		return &logical.Response{
 			StatusCode: http.StatusBadRequest,
 			Err:        err,
 		}, nil
 	}
 
-	// Persist the normalized config to storage so that on restart the
-	// parser always sees consistent types (e.g., token_ttl is always a
-	// duration string, never a raw int from an HTTP request).
+	// Persist the normalized config before installing it
 	if b.storageView != nil {
-		b.configMu.RLock()
-		normalized := map[string]any{
-			"trusted_ca_pem":  b.config.TrustedCAPEM,
-			"principal_claim": b.config.PrincipalClaim,
-			"token_ttl":       b.config.TokenTTL.String(),
-			"revocation_mode": b.config.RevocationMode,
-			"crl_cache_ttl":   b.config.CRLCacheTTL,
-			"ocsp_timeout":    b.config.OCSPTimeout,
-			"default_role":    b.config.DefaultRole,
-		}
-		b.configMu.RUnlock()
-
-		entry, err := sdklogical.StorageEntryJSON("config", normalized)
+		entry, err := sdklogical.StorageEntryJSON("config", normalizedCertConfig(config))
 		if err != nil {
 			return &logical.Response{
 				StatusCode: http.StatusInternalServerError,
@@ -164,10 +214,31 @@ func (b *certAuthBackend) handleConfigWrite(ctx context.Context, req *logical.Re
 		}
 	}
 
-	return &logical.Response{
-		StatusCode: http.StatusOK,
-		Data: map[string]any{
-			"message": "configuration updated",
-		},
-	}, nil
+	b.installConfig(config)
+
+	data := map[string]any{
+		"message": "configuration updated",
+	}
+	if n := config.Naming(); n != nil && n.AliasSource == factCommonName {
+		if anchors := countPEMCertificates(config.TrustedCAPEM); anchors > 1 {
+			helper.SetWarnings(data, []string{fmt.Sprintf(cnAliasSpansAnchors, anchors)})
+		}
+	}
+	return &logical.Response{StatusCode: http.StatusOK, Data: data}, nil
+}
+
+// countPEMCertificates counts the CERTIFICATE blocks of a PEM bundle.
+func countPEMCertificates(bundle string) int {
+	n := 0
+	rest := []byte(bundle)
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return n
+		}
+		if block.Type == "CERTIFICATE" {
+			n++
+		}
+	}
 }

@@ -9,31 +9,39 @@ import (
 )
 
 var (
-	updateMetadata map[string]string
-	updateJSON     string
+	updateMetadata           map[string]string
+	updateJSON               string
+	updateEnableBuiltinRoles bool
 
 	UpdateCmd = &cobra.Command{
 		Use:           "update <path>",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Short:         "This command updates a namespace's metadata.",
+		Short:         "This command updates a namespace's metadata and settings.",
 		Long: `
 Usage: warden namespace update <path> [options]
 
-  Update the custom metadata for an existing namespace. The namespace's
-  configuration and mounted backends are not affected. Two input modes:
+  Update the custom metadata or the built-in roles setting of an existing
+  namespace. Its mounted backends are not affected. Two input modes:
 
     Typed flags (human-friendly):
 
       $ warden namespace update my-team -metadata=environment=staging -metadata=team=devops
-      $ warden namespace update my-team -metadata=""        # clear
+      $ warden namespace update acme -enable-builtin-roles
+      $ warden namespace update acme -enable-builtin-roles=false
 
     Full JSON payload (agent-friendly):
 
       $ warden namespace update my-team -json @ns.json
       $ cat ns.json | warden namespace update my-team -json -
+      $ warden namespace update my-team -json '{"custom_metadata": {}}'   # clear
 
-  -json is mutually exclusive with -metadata. Combine with -dry-run to
+  -enable-builtin-roles makes the built-in operator roles (warden-admin,
+  warden-provider-admin, warden-security-admin, warden-viewer) resolvable in
+  the namespace; its children do not inherit it. Turning it off is refused
+  while a group in the namespace grants one of them.
+
+  -json is mutually exclusive with the typed flags. Combine with -dry-run to
   validate the payload locally without modifying the namespace.
 
   For more information about namespaces, please see the documentation.
@@ -45,7 +53,8 @@ Usage: warden namespace update <path> [options]
 
 func init() {
 	UpdateCmd.Flags().StringToStringVar(&updateMetadata, "metadata", nil, "Custom metadata for the namespace (can be specified multiple times)")
-	UpdateCmd.Flags().StringVarP(&updateJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with -metadata)")
+	UpdateCmd.Flags().StringVarP(&updateJSON, "json", "j", "", "Full JSON payload — '<json>', '@file.json', or '-' for stdin (mutually exclusive with the typed flags)")
+	UpdateCmd.Flags().BoolVar(&updateEnableBuiltinRoles, "enable-builtin-roles", false, "Make the built-in operator roles resolvable in the namespace (-enable-builtin-roles=false turns them off)")
 }
 
 func runUpdate(cmd *cobra.Command, args []string) error {
@@ -66,7 +75,8 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	if jsonPayload != nil {
 		if err := helpers.RejectFlagsWithJSON(true, map[string]bool{
-			"-metadata": cmd.Flags().Changed("metadata"),
+			"-metadata":             cmd.Flags().Changed("metadata"),
+			"-enable-builtin-roles": cmd.Flags().Changed("enable-builtin-roles"),
 		}); err != nil {
 			return err
 		}
@@ -91,21 +101,33 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	if !cmd.Flags().Changed("metadata") {
-		return fmt.Errorf("-metadata is required (or use -json): %w", helpers.ErrUsage)
+	setMetadata := cmd.Flags().Changed("metadata")
+	setBuiltinRoles := cmd.Flags().Changed("enable-builtin-roles")
+	if !setMetadata && !setBuiltinRoles {
+		return fmt.Errorf("-metadata or -enable-builtin-roles is required (or use -json): %w", helpers.ErrUsage)
 	}
 
 	// Build namespace update input
-	input := &api.UpdateNamespaceInput{
-		CustomMetadata: updateMetadata,
+	input := &api.UpdateNamespaceInput{}
+	if setMetadata {
+		input.CustomMetadata = updateMetadata
+	}
+	if setBuiltinRoles {
+		input.EnableBuiltinRoles = &updateEnableBuiltinRoles
 	}
 
 	if helpers.ResolveDryRun() {
-		md := make(map[string]any, len(updateMetadata))
-		for k, v := range updateMetadata {
-			md[k] = v
+		payload := map[string]any{}
+		if setMetadata {
+			md := make(map[string]any, len(updateMetadata))
+			for k, v := range updateMetadata {
+				md[k] = v
+			}
+			payload["custom_metadata"] = md
 		}
-		payload := map[string]any{"custom_metadata": md}
+		if setBuiltinRoles {
+			payload["enable_builtin_roles"] = updateEnableBuiltinRoles
+		}
 		return helpers.DryRun(c, "PUT", "sys/namespaces/{path}", payload)
 	}
 
@@ -116,8 +138,9 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	data := map[string]any{
-		"path":    output.Path,
-		"updated": true,
+		"path":                 output.Path,
+		"enable_builtin_roles": output.EnableBuiltinRoles,
+		"updated":              true,
 	}
 	if len(output.CustomMetadata) > 0 {
 		md := make(map[string]any, len(output.CustomMetadata))
@@ -131,6 +154,16 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	return helpers.RenderMap(data, func() {
 		fmt.Printf("Success! Updated namespace: %s\n", output.Path)
+		if setBuiltinRoles {
+			if output.EnableBuiltinRoles {
+				fmt.Println("Built-in roles: enabled")
+			} else {
+				fmt.Println("Built-in roles: disabled")
+			}
+		}
+		if !setMetadata {
+			return
+		}
 		if len(output.CustomMetadata) > 0 {
 			fmt.Println("\nUpdated Metadata:")
 			for key, value := range output.CustomMetadata {

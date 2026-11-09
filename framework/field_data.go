@@ -40,7 +40,7 @@ func (d *FieldData) Validate() error {
 
 		switch schema.Type {
 		case TypeBool, TypeInt, TypeInt64, TypeMap, TypeDurationSecond, TypeSignedDurationSecond, TypeString,
-			TypeLowerCaseString, TypeNameString, TypeSlice, TypeStringSlice, TypeCommaStringSlice,
+			TypeNameString, TypeSlice, TypeStringSlice, TypeCommaStringSlice,
 			TypeKVPairs, TypeCommaIntSlice, TypeHeader, TypeFloat, TypeTime:
 			_, _, err := d.getPrimitive(field, schema)
 			if err != nil {
@@ -153,7 +153,7 @@ func (d *FieldData) GetOkErr(k string) (interface{}, bool, error) {
 
 	switch schema.Type {
 	case TypeBool, TypeInt, TypeInt64, TypeMap, TypeDurationSecond, TypeSignedDurationSecond, TypeString,
-		TypeLowerCaseString, TypeNameString, TypeSlice, TypeStringSlice, TypeCommaStringSlice,
+		TypeNameString, TypeSlice, TypeStringSlice, TypeCommaStringSlice,
 		TypeKVPairs, TypeCommaIntSlice, TypeHeader, TypeFloat, TypeTime:
 		return d.getPrimitive(k, schema)
 	default:
@@ -203,13 +203,6 @@ func (d *FieldData) getPrimitive(k string, schema *FieldSchema) (interface{}, bo
 			return nil, false, err
 		}
 		return result, true, nil
-
-	case TypeLowerCaseString:
-		var result string
-		if err := mapstructure.WeakDecode(raw, &result); err != nil {
-			return nil, false, err
-		}
-		return strings.ToLower(result), true, nil
 
 	case TypeNameString:
 		var result string

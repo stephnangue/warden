@@ -2,7 +2,9 @@ package credential
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
@@ -26,7 +28,17 @@ type DriverCoordinator struct {
 	driverRegistry *DriverRegistry
 	configStore    ConfigStoreAccessor
 	logger         *logger.GatedLogger
+
+	// stopped is set when the manager that owns this coordinator stops. The
+	// registry outlives the manager, and a build still running when the node stops
+	// being active must not install a driver the next promotion would serve.
+	stopped atomic.Bool
 }
+
+// Stop makes every later attempt to build a driver fail. The manager calls it
+// before the registry's instances are closed, which is what lets a build refused
+// by that close tell that it must not be retried.
+func (c *DriverCoordinator) Stop() { c.stopped.Store(true) }
 
 // NewDriverCoordinator creates a new DriverCoordinator instance
 func NewDriverCoordinator(
@@ -51,32 +63,68 @@ func NewDriverCoordinator(
 //
 // Returns the driver instance or an error
 func (c *DriverCoordinator) GetOrCreateDriver(ctx context.Context, sourceName string) (SourceDriver, error) {
-	// First try to get existing driver
+	// A cached instance is the common case and costs one map read.
 	if driver, ok := c.driverRegistry.GetDriver(ctx, sourceName); ok {
 		return driver, nil
 	}
 
-	// Driver doesn't exist, fetch source config and create it
-	credSource, err := c.configStore.GetSource(ctx, sourceName)
-	if err != nil {
-		return nil, fmt.Errorf("source '%s' not found: %w", sourceName, err)
+	// Building an instance reads the source and then installs, and the two cannot
+	// be done under one lock — the read goes through the config store, the install
+	// through the registry. A source update landing in between used to leave the
+	// driver built from the config read before it, permanently: nothing re-checks a
+	// registry hit, so that instance was served until the next update or a restart.
+	//
+	// So the generation is read first, and the install refused if it moved while
+	// the source was being read. Config updates are rare, and each retry starts by
+	// re-checking the registry, so this settles immediately in practice; the bound
+	// exists only so a pathological update storm cannot spin here.
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if driver, ok := c.driverRegistry.GetDriver(ctx, sourceName); ok {
+			return driver, nil
+		}
+
+		generation, err := c.driverRegistry.Generation(ctx, sourceName)
+		if err != nil {
+			return nil, err
+		}
+		// Checked after the generation is read: a stop that lands later is caught
+		// at install by the epoch CloseAll bumps, and one that landed earlier is
+		// seen here, since the manager stops before the registry is closed.
+		if c.stopped.Load() {
+			return nil, ErrCredentialManagerStopped
+		}
+
+		credSource, err := c.configStore.GetSource(ctx, sourceName)
+		if err != nil {
+			return nil, fmt.Errorf("source '%s' not found: %w", sourceName, err)
+		}
+
+		driver, created, err := c.driverRegistry.CreateDriver(ctx, sourceName, credSource, generation)
+		if errors.Is(err, ErrDriverConfigChanged) {
+			// Nobody is waiting for the retry any more.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to create driver for source '%s': %w", sourceName, err)
+		}
+
+		// Only log when a new driver was actually created (not when returning existing)
+		if created {
+			ns, _ := namespace.FromContext(ctx)
+			c.logger.Debug("credential source driver created",
+				logger.String("namespace", ns.ID),
+				logger.String("source_name", sourceName),
+				logger.String("source_type", credSource.Type))
+		}
+
+		return driver, nil
 	}
 
-	driver, created, err := c.driverRegistry.CreateDriver(ctx, sourceName, credSource)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create driver for source '%s': %w", sourceName, err)
-	}
-
-	// Only log when a new driver was actually created (not when returning existing)
-	if created {
-		ns, _ := namespace.FromContext(ctx)
-		c.logger.Debug("credential source driver created",
-			logger.String("namespace", ns.ID),
-			logger.String("source_name", sourceName),
-			logger.String("source_type", credSource.Type))
-	}
-
-	return driver, nil
+	return nil, fmt.Errorf("failed to create driver for source '%s': config kept changing after %d attempts", sourceName, maxAttempts)
 }
 
 // CloseDriver closes and removes a driver instance by source name.

@@ -109,6 +109,60 @@ func TestLBCertHeaderForwarding(t *testing.T) {
 	}
 }
 
+// TestLBKeyProofOnlyCertRefused verifies that a certificate the load balancer
+// forwards in a header is not granted a key_proof_only role: nginx did the
+// handshake, not Warden. The flag takes effect on the next request.
+func TestLBKeyProofOnlyCertRefused(t *testing.T) {
+	h.SkipWithoutLB(t)
+
+	port := h.GetLeaderPort(t)
+	caCertPEM, caKey := h.LoadLBCA(t)
+	h.SetupCertVaultEnvWithCA(t, port, caCertPEM)
+	defer h.TeardownCertVaultEnv(t, port)
+
+	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cert-lb-proof")
+
+	status, body := h.VaultCertTransparentRequestViaLB(t, "GET",
+		"secret/data/e2e/app-config", h.CertReaderRole, clientCertPEM, clientKeyPEM)
+	if status != 200 {
+		t.Fatalf("expected 200 before the flag, got %d: %s", status, string(body))
+	}
+
+	h.MustNS(t, port, "", "PUT", "sys/roles/"+h.CertReaderRole, `{"key_proof_only":true}`)
+	status, body = h.VaultCertTransparentRequestViaLB(t, "GET",
+		"secret/data/e2e/app-config", h.CertReaderRole, clientCertPEM, clientKeyPEM)
+	if status != 403 {
+		t.Fatalf("expected 403 with the flag, got %d: %s", status, string(body))
+	}
+}
+
+// TestLBKeyProofOnlyJWTRefused verifies that a JWT, a bearer credential, is not
+// granted a key_proof_only role.
+func TestLBKeyProofOnlyJWTRefused(t *testing.T) {
+	h.SkipWithoutLB(t)
+
+	port := h.GetLeaderPort(t)
+	role := h.UniqueMount("e2e-lb-key-proof")
+	h.GrantRole(t, port, "auth/jwt/", role, h.Role{
+		Policies:     []string{"vault-gateway-access"},
+		CredSpec:     "vault-token-reader",
+		ProviderPath: "vault/",
+	}, nil)
+	t.Cleanup(func() { h.RevokeRoleBestEffort(port, "auth/jwt/", role) })
+
+	jwt := h.GetDefaultJWT(t)
+	status, body := h.VaultTransparentRequestViaLB(t, "GET", "secret/data/e2e/app-config", role, jwt)
+	if status != 200 {
+		t.Fatalf("expected 200 before the flag, got %d: %s", status, string(body))
+	}
+
+	h.MustNS(t, port, "", "PUT", "sys/roles/"+role, `{"key_proof_only":true}`)
+	status, body = h.VaultTransparentRequestViaLB(t, "GET", "secret/data/e2e/app-config", role, jwt)
+	if status != 403 {
+		t.Fatalf("expected 403 with the flag, got %d: %s", status, string(body))
+	}
+}
+
 // TestLBConcurrentJWTTransparent verifies that multiple concurrent JWT
 // transparent requests through the load balancer all succeed.
 func TestLBConcurrentJWTTransparent(t *testing.T) {

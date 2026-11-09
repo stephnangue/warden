@@ -9,8 +9,8 @@ import (
 // It provides thread-safe storage and management of the current root token.
 type RootTokenManager struct {
 	mu           sync.RWMutex
-	currentToken string    // The actual token value (cws.*)
-	tokenID      string    // Computed hash-based ID (wtkn_*)
+	currentToken string    // The actual token value (wds.*, or cws.* if issued before the wd prefixes)
+	tokenID      string    // Computed hash-based ID (wds_*, or wtkn_* if issued before the wd prefixes)
 	generated    time.Time // When the token was generated
 }
 

@@ -1,8 +1,8 @@
 // Package mcpfilter rewrites MCP JSON-RPC list responses so that only the
-// items a policy allows remain. It handles the three name-bearing list
-// methods — tools/list, resources/list, prompts/list — for both the
-// application/json and text/event-stream (SSE) shapes that MCP Streamable
-// HTTP returns.
+// items a policy allows remain. It handles the name-bearing list methods —
+// tools/list, resources/list, prompts/list, and the Skills extension's
+// skills/list and resources/directory/read — for both the application/json
+// and text/event-stream (SSE) shapes that MCP Streamable HTTP returns.
 //
 // The package is pure mechanics: it holds no policy state and takes a
 // keep-predicate supplied by the caller. Policy semantics (which names are
@@ -24,18 +24,36 @@ import (
 // listFamily binds a list method to the result array key it returns and the
 // per-item field that carries the name matched by the call-time policy gate.
 // The name fields mirror the strict parser's call-side extraction:
-// tools/call → params.name, resources/read → params.uri, prompts/get →
-// params.name, so a list item is filtered by the same field the gate reads.
+// tools/call → params.name, resources/read and skills/get → params.uri,
+// prompts/get → params.name, so a list item is filtered by the same field the
+// gate reads.
 type listFamily struct {
 	arrayKey  string
 	nameField string
 }
 
+// A skills/list entry is kept or dropped whole, by its SKILL.md uri. Its
+// nested resources array is never edited: SEP-2640 requires it to list every
+// file of the skill, and a host verifying a trimmed set would treat the skill
+// as tampered with. A kept entry is unchanged in content; re-encoding the
+// envelope compacts whitespace and HTML-escapes <, > and &, which no host
+// check observes (digests cover file bytes, frontmatter is compared by field). A resources/directory/read result is a page of ordinary
+// Resource objects, filtered by uri exactly as resources/list is.
 var listFamilies = map[string]listFamily{
-	"tools/list":     {arrayKey: "tools", nameField: "name"},
-	"resources/list": {arrayKey: "resources", nameField: "uri"},
-	"prompts/list":   {arrayKey: "prompts", nameField: "name"},
+	"tools/list":               {arrayKey: "tools", nameField: "name"},
+	"resources/list":           {arrayKey: "resources", nameField: "uri"},
+	"prompts/list":             {arrayKey: "prompts", nameField: "name"},
+	"skills/list":              {arrayKey: "skills", nameField: "uri"},
+	"resources/directory/read": {arrayKey: "resources", nameField: "uri"},
 }
+
+// cacheScope is the result field by which a server tells intermediaries
+// whether its answer may be shared. "public" explicitly authorises a shared
+// cache to serve the same bytes to anyone.
+const (
+	cacheScopeKey     = "cacheScope"
+	cacheScopePrivate = "private"
+)
 
 // FilterListResponse rewrites a list-method response body, dropping items
 // whose name the keep predicate rejects.
@@ -43,15 +61,19 @@ var listFamilies = map[string]listFamily{
 //   - out is always the bytes the caller should send: the filtered body when
 //     changed is true, or the original body unchanged when changed is false.
 //     The caller must write out (it has already consumed the source stream).
-//   - changed reports whether any item was removed.
+//   - changed reports whether the body was rewritten — an item removed, or
+//     a cacheScope narrowed to "private". The second counts even when
+//     nothing was dropped: a listing pruned for one principal is not the
+//     document another would get, so a shared cache must not be told it is.
 //   - err is non-nil only when the body cannot be parsed as the expected
 //     list-result shape. The caller must fail closed (never stream the
 //     original) on an error, because an unparseable body cannot be proven
 //     free of denied items.
 //
-// listMethod must be one of tools/list, resources/list, prompts/list — the
-// only methods for which the core policy layer attaches a filter. An unknown
-// method is treated as a fail-closed error.
+// listMethod must be one of tools/list, resources/list, prompts/list,
+// skills/list or resources/directory/read — the only methods for which the
+// core policy layer attaches a filter. An unknown method is treated as a
+// fail-closed error.
 func FilterListResponse(listMethod, contentType string, body []byte, keep func(name string) bool) (out []byte, changed bool, err error) {
 	fam, ok := listFamilies[strings.ToLower(listMethod)]
 	if !ok {
@@ -105,8 +127,9 @@ func filterJSON(body []byte, fam listFamily, keep func(string) bool) ([]byte, bo
 }
 
 // filterResult filters the array under fam.arrayKey inside a JSON-RPC result
-// object, preserving every other field (nextCursor, unknown fields). Returns
-// the rewritten result and whether any item was dropped.
+// object, preserving every other field (nextCursor, ttlMs, unknown fields),
+// and narrows cacheScope to "private". Returns the rewritten result and
+// whether either changed it.
 func filterResult(resultRaw json.RawMessage, fam listFamily, keep func(string) bool) (json.RawMessage, bool, error) {
 	var result map[string]json.RawMessage
 	if err := json.Unmarshal(resultRaw, &result); err != nil {
@@ -115,10 +138,22 @@ func filterResult(resultRaw json.RawMessage, fam listFamily, keep func(string) b
 		return nil, false, fmt.Errorf("mcpfilter: result is not an object: %w", err)
 	}
 
+	// Narrow the scope before the array lookup: a result that carries a
+	// cacheScope but no family array still described a per-principal answer,
+	// and returning early would leave a public scope on the wire.
+	scopeChanged := privatizeCacheScope(result)
+
 	arrRaw, ok := result[fam.arrayKey]
 	if !ok {
 		// Result carries no array for this family — nothing to filter.
-		return nil, false, nil
+		if !scopeChanged {
+			return nil, false, nil
+		}
+		newResult, err := json.Marshal(result)
+		if err != nil {
+			return nil, false, fmt.Errorf("mcpfilter: re-marshal result: %w", err)
+		}
+		return newResult, true, nil
 	}
 
 	var items []json.RawMessage
@@ -139,20 +174,58 @@ func filterResult(resultRaw json.RawMessage, fam listFamily, keep func(string) b
 		}
 	}
 
-	if len(kept) == len(items) {
+	if len(kept) == len(items) && !scopeChanged {
 		return nil, false, nil
 	}
 
-	newArr, err := json.Marshal(kept)
-	if err != nil {
-		return nil, false, fmt.Errorf("mcpfilter: re-marshal %s: %w", fam.arrayKey, err)
+	if len(kept) != len(items) {
+		newArr, err := json.Marshal(kept)
+		if err != nil {
+			return nil, false, fmt.Errorf("mcpfilter: re-marshal %s: %w", fam.arrayKey, err)
+		}
+		result[fam.arrayKey] = newArr
 	}
-	result[fam.arrayKey] = newArr
 	newResult, err := json.Marshal(result)
 	if err != nil {
 		return nil, false, fmt.Errorf("mcpfilter: re-marshal result: %w", err)
 	}
 	return newResult, true, nil
+}
+
+// privatizeCacheScope rewrites a result's cacheScope to "private", reporting
+// whether it changed anything.
+//
+// The listing this result carries was pruned for one principal, so it is not
+// the same document another principal would get. An upstream that marked it
+// "public" was describing its own unfiltered answer and is authorising shared
+// intermediaries to serve it to anyone. Warden creates the variance, so
+// Warden marks it.
+//
+// A rewrite counts as a change even when no item was dropped: "nothing was
+// dropped for THIS principal" is not "this document is the same for
+// everyone", and the whole point is to stop a shared cache assuming the
+// latter.
+//
+// The field is never added when the upstream omitted it. Inventing one would
+// put a field on the wire the server never sent, which strict clients are
+// entitled to object to, and an absent cacheScope already means the
+// conservative thing.
+func privatizeCacheScope(result map[string]json.RawMessage) bool {
+	raw, ok := result[cacheScopeKey]
+	if !ok {
+		return false
+	}
+	var scope string
+	if err := json.Unmarshal(raw, &scope); err != nil {
+		// Not a string. Leave it alone rather than guess at a shape the
+		// spec does not define; the Cache-Control header still applies.
+		return false
+	}
+	if scope == cacheScopePrivate {
+		return false
+	}
+	result[cacheScopeKey] = json.RawMessage(`"` + cacheScopePrivate + `"`)
+	return true
 }
 
 // itemName extracts the string value of nameField from a list item. Returns

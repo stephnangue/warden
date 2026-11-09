@@ -1,7 +1,9 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/go-multierror"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/credential"
@@ -839,6 +842,167 @@ func TestMergeAuditConfig(t *testing.T) {
 		_, has := out["hmac_key"]
 		assert.False(t, has, "no salt anywhere → none in output (buildConfigAuditEntry generates on first-register)")
 	})
+
+	// A template rendering empty (an unset environment variable) must not
+	// overwrite the stored salt: the device would stop salting for good.
+	t.Run("an empty HCL hmac_key keeps the stored one", func(t *testing.T) {
+		declared := map[string]any{"file_path": "/x", "hmac_key": ""}
+		stored := map[string]any{"file_path": "/x", "hmac_key": "stable-salt-abc"}
+		out := mergeAuditConfig(declared, stored)
+		assert.Equal(t, "stable-salt-abc", out["hmac_key"])
+	})
+
+	t.Run("an empty key on both sides leaves hmac_key absent", func(t *testing.T) {
+		declared := map[string]any{"file_path": "/x", "hmac_key": ""}
+		stored := map[string]any{"file_path": "/x", "hmac_key": ""}
+		out := mergeAuditConfig(declared, stored)
+		_, has := out["hmac_key"]
+		assert.False(t, has)
+	})
+}
+
+// What a factory changed to keep a device safe is logged by core with the
+// device's mount path: the factory has no logger of its own.
+func TestNewAuditBackend_LogsFactoryWarnings(t *testing.T) {
+	core := newCoreForLoadAuditsTest(t)
+	var buf bytes.Buffer
+	cfg := logger.DefaultConfig()
+	cfg.Outputs = nil
+	core.logger, _ = logger.NewGatedLogger(cfg, logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+
+	backend, err := core.newAuditBackend(context.Background(), &MountEntry{
+		Class: mountClassAudit,
+		Type:  "file",
+		Path:  "siem/",
+		Config: map[string]any{
+			"file_path":   filepath.Join(t.TempDir(), "audit.log"),
+			"salt_fields": []any{"auth.token_id"},
+		},
+	})
+	require.NoError(t, err)
+	defer backend.Close()
+
+	logged := buf.String()
+	assert.Contains(t, logged, "siem/")
+	assert.Contains(t, logged, "no hmac_key")
+	assert.Contains(t, logged, "auth.token_id")
+}
+
+// Enabling a device refuses a salt or omit path that names no field, and
+// registers and persists nothing. Such a path used to be ignored without a
+// word, leaving in clear a value its operator believed hashed.
+func TestEnableAudit_RefusesUnknownFieldPath(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core := newCoreForLoadAuditsTest(t)
+
+	err := core.EnableAudit(ctx, &MountEntry{
+		Class: mountClassAudit,
+		Type:  "file",
+		Path:  "siem/",
+		Config: map[string]any{
+			"file_path":   filepath.Join(t.TempDir(), "audit.log"),
+			"hmac_key":    "k",
+			"salt_fields": []any{"agent.metadata.env"},
+		},
+	}, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `salt_fields "agent.metadata.env": matches no audit field`)
+	assert.Empty(t, core.audit.Entries)
+	stored, err := core.barrier.Get(ctx, coreAuditConfigPath)
+	require.NoError(t, err)
+	assert.Nil(t, stored, "nothing is persisted")
+}
+
+// A stored device holding such a path still loads at unseal, without the path,
+// and the drop is logged: an upgrade must never fail to start.
+func TestLoadAudits_StoredUnknownFieldPathLoads(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core := newCoreForLoadAuditsTest(t)
+	var buf bytes.Buffer
+	cfg := logger.DefaultConfig()
+	cfg.Outputs = nil
+	core.logger, _ = logger.NewGatedLogger(cfg, logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+
+	core.audit.Entries = append(core.audit.Entries, &MountEntry{
+		Class:       mountClassAudit,
+		Type:        "file",
+		Path:        "siem/",
+		Accessor:    "audit_file_test",
+		NamespaceID: namespace.RootNamespaceID,
+		namespace:   namespace.RootNamespace,
+		Config: map[string]any{
+			"file_path":   filepath.Join(t.TempDir(), "audit.log"),
+			"hmac_key":    "k",
+			"salt_fields": []any{"auth.token_id", "agent.metadata.env"},
+		},
+	})
+	require.NoError(t, core.persistAudits(ctx))
+	core.audit = NewMountTable()
+
+	require.NoError(t, core.loadAudits(ctx))
+	require.Len(t, core.audit.Entries, 1)
+	logged := buf.String()
+	assert.Contains(t, logged, "siem/")
+	assert.Contains(t, logged, `ignored salt_fields \"agent.metadata.env\"`)
+}
+
+// An empty HCL hmac_key counts as absent: a new device gets a generated key,
+// and one stored without a key gets one at the next refresh. Without a key,
+// a device would drop every salted field.
+func TestLoadAudits_EmptyHMACKeyIsGenerated(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	declare := func(core *Core, auditPath string) {
+		core.auditConfigDeclarations = []*MountEntry{{
+			Type:        "file",
+			Path:        "siem",
+			Config:      map[string]any{"file_path": auditPath, "hmac_key": ""},
+			Declarative: true,
+		}}
+	}
+
+	t.Run("new device", func(t *testing.T) {
+		core := newCoreForLoadAuditsTest(t)
+		declare(core, filepath.Join(t.TempDir(), "audit.log"))
+		require.NoError(t, core.loadAudits(ctx))
+		require.Len(t, core.audit.Entries, 1)
+		assert.NotEmpty(t, core.audit.Entries[0].Config["hmac_key"])
+	})
+
+	// With the generated key stored, the next boot's empty HCL key changes
+	// nothing: the table is not rewritten on every boot.
+	t.Run("a stored key is kept without a refresh", func(t *testing.T) {
+		core := newCoreForLoadAuditsTest(t)
+		declare(core, filepath.Join(t.TempDir(), "audit.log"))
+		require.NoError(t, core.loadAudits(ctx))
+		stored := core.audit.Entries[0].Config["hmac_key"]
+
+		var buf bytes.Buffer
+		cfg := logger.DefaultConfig()
+		cfg.Outputs = nil
+		core.logger, _ = logger.NewGatedLogger(cfg, logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+		core.audit = NewMountTable()
+		require.NoError(t, core.loadAudits(ctx))
+
+		require.Len(t, core.audit.Entries, 1)
+		assert.Equal(t, stored, core.audit.Entries[0].Config["hmac_key"])
+		assert.NotContains(t, buf.String(), "refreshing HCL-declared audit device")
+	})
+
+	t.Run("refresh of a device stored without a key", func(t *testing.T) {
+		core := newCoreForLoadAuditsTest(t)
+		auditPath := filepath.Join(t.TempDir(), "audit.log")
+		declare(core, auditPath)
+		require.NoError(t, core.loadAudits(ctx))
+		require.Len(t, core.audit.Entries, 1)
+
+		// What the old merge stored: the empty HCL key in place of the salt.
+		core.audit.Entries[0].Config["hmac_key"] = ""
+		require.NoError(t, core.persistAudits(ctx))
+		core.audit = NewMountTable()
+		require.NoError(t, core.loadAudits(ctx))
+		require.Len(t, core.audit.Entries, 1)
+		assert.NotEmpty(t, core.audit.Entries[0].Config["hmac_key"])
+	})
 }
 
 // newCoreForLoadAuditsTest builds a real-barrier Core wired with the real
@@ -871,7 +1035,6 @@ func TestBuildAuditRequest_BasicFields(t *testing.T) {
 		MountPoint: "secret/",
 		MountType:  "kv",
 		ClientIP:   "192.168.1.1",
-		Data:       map[string]any{"key": "value"},
 	}
 
 	result := buildAuditRequest(req, nil)
@@ -882,7 +1045,37 @@ func TestBuildAuditRequest_BasicFields(t *testing.T) {
 	assert.Equal(t, "secret/", result.MountPoint)
 	assert.Equal(t, "kv", result.MountType)
 	assert.Equal(t, "192.168.1.1", result.ClientIP)
-	assert.Equal(t, "value", result.Data["key"])
+}
+
+// auditJSON is the entry part as a device would write it, before any salt or
+// omit rule: whatever a builder put in it.
+func auditJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return string(b)
+}
+
+// The request's headers and body never enter its audit record: they carry the
+// caller's credentials, and, once a provider has prepared the upstream call,
+// the minted ones, which it sets on the same header map.
+func TestBuildAuditRequest_RecordsNoHeadersOrBody(t *testing.T) {
+	httpReq, _ := http.NewRequest("POST", "/v1/vault/gateway/v1/secret", nil)
+	httpReq.Header.Set("Authorization", "Bearer eyJ.CALLER-JWT")
+	httpReq.Header.Set("X-Warden-Token", "wst_CALLER-TOKEN")
+	httpReq.Header.Set("X-Vault-Token", "hvs.MINTED-TOKEN")
+
+	req := &logical.Request{
+		Path:        "vault/gateway/v1/secret",
+		HTTPRequest: httpReq,
+		Data:        map[string]any{"jwt": "eyJ.LOGIN-JWT", "password": "LOGIN-PASSWORD"},
+	}
+	got := auditJSON(t, buildAuditRequest(req, nil))
+
+	assert.Contains(t, got, `"method":"POST"`)
+	for _, secret := range []string{"CALLER-JWT", "CALLER-TOKEN", "MINTED-TOKEN", "LOGIN-JWT", "LOGIN-PASSWORD", "Authorization", `"headers"`, `"data"`} {
+		assert.NotContains(t, got, secret)
+	}
 }
 
 func TestBuildAuditRequest_WithAuditPath(t *testing.T) {
@@ -911,7 +1104,6 @@ func TestBuildAuditRequest_WithNamespace(t *testing.T) {
 
 func TestBuildAuditRequest_WithHTTPRequest(t *testing.T) {
 	httpReq, _ := http.NewRequest("GET", "/v1/secret/data/foo", nil)
-	httpReq.Header.Set("X-Request-Id", "ext-123")
 
 	req := &logical.Request{
 		Path:        "secret/data/foo",
@@ -919,8 +1111,6 @@ func TestBuildAuditRequest_WithHTTPRequest(t *testing.T) {
 	}
 	result := buildAuditRequest(req, nil)
 	assert.Equal(t, "GET", result.Method)
-	assert.NotNil(t, result.Headers)
-	assert.Contains(t, result.Headers["X-Request-Id"], "ext-123")
 }
 
 // =============================================================================
@@ -935,13 +1125,11 @@ func TestBuildAuditResponse_NilResponse(t *testing.T) {
 func TestBuildAuditResponse_Basic(t *testing.T) {
 	resp := &logical.Response{
 		StatusCode: http.StatusOK,
-		Data:       map[string]any{"key": "value"},
 		Warnings:   []string{"warn1"},
 	}
 	result := buildAuditResponse(resp, nil, nil)
 	require.NotNil(t, result)
 	assert.Equal(t, http.StatusOK, result.StatusCode)
-	assert.Equal(t, "value", result.Data["key"])
 	assert.Contains(t, result.Warnings, "warn1")
 }
 
@@ -971,19 +1159,16 @@ func TestBuildAuditResponse_WithAuthResult(t *testing.T) {
 	resp := &logical.Response{
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
-			TokenType:      "jwt_role",
-			PrincipalID:    "user@example.com",
-			RoleName:       "admin",
-			Policies:       []string{"default", "admin"},
-			TokenTTL:       time.Hour,
-			CredentialSpec: "aws-dev",
+			TokenType:   "identity_token",
+			PrincipalID: "user@example.com",
+			Policies:    []string{"default", "admin"},
+			TokenTTL:    time.Hour,
 		},
 	}
 	result := buildAuditResponse(resp, nil, nil)
 	require.NotNil(t, result.AuthResult)
-	assert.Equal(t, "jwt_role", result.AuthResult.TokenType)
+	assert.Equal(t, "identity_token", result.AuthResult.TokenType)
 	assert.Equal(t, "user@example.com", result.AuthResult.PrincipalID)
-	assert.Equal(t, "admin", result.AuthResult.RoleName)
 	assert.Equal(t, int64(3600), result.AuthResult.TokenTTL)
 }
 
@@ -995,15 +1180,27 @@ func TestBuildAuditResponse_WithUpstreamURL(t *testing.T) {
 	assert.True(t, result.Streamed)
 }
 
-func TestBuildAuditResponse_WithHeaders(t *testing.T) {
+// The response's headers and body never enter its audit record: a login's body
+// holds the token it issued. The issued credential is recorded on its own, for
+// the format to salt.
+func TestBuildAuditResponse_RecordsNoHeadersOrBody(t *testing.T) {
 	headers := http.Header{}
-	headers.Set("Content-Type", "application/json")
+	headers.Set("Set-Cookie", "session=COOKIE-SECRET")
 	resp := &logical.Response{
-		StatusCode: http.StatusOK,
+		StatusCode: http.StatusCreated,
 		Headers:    headers,
+		Data:       map[string]any{"token_id": "wst_ISSUED-TOKEN", "data": map[string]any{"token": "ISSUED-SECRET"}},
 	}
-	result := buildAuditResponse(resp, nil, nil)
-	assert.Contains(t, result.Headers["Content-Type"], "application/json")
+	cred := &credential.Credential{CredentialID: "cred-1", Data: map[string]string{"secret_key": "CRED-SECRET"}}
+	result := buildAuditResponse(resp, nil, cred)
+	got := auditJSON(t, result)
+
+	assert.Contains(t, got, `"status_code":201`)
+	for _, secret := range []string{"COOKIE-SECRET", "ISSUED-TOKEN", "ISSUED-SECRET", `"headers"`, `"data":{"token`} {
+		assert.NotContains(t, got, secret)
+	}
+	require.NotNil(t, result.Credential)
+	assert.Equal(t, "CRED-SECRET", result.Credential.Data["secret_key"], "the credential is recorded, for the format's salt floor")
 }
 
 // =============================================================================
@@ -1019,7 +1216,7 @@ func TestBuildAuditAuth_FromTokenEntry(t *testing.T) {
 	te := &logical.TokenEntry{
 		ID:            "tok-123",
 		Accessor:      "acc-123",
-		Type:          "jwt_role",
+		Type:          "identity_token",
 		PrincipalID:   "user@example.com",
 		RoleName:      "admin",
 		Policies:      []string{"default"},
@@ -1033,6 +1230,7 @@ func TestBuildAuditAuth_FromTokenEntry(t *testing.T) {
 	require.NotNil(t, result)
 	assert.Equal(t, "tok-123", result.TokenID)
 	assert.Equal(t, "acc-123", result.TokenAccessor)
+	assert.Equal(t, "identity_token", result.TokenType)
 	assert.Equal(t, "user@example.com", result.PrincipalID)
 	assert.Equal(t, "ns-1", result.NamespaceID)
 	assert.Equal(t, "10.0.0.1", result.CreatedByIP)
@@ -1040,12 +1238,29 @@ func TestBuildAuditAuth_FromTokenEntry(t *testing.T) {
 	assert.Greater(t, result.TokenTTL, int64(0))
 }
 
+// The admitting mount's accessor, the alias the credential presented and the
+// mount's entity kind are recorded from the token and its admission.
+func TestBuildAuditAuth_NativeIdentity(t *testing.T) {
+	adm := aliasAdmission(t, "sub", map[string]any{"sub": "agent-1"})
+	adm.AliasName = "agent-1"
+	te := &logical.TokenEntry{ID: "tok", MountAccessor: "auth_jwt_1", Admission: adm}
+	result := buildAuditAuth(nil, te)
+	require.NotNil(t, result)
+	assert.Equal(t, "auth_jwt_1", result.MountAccessor)
+	assert.Equal(t, "agent-1", result.AliasName)
+	assert.Equal(t, logical.EntityKindAgent, result.EntityKind)
+
+	root := buildAuditAuth(nil, &logical.TokenEntry{ID: "root"})
+	assert.Empty(t, root.MountAccessor, "a token no mount issued")
+	assert.Empty(t, root.AliasName)
+	assert.Empty(t, root.EntityKind)
+}
+
 func TestBuildAuditAuth_FromAuth(t *testing.T) {
 	auth := &logical.Auth{
 		TokenAccessor: "auth-acc",
-		TokenType:     "cert_role",
+		TokenType:     "service_token",
 		PrincipalID:   "agent-1",
-		RoleName:      "role-1",
 		Policies:      []string{"p1", "p2"},
 		PolicyResults: &sdklogical.PolicyResults{
 			Allowed: true,
@@ -1058,37 +1273,53 @@ func TestBuildAuditAuth_FromAuth(t *testing.T) {
 	result := buildAuditAuth(auth, nil)
 	require.NotNil(t, result)
 	assert.Equal(t, "auth-acc", result.TokenAccessor)
-	assert.Equal(t, "cert_role", result.TokenType)
+	assert.Equal(t, "service_token", result.TokenType)
 	assert.Equal(t, "agent-1", result.PrincipalID)
 	assert.True(t, result.PolicyResults.Allowed)
 	assert.Contains(t, result.PolicyResults.GrantingPolicies, "p1")
 }
 
+func TestBuildAuditAuth_DenyingPolicy(t *testing.T) {
+	auth := &logical.Auth{
+		DenyingPolicy: "guard",
+		PolicyResults: &sdklogical.PolicyResults{Allowed: false},
+	}
+	result := buildAuditAuth(auth, nil)
+	require.NotNil(t, result)
+	assert.Equal(t, "guard", result.PolicyResults.DenyingPolicy)
+}
+
+// The Auth overrides the principal; the role is the token entry's, the role
+// projected onto this request's copy: an Auth carries none.
 func TestBuildAuditAuth_AuthOverridesTE(t *testing.T) {
 	te := &logical.TokenEntry{
 		PrincipalID: "old-user",
-		RoleName:    "old-role",
+		RoleName:    "projected-role",
 	}
 	auth := &logical.Auth{
 		PrincipalID: "new-user",
-		RoleName:    "new-role",
 	}
 	result := buildAuditAuth(auth, te)
 	assert.Equal(t, "new-user", result.PrincipalID)
-	assert.Equal(t, "new-role", result.RoleName)
+	assert.Equal(t, "projected-role", result.RoleName)
 }
 
 func TestBuildAuditAuth_ActorsFromTokenEntry(t *testing.T) {
 	te := &logical.TokenEntry{
 		PrincipalID: "mcp-github",
 		Actors: []logical.ActorRef{
-			{Subject: "agents/alpha"},
+			{Subject: "agents/alpha", Issuer: "https://idp.example.com"},
+			{Subject: "agents/root"},
 		},
 	}
 	result := buildAuditAuth(nil, te)
 	require.NotNil(t, result)
-	require.Len(t, result.Actors, 1)
-	assert.Equal(t, "agents/alpha", result.Actors[0].Subject)
+	// Each layer's issuer is recorded where the inbound layer had one, and only
+	// there.
+	assert.Equal(t, []audit.ActorRef{
+		{Subject: "agents/alpha", Issuer: "https://idp.example.com"},
+		{Subject: "agents/root"},
+	}, result.Actors)
 }
 
 func TestBuildAuditAuth_NoActors(t *testing.T) {
@@ -1108,19 +1339,24 @@ func TestBuildAuditAuthResult_Nil(t *testing.T) {
 
 func TestBuildAuditAuthResult_Basic(t *testing.T) {
 	auth := &logical.Auth{
-		TokenType:      "jwt_role",
-		PrincipalID:    "user",
-		RoleName:       "admin",
-		Policies:       []string{"default"},
-		TokenTTL:       30 * time.Minute,
-		CredentialSpec: "aws-dev",
+		TokenType:   "identity_token",
+		PrincipalID: "user",
+		TokenTTL:    30 * time.Minute,
+		Metadata:    map[string]string{"repo": "acme/infra"},
 	}
 	result := buildAuditAuthResult(auth)
 	require.NotNil(t, result)
-	assert.Equal(t, "jwt_role", result.TokenType)
+	assert.Equal(t, "identity_token", result.TokenType)
 	assert.Equal(t, "user", result.PrincipalID)
 	assert.Equal(t, int64(1800), result.TokenTTL)
-	assert.Equal(t, "aws-dev", result.CredentialSpec)
+	assert.Nil(t, result.Policies)
+
+	// A login result names no role, no spec and no metadata.
+	raw, err := json.Marshal(result)
+	require.NoError(t, err)
+	for _, key := range []string{"role_name", "credential_spec", "metadata", "acme/infra"} {
+		assert.NotContains(t, string(raw), key)
+	}
 }
 
 // =============================================================================
@@ -1160,53 +1396,6 @@ func TestBuildAuditCredential_NilData(t *testing.T) {
 	result := buildAuditCredential(cred)
 	require.NotNil(t, result)
 	assert.Nil(t, result.Data)
-}
-
-// =============================================================================
-// copyMapAny Tests
-// =============================================================================
-
-func TestCopyMapAny_Nil(t *testing.T) {
-	assert.Nil(t, copyMapAny(nil))
-}
-
-func TestCopyMapAny_NonNil(t *testing.T) {
-	original := map[string]any{"a": 1, "b": "two"}
-	copied := copyMapAny(original)
-	assert.Equal(t, original, copied)
-
-	copied["c"] = 3
-	assert.NotContains(t, original, "c")
-}
-
-// =============================================================================
-// copyHeaders Tests
-// =============================================================================
-
-func TestCopyHeaders_Nil(t *testing.T) {
-	assert.Nil(t, copyHeaders(nil))
-}
-
-func TestCopyHeaders_Basic(t *testing.T) {
-	headers := http.Header{
-		"Content-Type": []string{"application/json"},
-		"X-Custom":     []string{"val1", "val2"},
-	}
-	copied := copyHeaders(headers)
-	assert.Equal(t, []string{"application/json"}, copied["Content-Type"])
-	assert.Equal(t, []string{"val1", "val2"}, copied["X-Custom"])
-
-	copied["New-Header"] = []string{"new"}
-	_, exists := headers["New-Header"]
-	assert.False(t, exists)
-}
-
-func TestCopyHeaders_NilValues(t *testing.T) {
-	headers := http.Header{
-		"X-Empty": nil,
-	}
-	copied := copyHeaders(headers)
-	assert.Nil(t, copied["X-Empty"])
 }
 
 // =============================================================================
@@ -1275,6 +1464,26 @@ func TestBuildResponseAuditEntry_WithOuterErr(t *testing.T) {
 	assert.Equal(t, assert.AnError.Error(), entry.Error)
 }
 
+// A multierror is recorded as its messages, never its bulleted text: one
+// reads as itself, several are joined.
+func TestBuildAuditEntries_MultierrorText(t *testing.T) {
+	core := createMockCoreForAudit()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	req := &logical.Request{Path: "secret/data/foo"}
+	resp := &logical.Response{StatusCode: http.StatusForbidden}
+
+	one := multierror.Append(nil, errors.New("native identity (auth/jwt/, x) is unclaimed; unknown_aliases=deny"))
+	entry := core.buildResponseAuditEntry(ctx, req, resp, nil, nil, one)
+	assert.Equal(t, "native identity (auth/jwt/, x) is unclaimed; unknown_aliases=deny", entry.Error)
+
+	two := multierror.Append(nil, errors.New("first"), errors.New("second"))
+	entry = core.buildResponseAuditEntry(ctx, req, resp, nil, nil, two)
+	assert.Equal(t, "first; second", entry.Error)
+
+	entry = core.buildResponseAuditEntry(ctx, req, &logical.Response{Err: one}, nil, nil, nil)
+	assert.Equal(t, "native identity (auth/jwt/, x) is unclaimed; unknown_aliases=deny", entry.Error)
+}
+
 func TestBuildResponseAuditEntry_WithRespErr(t *testing.T) {
 	core := createMockCoreForAudit()
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
@@ -1335,4 +1544,89 @@ func TestBuildRequestAuditEntry_WithError(t *testing.T) {
 
 	entry := core.buildRequestAuditEntry(ctx, req, nil, nil, assert.AnError)
 	assert.Equal(t, assert.AnError.Error(), entry.Error)
+}
+
+// The client's self-description rides the request descriptor, not the
+// authorization result, because it decided nothing — so it is stamped onto
+// the entry separately, and must survive a request that never reached policy
+// evaluation.
+func TestStampMCPClient(t *testing.T) {
+	t.Run("stamped from the descriptor", func(t *testing.T) {
+		entry := &audit.LogEntry{}
+		req := &logical.Request{MCPDescriptor: &logical.MCPRequestDescriptor{
+			ClientInfoName:    "claude-code",
+			ClientInfoVersion: "2.1.0",
+		}}
+
+		stampMCPClient(entry, req)
+
+		require.NotNil(t, entry.Auth)
+		require.NotNil(t, entry.Auth.PolicyResults, "a refusal before policy evaluation has no PolicyResults yet")
+		require.NotNil(t, entry.Auth.PolicyResults.MCPClient)
+		assert.Equal(t, "claude-code", entry.Auth.PolicyResults.MCPClient.Name)
+		assert.Equal(t, "2.1.0", entry.Auth.PolicyResults.MCPClient.Version)
+	})
+
+	t.Run("absent client info stamps nothing", func(t *testing.T) {
+		entry := &audit.LogEntry{}
+		stampMCPClient(entry, &logical.Request{MCPDescriptor: &logical.MCPRequestDescriptor{}})
+		assert.Nil(t, entry.Auth)
+	})
+
+	t.Run("non-MCP request stamps nothing", func(t *testing.T) {
+		entry := &audit.LogEntry{}
+		stampMCPClient(entry, &logical.Request{})
+		assert.Nil(t, entry.Auth)
+	})
+
+	t.Run("nil-safe", func(t *testing.T) {
+		stampMCPClient(nil, nil)
+	})
+}
+
+// The async audit writer works from a clone, so a field the clone drops is a
+// field that never reaches the log.
+func TestLogEntry_CloneCarriesMCPClient(t *testing.T) {
+	entry := &audit.LogEntry{Auth: &audit.Auth{PolicyResults: &audit.PolicyResults{
+		MCPClient: &audit.MCPClientInfo{Name: "claude-code", Version: "2.1.0"},
+	}}}
+
+	clone := entry.Clone()
+
+	require.NotNil(t, clone.Auth.PolicyResults.MCPClient)
+	assert.Equal(t, "claude-code", clone.Auth.PolicyResults.MCPClient.Name)
+
+	clone.Auth.PolicyResults.MCPClient.Name = "mutated"
+	assert.Equal(t, "claude-code", entry.Auth.PolicyResults.MCPClient.Name,
+		"the clone must not share the struct with the live entry")
+}
+
+// The stamp is only useful if the entry builders call it. Asserting through
+// them rather than through stampMCPClient directly means removing the call
+// site fails the test.
+func TestAuditEntries_CarryMCPClient(t *testing.T) {
+	c := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	req := &logical.Request{
+		Path:      "mcp/gateway/",
+		Operation: logical.UpdateOperation,
+		MCPDescriptor: &logical.MCPRequestDescriptor{
+			ClientInfoName:    "claude-code",
+			ClientInfoVersion: "2.1.0",
+		},
+	}
+
+	t.Run("request entry", func(t *testing.T) {
+		entry := c.buildRequestAuditEntry(ctx, req, nil, nil, nil)
+		require.NotNil(t, entry.Auth)
+		require.NotNil(t, entry.Auth.PolicyResults.MCPClient)
+		assert.Equal(t, "claude-code", entry.Auth.PolicyResults.MCPClient.Name)
+	})
+
+	t.Run("response entry", func(t *testing.T) {
+		entry := c.buildResponseAuditEntry(ctx, req, &logical.Response{StatusCode: 403}, nil, nil, nil)
+		require.NotNil(t, entry.Auth)
+		require.NotNil(t, entry.Auth.PolicyResults.MCPClient)
+		assert.Equal(t, "2.1.0", entry.Auth.PolicyResults.MCPClient.Version)
+	})
 }

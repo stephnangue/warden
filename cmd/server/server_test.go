@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stephnangue/warden/config"
+	wardenlogical "github.com/stephnangue/warden/logical"
 )
 
 func TestResolveDevSpiffeTLS(t *testing.T) {
@@ -47,6 +49,44 @@ func TestResolveDevSpiffeTLS(t *testing.T) {
 	}
 }
 
+func TestResolveDevListenAddress(t *testing.T) {
+	tests := []struct {
+		name     string
+		dev      bool
+		flagAddr string
+		envAddr  string
+		want     string
+		wantErr  string
+	}{
+		{name: "neither set keeps the default", dev: true},
+		{name: "flag", dev: true, flagAddr: "0.0.0.0:8400", want: "0.0.0.0:8400"},
+		{name: "env", dev: true, envAddr: "0.0.0.0:8400", want: "0.0.0.0:8400"},
+		{name: "flag overrides env", dev: true, flagAddr: "127.0.0.1:9400", envAddr: "0.0.0.0:8400", want: "127.0.0.1:9400"},
+		{name: "empty host binds all interfaces", dev: true, flagAddr: ":8400", want: ":8400"},
+		{name: "ipv6", dev: true, flagAddr: "[::]:8400", want: "[::]:8400"},
+		{name: "env ignored outside dev", envAddr: "0.0.0.0:8400"},
+		{name: "invalid env ignored outside dev", envAddr: "nonsense"},
+		{name: "flag without -dev — error", flagAddr: "0.0.0.0:8400", wantErr: "can only be used with -dev"},
+		{name: "missing port — error", dev: true, flagAddr: "0.0.0.0", wantErr: "invalid -dev-listen-address"},
+		{name: "non-numeric port — error", dev: true, flagAddr: "0.0.0.0:http", wantErr: "port must be a number"},
+		{name: "port out of range — error", dev: true, flagAddr: "0.0.0.0:70000", wantErr: "port must be a number"},
+		{name: "port zero — error", dev: true, flagAddr: "0.0.0.0:0", wantErr: "port must be a number"},
+		{name: "invalid env names the env var", dev: true, envAddr: "0.0.0.0", wantErr: "invalid " + envDevListenAddress},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveDevListenAddress(tt.dev, tt.flagAddr, tt.envAddr)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestBuildSpiffeSources_NoSpiffeListeners(t *testing.T) {
 	conf := &config.Config{
 		Listeners: []config.ListenerBlock{
@@ -80,4 +120,23 @@ func TestBuildSpiffeSources_FailClosed(t *testing.T) {
 	assert.Nil(t, sources)
 	assert.Nil(t, closeFn)
 	assert.Contains(t, err.Error(), "SPIFFE serving identity")
+}
+
+// Every shipped provider skill must be named after its provider type under
+// the Agent Skills naming rule, or SeedProviderSkill rejects it on mount.
+func TestProviderSkills_NamedForProviderType(t *testing.T) {
+	nameLine := regexp.MustCompile(`(?m)^name:\s*(\S+)\s*$`)
+	for typ, md := range providerSkills {
+		m := nameLine.FindStringSubmatch(md)
+		if m == nil {
+			t.Errorf("%s: skill.md has no name field", typ)
+			continue
+		}
+		if want := wardenlogical.SkillNameForProvider(typ); m[1] != want {
+			t.Errorf("%s: skill.md name = %q, want %q", typ, m[1], want)
+		}
+		if !wardenlogical.ValidSkillName(m[1]) {
+			t.Errorf("%s: skill.md name %q is not a valid skill name", typ, m[1])
+		}
+	}
 }

@@ -11,6 +11,7 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
 )
@@ -27,6 +28,10 @@ type alicloudBackend struct {
 	tlsSkipVerify bool
 	caData        string
 	proxyDomains  []string
+
+	// configWriteMu serializes config writes, so each one validates, persists
+	// and applies against the configuration the previous one left.
+	configWriteMu sync.Mutex
 }
 
 // getProxyDomains returns a snapshot of the configured proxy domains under
@@ -211,6 +216,10 @@ func (b *alicloudBackend) Initialize(ctx context.Context) error {
 	if b.StorageView == nil {
 		return nil
 	}
+	// The mount is routed before it is initialized, so a config write can
+	// arrive now; it must not interleave with loading the stored config.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	entry, err := b.StorageView.Get(ctx, "config")
 	if err != nil {
@@ -238,18 +247,31 @@ func (b *alicloudBackend) Initialize(ctx context.Context) error {
 		b.caData = config.CAData
 		b.proxyDomains = config.ProxyDomains
 		if config.Timeout != "" {
-			if timeout, err := time.ParseDuration(config.Timeout); err == nil {
+			// A stored zero keeps the default: the timeout is the only bound
+			// on how long an upstream may take.
+			if timeout, err := time.ParseDuration(config.Timeout); err == nil && timeout > 0 {
 				b.SetTimeout(timeout)
+			} else if err == nil {
+				b.Logger.Warn("ignoring stored timeout that is not positive; keeping the default",
+					logger.String("timeout", config.Timeout),
+					logger.String("default", b.Timeout().String()))
 			}
 		}
 		b.mu.Unlock()
 
+		// Install the transport the stored settings call for — the shared one
+		// when they set no TLS, so one built from mount-time TLS settings does
+		// not outlive them. A config write rebuilds the transport only when
+		// the TLS settings change, so it relies on this matching them.
 		if b.tlsSkipVerify || b.caData != "" {
 			transport, err := newTransportWithTLS(b.caData, b.tlsSkipVerify)
 			if err != nil {
 				return fmt.Errorf("invalid TLS configuration: %w", err)
 			}
 			b.SetTransport(transport)
+		} else {
+			initTransport()
+			b.SetTransport(sharedTransport)
 		}
 
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{

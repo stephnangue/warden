@@ -10,6 +10,7 @@ import (
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/sdk/upstream"
 )
 
 // defaultAcceptJSON is the Accept value injected when no spec or dispatch
@@ -20,18 +21,26 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	// Framework-side fields are atomic — read directly.
 	timeout := b.Timeout()
 	maxBody := b.MaxBodySize()
-	// Provider-local fields still need the RLock.
+	// Provider-local fields still need the RLock. extraState comes out of the
+	// same snapshot the spec hooks below read; it must not be mutated here.
 	b.mu.RLock()
 	providerURL := b.providerURL
 	proxy := b.Proxy
+	state := b.extraState
 	b.mu.RUnlock()
+
+	// A spec may pick a different deadline for this request shape than the
+	// mount-wide one — an MCP subscription is open-ended where a tool call is
+	// not. Zero means "keep the mount timeout".
+	if b.spec.SelectTimeout != nil {
+		if d := b.spec.SelectTimeout(req, state); d > 0 {
+			timeout = d
+		}
+	}
 
 	credExtractor := b.spec.ExtractCredentials
 	var dispatch Dispatch
 	if b.spec.ResolveUpstream != nil {
-		b.mu.RLock()
-		state := b.extraState
-		b.mu.RUnlock()
 		if d, ok := b.spec.ResolveUpstream(req.HTTPRequest, providerURL, state); ok {
 			dispatch = d
 			if d.UpstreamURL != "" {
@@ -46,12 +55,37 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 		}
 	}
 
+	// A request the provider will not forward is answered here, before any
+	// credential is extracted or the upstream is contacted.
+	if b.spec.RefuseRequest != nil {
+		if status, err := b.spec.RefuseRequest(req.HTTPRequest, providerURL, state); err != nil {
+			if status < 400 || status > 599 {
+				status = http.StatusBadRequest
+			}
+			if !b.writeGatewayFailure(req.ResponseWriter, req.HTTPRequest, &logical.GatewayFailure{
+				Class: logical.ClassifyGatewayFailure(status, err), Status: status, Err: err,
+				RequestID: req.RequestID,
+			}) {
+				http.Error(req.ResponseWriter, err.Error(), status)
+			}
+			return
+		}
+	}
+
 	// Apply timeout if configured
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 		req.HTTPRequest = req.HTTPRequest.WithContext(ctx)
+	}
+
+	// The failures written below, and the proxy's 502 and 504, answer the
+	// call by its id on an MCP mount. Done after the timeout, whose context
+	// is not derived from the request's own. Costs an allocation only on a
+	// request that has a single call with an id.
+	if b.spec.RenderGatewayError != nil {
+		req.HTTPRequest = WithMCPCallID(req)
 	}
 
 	// Enforce max body size
@@ -72,33 +106,53 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 		credHeaders, err = credExtractor(req)
 		if err != nil {
 			b.Logger.Warn("Failed to get credentials", logger.Err(err))
-			http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
+			// The credential Warden minted lacks what the extractor needs: Warden's
+			// fault, not the caller's authentication, so it is classed internal.
+			// The 401 is kept as it has always been answered.
+			if !b.writeGatewayFailure(req.ResponseWriter, req.HTTPRequest, &logical.GatewayFailure{
+				Class: logical.GatewayFailureInternal, Status: http.StatusUnauthorized, Err: errCredentialNotUsable,
+				RequestID: req.RequestID,
+			}) {
+				http.Error(req.ResponseWriter, "Unauthorized", http.StatusUnauthorized)
+			}
 			return
 		}
 	}
 
 	// Build target URL
-	targetURL, err := buildTargetURL(providerURL, req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
+	parsedURL, err := buildTargetURL(providerURL, req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
 	if err != nil {
 		b.Logger.Error("Failed to build target URL", logger.Err(err))
-		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+		b.writeInternalFailure(req)
 		return
 	}
 
 	// Prepare request for proxying
 	r := req.HTTPRequest
-	parsedURL, err := url.Parse(targetURL)
-	if err != nil {
-		b.Logger.Error("Failed to parse target URL", logger.Err(err))
-		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
-		return
-	}
 	r.URL = parsedURL
 	r.Host = parsedURL.Host
 	r.RequestURI = "" // Required for outgoing requests
 
 	// Clean headers and inject credentials
 	b.prepareHeaders(r, credHeaders, dispatch)
+
+	// Mark this mount's traffic so ModifyResponse can declare the response
+	// per-principal. Keyed on the spec opting into MCP enforcement, which is
+	// the only thing that means "responses here are judged per principal".
+	//
+	// Deliberately NOT req.MCPDescriptor != nil: proxyBackend implements
+	// MCPPolicyEnforced for every provider it backs, so core installs the
+	// empty sentinel on github, openai and git traffic too. Reading that as
+	// "governed" would mark the whole provider surface uncacheable by any
+	// shared cache — a cost nothing here is asking anyone to pay.
+	//
+	// Being per-mount rather than per-request is the point: it covers the
+	// listing where every item survived and no filter was attached, the
+	// resources/read gated request-side, and resources/templates/list, which
+	// is cacheable but is not a filterable family.
+	if b.spec.ShouldEnforceMCPPolicy != nil {
+		r = r.WithContext(withMCPGoverned(r.Context()))
+	}
 
 	// When the policy layer attached an MCP list filter, carry it into the
 	// proxy's ModifyResponse via the request context, and strip Accept-Encoding
@@ -107,6 +161,17 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	if req.MCPListFilter != nil {
 		r = r.WithContext(withMCPListFilter(r.Context(), req.MCPListFilter))
 		r.Header.Del("Accept-Encoding")
+	}
+
+	// A spec that rewrites this response gets it through the same hook, with
+	// where its links should point. Accept-Encoding is dropped so the body arrives
+	// uncompressed and can be read; a request with no prefix to rewrite onto is
+	// left exactly as it was.
+	if b.spec.ModifyResponse != nil && b.spec.RewriteResponse != nil && b.spec.RewriteResponse(r, state) {
+		if prefix := b.rewritePrefix(ctx, req); prefix != "" {
+			r = r.WithContext(withRewriteContext(r.Context(), RewriteContext{Prefix: prefix, MaxBodySize: maxBody}))
+			r.Header.Del("Accept-Encoding")
+		}
 	}
 
 	b.Logger.Trace("Proxying request",
@@ -120,19 +185,32 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	proxy.ServeHTTP(req.ResponseWriter, r)
 }
 
-// buildTargetURL constructs the target URL from the gateway path.
-func buildTargetURL(providerURL, path, rawQuery string) (string, error) {
+// writeInternalFailure answers a request whose upstream address could not be
+// built, rendered when the spec renders its errors.
+func (b *proxyBackend) writeInternalFailure(req *logical.Request) {
+	if !b.writeGatewayFailure(req.ResponseWriter, req.HTTPRequest, &logical.GatewayFailure{
+		Class: logical.GatewayFailureInternal, Status: http.StatusInternalServerError, Err: errUpstreamAddress,
+		RequestID: req.RequestID,
+	}) {
+		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+	}
+}
+
+// buildTargetURL constructs the target URL from the gateway path. path is the
+// decoded request path the request was authorized on; it is escaped once on
+// the wire and never decoded again (see package upstream).
+func buildTargetURL(providerURL, path, rawQuery string) (*url.URL, error) {
 	// Providers whose upstream is instance-specific (gitlab, kubernetes,
 	// splunk, mcp, ...) ship an empty DefaultURL and require the operator
 	// to configure one. Guard here so a request to an unconfigured mount fails
 	// with a clear, logged error instead of forwarding to a schemeless URL
 	// that surfaces as an opaque proxy-level 502.
 	if providerURL == "" {
-		return "", fmt.Errorf("upstream URL not configured")
+		return nil, fmt.Errorf("upstream URL not configured")
 	}
 	apiPath, ok := PathAfterGateway(path)
 	if !ok {
-		return "", fmt.Errorf("invalid gateway path: %s", path)
+		return nil, fmt.Errorf("invalid gateway path: %s", path)
 	}
 	// Preserve the client's path after "/gateway" verbatim, including whether it
 	// ended in a slash. A bare ".../gateway" (empty suffix) targets the configured
@@ -141,10 +219,7 @@ func buildTargetURL(providerURL, path, rawQuery string) (string, error) {
 	// trailing slash that strict servers 301-redirect; host-only upstreams are
 	// unaffected since net/http sends an empty path as "/".
 
-	if rawQuery != "" {
-		return providerURL + apiPath + "?" + rawQuery, nil
-	}
-	return providerURL + apiPath, nil
+	return upstream.URL(providerURL, apiPath, rawQuery)
 }
 
 // PathAfterGateway returns the portion of path that follows the first
@@ -185,27 +260,7 @@ func resolveAcceptDefault(specDefault string, dispatch Dispatch) string {
 // The dispatch carries per-request overrides for Accept defaulting and dynamic-header
 // injection; zero values mean "use the spec defaults."
 func (b *proxyBackend) prepareHeaders(r *http.Request, credHeaders map[string]string, dispatch Dispatch) {
-	// Read Connection header before removing it
-	conn := r.Header.Get("Connection")
-
-	// Remove base headers
-	for _, h := range BaseHeadersToRemove {
-		r.Header.Del(h)
-	}
-
-	// Remove provider-specific extra headers
-	for _, h := range b.spec.ExtraHeadersToRemove {
-		r.Header.Del(h)
-	}
-
-	// Handle Connection header's listed headers
-	if conn != "" {
-		for _, h := range strings.Split(conn, ",") {
-			if h = strings.TrimSpace(h); h != "" {
-				r.Header.Del(h)
-			}
-		}
-	}
+	b.spec.StripInboundHeaders(r.Header)
 
 	// Inject credential headers
 	for k, v := range credHeaders {

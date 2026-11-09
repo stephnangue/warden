@@ -1,0 +1,28 @@
+---
+// Starlight 0.36 has no config option for arbitrary top-nav links, so the
+// supported route is a component override. SocialIcons is overridden rather
+// than Header: the header's flex markup has shifted across 0.3x minors, while
+// this component is a leaf that takes no props (it reads config.social itself).
+//
+// Re-check this file on any Starlight upgrade.
+import Default from '@astrojs/starlight/components/SocialIcons.astro';
+---
+
+<a href="/blog/" class="header-blog-link">Blog</a>
+<Default />
+
+<style>
+  .header-blog-link {
+    display: flex;
+    align-items: center;
+    color: var(--sl-color-text);
+    text-decoration: none;
+    font-size: var(--sl-text-sm);
+    padding: 0 0.5rem;
+    white-space: nowrap;
+  }
+
+  .header-blog-link:hover {
+    color: var(--sl-color-text-accent);
+  }
+</style>

@@ -38,10 +38,31 @@ func TestCredential_IsExpired(t *testing.T) {
 			expected: true,
 		},
 		{
+			// Inside the margin (a tenth of the lease, here 6s): not handed out to
+			// lapse in flight.
 			name:     "about to expire",
 			leaseTTL: time.Minute,
 			issuedAt: time.Now().Add(-59 * time.Second),
+			expected: true,
+		},
+		{
+			name:     "just before the margin",
+			leaseTTL: time.Minute,
+			issuedAt: time.Now().Add(-50 * time.Second),
 			expected: false,
+		},
+		{
+			// The margin never exceeds 30s, however long the lease.
+			name:     "long lease, margin capped",
+			leaseTTL: 10 * time.Hour,
+			issuedAt: time.Now().Add(-10*time.Hour + 40*time.Second),
+			expected: false,
+		},
+		{
+			name:     "long lease, inside the capped margin",
+			leaseTTL: 10 * time.Hour,
+			issuedAt: time.Now().Add(-10*time.Hour + 20*time.Second),
+			expected: true,
 		},
 	}
 

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
@@ -257,6 +258,27 @@ func TestExpirationManager_NilCore(t *testing.T) {
 
 	// Entry should be cleaned up even though Core is nil
 	assert.Equal(t, int64(0), m.GetPendingCount())
+}
+
+// A stopped manager never fires a timer, so a registration after Stop is refused
+// and nothing is persisted: the caller revokes the lease instead of leaving it for
+// the next unseal.
+func TestExpirationManager_RegisterAfterStopIsRefused(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	storage := &sdklogical.InmemStorage{}
+	m := NewExpirationManager(nil, log, storage)
+	m.Stop()
+
+	ctx := createTestNamespaceContext("ns-1")
+	err := m.RegisterCredential(ctx, "cred-uuid-123", "ns-1:token-123", 5*time.Minute,
+		"lease-abc", "vault-source", "hvault", "db-spec", true)
+	require.ErrorIs(t, err, ErrExpirationManagerStopped)
+	require.ErrorIs(t, m.RegisterToken(ctx, "token-123", 5*time.Minute, true), ErrExpirationManagerStopped)
+
+	assert.Equal(t, int64(0), m.GetPendingCount())
+	persisted, err := storage.List(context.Background(), expirationPendingPath)
+	require.NoError(t, err)
+	assert.Empty(t, persisted)
 }
 
 func TestExpirationManager_StopCancelsTimers(t *testing.T) {

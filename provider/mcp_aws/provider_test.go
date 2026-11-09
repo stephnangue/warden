@@ -2,9 +2,16 @@ package mcp_aws
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stretchr/testify/assert"
@@ -302,15 +309,45 @@ func TestShouldEnforceMCPPolicy_DeclinesNonPOST(t *testing.T) {
 	}
 }
 
-func TestShouldEnforceMCPPolicy_DeclinesNonJSON(t *testing.T) {
+// A POST is enforced whatever its label: a relabelled tools/call must not slip
+// past the MCP rules, and the strict parser refuses a body that is not JSON-RPC.
+func TestShouldEnforceMCPPolicy_EnforcesEveryPost(t *testing.T) {
 	b := setupBackend(t)
 	for _, ct := range []string{"", "text/plain", "application/octet-stream", "text/event-stream", "application/x-www-form-urlencoded"} {
 		t.Run(ct, func(t *testing.T) {
 			enforce, capBytes := b.ShouldEnforceMCPPolicy(mustGateReq("POST", ct))
-			assert.False(t, enforce)
-			assert.Equal(t, int64(0), capBytes, "declined requests must return cap=0; a later behavior change that returned MaxBodySize on decline would mislead core")
+			assert.True(t, enforce)
+			assert.Positive(t, capBytes, "an enforced request carries the body cap the extractor reads under")
 		})
 	}
+}
+
+// A call Warden refuses is answered as that call's JSON-RPC error, so the
+// client keeps its session — the same answer the generic mcp provider gives.
+func TestRenderGatewayError_AnswersTheCall(t *testing.T) {
+	var b mcpAWSBackend
+	req := &logical.Request{
+		HTTPRequest: httptest.NewRequest(http.MethodPost, "/v1/aws/gateway/", nil),
+		MCPDescriptor: &logical.MCPRequestDescriptor{Calls: []logical.MCPCall{{
+			Method: "tools/call", RawID: json.RawMessage(`4`), IDPresent: true,
+		}}},
+	}
+	resp := b.RenderGatewayError(req, &logical.GatewayFailure{
+		Status: http.StatusForbidden,
+		Err:    sdklogical.ErrPermissionDenied,
+	})
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	var got struct {
+		ID    json.RawMessage `json:"id"`
+		Error struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body, &got))
+	assert.JSONEq(t, `4`, string(got.ID))
+	assert.NotZero(t, got.Error.Code)
 }
 
 func TestShouldEnforceMCPPolicy_NilSafe(t *testing.T) {
@@ -372,4 +409,213 @@ func TestConfigWrite_ExplicitRegionWins(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "us-west-2", b.region)
+}
+
+// --- listen_timeout ---
+
+// mcp_aws persists and reloads its own config rather than using httpproxy's
+// spec hooks, so the new field needs its own round-trip: a write must reach
+// the backend, be readable back, and survive a restart.
+func TestConfigWrite_ListenTimeoutRoundTrip(t *testing.T) {
+	b := setupBackend(t)
+	storage := newInmemStorage()
+	b.StorageView = storage
+
+	path := b.pathConfig()
+	fd := makeFieldData(path, map[string]any{
+		"mcp_aws_url":    "https://aws-mcp.us-east-1.api.aws/mcp",
+		"auto_auth_path": "auth/cert/",
+		"listen_timeout": "2h",
+	})
+	resp, err := b.handleConfigWrite(context.Background(), nil, fd)
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode)
+
+	b.mu.RLock()
+	applied := b.listenTimeout
+	b.mu.RUnlock()
+	assert.Equal(t, 2*time.Hour, applied)
+
+	readResp, err := b.handleConfigRead(context.Background(), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "2h0m0s", readResp.Data["listen_timeout"])
+
+	// Restart: a fresh backend must come back on the configured value, not
+	// the default.
+	fresh := setupBackend(t)
+	fresh.StorageView = storage
+	require.NoError(t, fresh.Initialize(context.Background()))
+	fresh.mu.RLock()
+	defer fresh.mu.RUnlock()
+	assert.Equal(t, 2*time.Hour, fresh.listenTimeout)
+}
+
+// A partial update must not silently reset the other deadline — the merge
+// base carries listen_timeout forward.
+func TestConfigWrite_ListenTimeoutSurvivesUnrelatedUpdate(t *testing.T) {
+	b := setupBackend(t)
+	path := b.pathConfig()
+
+	resp, err := b.handleConfigWrite(context.Background(), nil, makeFieldData(path, map[string]any{
+		"mcp_aws_url":    "https://aws-mcp.us-east-1.api.aws/mcp",
+		"auto_auth_path": "auth/cert/",
+		"listen_timeout": "45m",
+	}))
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode)
+
+	resp, err = b.handleConfigWrite(context.Background(), nil, makeFieldData(path, map[string]any{
+		"auto_auth_path": "auth/cert/",
+		"default_role":   "s3-reader",
+	}))
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode)
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	assert.Equal(t, 45*time.Minute, b.listenTimeout)
+}
+
+func TestConfigWrite_ListenTimeoutRejectsNonPositive(t *testing.T) {
+	b := setupBackend(t)
+	path := b.pathConfig()
+
+	resp, err := b.handleConfigWrite(context.Background(), nil, makeFieldData(path, map[string]any{
+		"mcp_aws_url":    "https://aws-mcp.us-east-1.api.aws/mcp",
+		"auto_auth_path": "auth/cert/",
+		"listen_timeout": "0s",
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, 400, resp.StatusCode, "substituting the default would hide the operator's mistake")
+}
+
+// A mount configured before listen_timeout existed comes up with the default
+// rather than a zero deadline, which would mean "no ceiling at all".
+func TestInitialize_ListenTimeoutDefaultsForOlderConfig(t *testing.T) {
+	storage := newInmemStorage()
+	entry, _ := sdklogical.StorageEntryJSON("config", map[string]any{
+		"mcp_aws_url":    "https://aws-mcp.us-east-1.api.aws/mcp",
+		"timeout":        "5m",
+		"auto_auth_path": "auth/cert/",
+	})
+	require.NoError(t, storage.Put(context.Background(), entry))
+
+	b := setupBackend(t)
+	b.StorageView = storage
+	require.NoError(t, b.Initialize(context.Background()))
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	assert.Equal(t, httpproxy.DefaultListenTimeout, b.listenTimeout)
+}
+
+func writeConfig(b *mcpAWSBackend, raw map[string]any) *logical.Response {
+	resp, _ := b.handleConfigWrite(context.Background(), nil, makeFieldData(b.pathConfig(), raw))
+	return resp
+}
+
+// failingStorage refuses every write.
+type failingStorage struct{ *inmemStorage }
+
+func (failingStorage) Put(context.Context, *sdklogical.StorageEntry) error {
+	return errors.New("storage unavailable")
+}
+
+// A write that cannot be persisted is not applied either: the mount keeps
+// serving what storage holds. Before, the new URL, region, timeout,
+// transparent config and transport were live by the time the storage write
+// failed.
+func TestConfigWrite_UnpersistedWriteNotApplied(t *testing.T) {
+	b := setupBackend(t)
+	require.Equal(t, 200, writeConfig(b, map[string]any{"auto_auth_path": "auth/jwt/"}).StatusCode)
+	b.StorageView = failingStorage{newInmemStorage()}
+
+	resp := writeConfig(b, map[string]any{
+		"mcp_aws_url":     "https://aws-mcp.eu-frankfurt-1.api.aws/mcp",
+		"timeout":         99,
+		"tls_skip_verify": true,
+		"auto_auth_path":  "auth/other/",
+	})
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	snap := b.snapshot()
+	assert.Equal(t, "aws-mcp.us-east-1.api.aws", snap.upstreamURL.Host)
+	assert.Equal(t, "us-east-1", snap.region)
+	assert.Equal(t, DefaultMCPAWSTimeout, snap.timeout)
+	assert.Equal(t, "auth/jwt/", b.TransparentConfig().AutoAuthPath)
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	_, err := snap.transport.RoundTrip(req)
+	var verifyErr *tls.CertificateVerificationError
+	assert.ErrorAs(t, err, &verifyErr, "an unpersisted write must not have turned TLS verification off")
+}
+
+// Two partial writes racing each merge onto the configuration the other left,
+// so neither loses the other's key. Before, both could merge onto the same
+// snapshot and the second to install undid the first.
+func TestConfigWrite_ConcurrentPartialWritesKeepEveryKey(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		b := setupBackend(t)
+		require.Equal(t, 200, writeConfig(b, map[string]any{"auto_auth_path": "auth/jwt/"}).StatusCode)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			writeConfig(b, map[string]any{"region": "eu-west-1"})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			writeConfig(b, map[string]any{"timeout": 77})
+		}()
+		close(start)
+		wg.Wait()
+
+		snap := b.snapshot()
+		require.Equal(t, "eu-west-1", snap.region, "iteration %d lost the region write", i)
+		require.Equal(t, 77*time.Second, snap.timeout, "iteration %d lost the timeout write", i)
+	}
+}
+
+// A per-mount transport a config write replaces has its idle connections
+// closed. Before, they stayed open until the idle timeout, one set for every
+// write that rebuilt the transport.
+func TestConfigWrite_ClosesReplacedTransport(t *testing.T) {
+	closed := make(chan struct{}, 1)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	b := setupBackend(t)
+	require.Equal(t, 200, writeConfig(b, map[string]any{"auto_auth_path": "auth/jwt/", "tls_skip_verify": true}).StatusCode)
+	require.NotNil(t, b.installedTransport)
+
+	// Leave one idle keep-alive connection on the per-mount transport.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := b.snapshot().transport.RoundTrip(req)
+	require.NoError(t, err)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	require.Equal(t, 200, writeConfig(b, map[string]any{"tls_skip_verify": false}).StatusCode)
+	assert.Nil(t, b.installedTransport, "clearing TLS goes back to the shared transport")
+
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the replaced transport's idle connection was not closed")
+	}
 }

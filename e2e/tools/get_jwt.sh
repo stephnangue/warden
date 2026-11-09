@@ -2,7 +2,8 @@
 # Get a JWT from Ory Hydra via client_credentials grant.
 # Usage: get_jwt.sh [client_id] [client_secret] [scope]
 #
-# Defaults to the "e2e-agent" client created during setup.
+# Defaults to the "e2e-agent" client created during setup. The token is issued
+# for the warden-e2e audience, the one Warden's auth mounts bind.
 #
 # Examples:
 #   get_jwt.sh                                    # default e2e-agent client
@@ -15,7 +16,7 @@ SCOPE="${3:-api:read api:write}"
 
 RESPONSE=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&scope=${SCOPE}" 2>/dev/null)
+  -d "grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&scope=${SCOPE}&audience=warden-e2e" 2>/dev/null)
 
 # Extract access_token from JSON response
 TOKEN=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null)

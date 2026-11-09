@@ -15,17 +15,31 @@ or another agent the agent acts for*, not necessarily a person.
 
 Every gateway request resolves up to two principals:
 
-- The **agent** — the caller's own credential. It is authenticated, and **today it is
-  the sole authorizer**: it alone drives the [policy](/concepts/policies/) decision.
-- The **user** — a second, first-class token resolved from a separate request header
-  (`X-Warden-User-Token` by default) through the same [auth methods](/auth-methods/), via
-  **secondary transparent authentication**. The user is **identity-only**: it does not
-  authorize the request and never appears in the policy engine.
+- The **agent** — the caller's own credential. It is authenticated, and it is the **sole
+  authorizer**: the [role](/identity/roles/) its groups grant on the request carries the
+  policies that drive the [policy](/identity/policies/) decision.
+- The **user** — a second credential, admitted by the auth mount the provider's
+  `user_auth_path` names, through the same [auth methods](/auth-methods/). It is
+  admitted with no role, and no group grants it one. On a mount
+  with `user_auth_path` set, the user's credential arrives in `Authorization` and the agent
+  presents its own out of band, as a client certificate or in `X-Warden-Agent-Token`.
 
-> **Present behavior, not a permanent guarantee.** Today the user principal is used only
-> for *attribution and scoping* — never authorization. The roadmap is for authorization
-> to become the **intersection of the agent's and the user's permissions** (both must
-> permit the request). Read "the user does not authorize" as *today*, not *never*.
+The user is **identity-only**, which is a narrower claim than it sounds: the user grants
+no permissions — `user.policies` does not exist, and no policy is ever evaluated against
+the user's token — but the user *is* visible to the policy engine as a condition input.
+A [CEL condition](/identity/cel-conditions/#agent-acting-for-a-user) can read `user.*` and
+refuse a request that has no user, or one whose user is not bound to the agent presenting
+it:
+
+```hcl
+condition = "user.present && user.metadata.authorized_agent == agent.principal"
+```
+
+So the user cannot *widen* what an agent may do, but it can be made *required*. When a
+condition like this denies because no user was presented, Warden answers **`401` with a
+`WWW-Authenticate: Bearer` challenge** rather than a bare `403`, so the client knows to
+authenticate a user and retry; a retry that presents a user and still fails gets a
+terminal `403`.
 
 The feature is opt-in and fail-closed: with no `user_auth_path` configured, the user
 principal is absent and the request behaves exactly as before. When configured, a
@@ -103,15 +117,15 @@ forwards the user's token so the downstream token carries `sub`=user / `act`=age
 
 ### Per-user OAuth token from OpenBao / Vault
 
-Many upstreams — GitHub, Slack, and more — do not (yet) support ID-JAG. For those, lean
-on **OpenBao/Vault's OAuth-app secrets engine + templated policies** to mint a genuine
+Most upstreams — GitHub and Slack among them — do not support ID-JAG. For those, lean on
+**OpenBao/Vault's OAuth-app secrets engine + templated policies** to mint a genuine
 **per-user** OAuth access token: Warden authenticates to the vault keylessly with a
 per-user identity assertion, the vault's templated policy scopes the read to that user,
 and Warden injects the returned token — so the agent acts on behalf of the user against
 an upstream with no native on-behalf-of flow.
 
-**OpenBao/Vault are uniquely suited to do this at scale**: a single **templated policy**
-scopes every user, so there is no per-user role explosion.
+This scales because a single **templated policy** covers every user, so there is no
+per-user role explosion.
 
 **Per-user OAuth from a vault.** A per-user identity assertion unlocks that user's OAuth token through a templated policy, which Warden injects into the non-ID-JAG upstream.
 
@@ -119,11 +133,12 @@ scopes every user, so there is no per-user role explosion.
 
 ## What pairing the user principal with federation unlocks
 
-- **Per-user cloud credentials** — a `warden_identity` spec with
-  [`assertion_user_claims`](/federation/assertion-claims/#the-user--warden_user) mints an
-  assertion where the agent is `sub`/`warden_sub` but a nested `warden_user` claim names
-  the user, so an upstream trust policy scopes access to that user while still binding the
-  agent.
+- **Per-user federated credentials** — a `warden_identity` spec with
+  [`assertion_user_claims`](/federation/assertion-claims/#an-agent-acting-for-a-user) mints
+  an RFC 8693 delegation token: the user is `sub` (bound together with `warden_namespace`)
+  and the agent is `act`, so an upstream trust policy scopes access to that user while still
+  binding the agent. Verifiers that bind only `iss`/`sub`/`aud` — AWS STS, Entra ID,
+  Alibaba Cloud RAM — are never given the user; there the assertion names the agent alone.
 - **Per-user secrets** — a `kv2_read` `secret_path` and the `oauth2` mint method's
   `credential_name` may template `{{user.<claim>}}`, so a per-user secret or token is
   selected by a verified user claim.
@@ -137,25 +152,46 @@ scopes every user, so there is no per-user role explosion.
 Independently of what is minted, Warden records who a request was *for* in the audit
 trail. The chain has a **single source — the cryptographically-verified RFC 8693 `act`
 claim** on the caller's token — and appears as the `actors` array on the request's audit
-entry. Each actor is `{subject}`; because every actor is verified, there is no `verified`
-field.
+entry. Each actor is `{subject}`, plus `issuer` when that layer of the chain carried one;
+because every actor is verified, there is no `verified` field. The user's own token keeps
+its chain separately, under `auth.user.actors`, beside the user's `subject` and
+`namespace_path`.
 
 A signed JWT can carry a nested `act` claim, so the chain expresses "gateway → broker →
-agent"; Warden walks the nesting and persists the extracted actors on the
-[token](/concepts/tokens/), so the chain survives transparent-token caching.
+agent"; Warden walks the nesting and records the extracted actors on the caller's
+[identity token](/identity/tokens/#identity-tokens), so the chain survives while the
+admission is cached.
 
 ## Configuration
 
-Set on the provider mount or namespace:
+Set on the provider mount:
 
 | Key | Default | Description |
 |---|---|---|
 | `user_auth_path` | *(off)* | The auth mount that validates the user credential. Bearer-format mounts only. Absent ⇒ no user principal. |
-| `user_token_header` | `X-Warden-User-Token` | Request header carrying the user credential. |
-| `user_auth_role` | *(mount default)* | Role the user auth uses. |
 
-On a `warden_identity` spec, `assertion_user_claims` (comma-separated) discloses the user
-under the `warden_user` claim.
+The user token's audience is bound by the user auth mount's `bound_audiences`, or by
+the provider's resource identifier. A provider that still names the removed
+`user_auth_role` refuses every user credential until the key is removed; see
+[Upgrading from v0.21.0](/upgrade/from-v0-21/#providers-that-named-user_auth_role).
+
+:::caution[Changed in v0.20.0]
+`user_auth_path` is read from the **mount only** — it is no longer picked up from namespace
+metadata, so a deployment that set it at the namespace level must re-set it per mount. The
+`user_token_header` key and its `X-Warden-User-Token` default are **retired**: the user's
+credential now rides in `Authorization` and the agent moves to `X-Warden-Agent-Token`. A
+persisted `user_token_header` loads with a warning and is ignored. See
+[Upgrading from v0.19.0](/upgrade/from-v0-19/#2-dual-token-extraction-user_token_header-retired).
+:::
+
+On a `warden_identity` spec, `assertion_user_claims` (comma-separated) discloses the user:
+the assertion's `sub` becomes the user and the agent moves into `act`. See
+[When a user is disclosed](/federation/assertion-claims/#when-a-user-is-disclosed).
+
+The assertion records the pair the agent's policy admitted; it does not decide that this
+agent may act for this user. That binding is a
+[CEL condition](/identity/cel-conditions/#9-bind-the-user-to-the-agent-acting-for-them) on
+the agent's policy, such as the one [above](#the-dual-principal-model).
 
 **Fail-closed matrix** — the request is denied when: the user credential equals the
 agent's; the user token is from another namespace; the user mount is not bearer-format; a
@@ -166,6 +202,6 @@ either token has expired.
 
 - [Token Exchange](/credential-drivers/token-exchange/) — the exchange mechanics.
 - [Credential chaining](/federation/credential-chaining/) — per-user secrets from a keyless vault.
-- [Assertion claims](/federation/assertion-claims/) — the `warden_user` claim.
+- [Assertion claims](/federation/assertion-claims/) — the delegation token's `sub`, `warden_namespace` and `act`.
 - [Audit](/concepts/audit/) — where the actor chain and `Auth.User` are recorded.
-- [Tokens](/concepts/tokens/) — where a verified `act` chain is persisted.
+- [Tokens](/identity/tokens/) — where a verified `act` chain is persisted.

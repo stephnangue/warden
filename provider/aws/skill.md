@@ -22,16 +22,14 @@ Two values are per-task:
 - `<role>` is the role you chose for this task. AWS is unusual: the
   role travels in `AWS_ACCESS_KEY_ID` (Warden reads it out of the SigV4
   Authorization header to pick the credential spec), **not** in the URL.
-- `<gateway-url>` is the gateway URL for that role, embedded in the
-  role's `description` returned by the `list_roles` MCP tool. It is a
-  **relative** path — for AWS, mount-level: `/v1/<namespace>/<mount>/gateway`
-  (e.g. `/v1/aws/gateway`, `/v1/team-data/aws-prod/gateway`). Prepend
-  `$WARDEN_ADDR`.
+- `<gateway-url>` is the role's `url`, as returned by the `list_roles`
+  discovery tool. For AWS it is mount-level — every role on the mount
+  shares it, because the role is not in the URL. Prepend `$WARDEN_ADDR`.
 
 Present your identity as the JWT placed in the SigV4 secret slots
-(below); Warden verifies the signature against it. A stale JWT surfaces
-as `SignatureDoesNotMatch` (typical JWT TTL 5–60 min) — refresh the JWT
-and retry.
+(below); Warden verifies the signature against it. An expired JWT
+(typical TTL 5–60 min) answers `403` with the service's
+invalid-credentials code — refresh the JWT and retry (see Quirks).
 
 ```bash
 export AWS_ACCESS_KEY_ID="<role>"               # Warden role name, not an AWS key
@@ -62,6 +60,11 @@ aws ec2 describe-instances --region us-east-1
 
 # Lambda
 aws lambda list-functions
+
+# Bedrock models
+aws bedrock-runtime converse --region us-east-1 \
+    --model-id amazon.nova-lite-v1:0 \
+    --messages '[{"role": "user", "content": [{"text": "Say hi"}]}]'
 ```
 
 For any AWS service: just run the normal SDK or CLI command. Warden
@@ -69,9 +72,13 @@ extracts the service and region from the SigV4 Authorization header.
 
 ## Quirks
 
-- **JWT expiry → `SignatureDoesNotMatch`.** The SDK signed with a
-  token Warden later rejects. Refresh the JWT and retry — the
-  symptom is signature, the cause is auth.
+- **JWT expiry → `403`, code by protocol.** `InvalidClientTokenId`
+  (STS, IAM and other query/REST-XML services), `AuthFailure` (EC2),
+  `InvalidAccessKeyId` (S3), `UnrecognizedClientException` (JSON
+  services: DynamoDB, Lambda, …). The message starts `Warden:`.
+  Refresh the JWT and retry. `SignatureDoesNotMatch` is different:
+  the signature did not verify — put the same JWT in
+  `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, and check the clock.
 - **Wildcard DNS for S3 control-plane and S3 Access Points.** The
   SDK constructs URLs like `<account-id>.s3-control.<region>.<warden-host>`
   for S3 Control APIs; the host needs to resolve to Warden. See
@@ -86,4 +93,15 @@ extracts the service and region from the SigV4 Authorization header.
   doesn't yet implement).
 - Standard Single-Region Access Points work; the ARN goes in the
   request path and Warden routes correctly.
+- **Bedrock: model calls work, agents do not.** `bedrock-runtime`
+  (Converse, InvokeModel, their streaming forms, guardrails) and the
+  `bedrock` control plane both work. `bedrock-agent`,
+  `bedrock-agent-runtime` (agents, knowledge bases, flows) and
+  `bedrock-data-automation(-runtime)` are unsupported, and so is
+  `InvokeModelWithBidirectionalStream`.
+- **Long or large model calls.** The mount's `timeout` bounds the whole
+  call, a streamed one included, and its `max_body_size` (10MB by
+  default) the request. A generation cut off or answered `504`, or a
+  `400` on a request with images or documents, means the operator must
+  raise them on the mount; retrying will not help.
 

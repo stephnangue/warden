@@ -17,26 +17,31 @@ also jump straight to a topic.
 
 ## Identity and access
 
-How a caller proves who it is and what that lets it do.
+How a caller proves who it is and what that lets it do. Start with the
+[Identity & access](/identity/) section: it follows a request through
+authentication, the roles groups grant it, and authorization.
 
-- [Authentication](/concepts/authentication/) — the three credential forms, transparent
-  authentication, and identity-channelling sidecars.
+- [Authentication](/identity/authentication/) — the credentials Warden accepts, implicit
+  authentication, and the facts an auth mount records.
 - [Auth Methods](/auth-methods/) — per-method setup guides for the
-  certificate, JWT/OIDC, Kubernetes, and SPIFFE backends.
-- [Tokens](/concepts/tokens/) — what authentication produces: session and transparent
-  tokens, and the root token.
-- [Roles](/concepts/roles/) — how a validated credential maps to policies and access,
-  resolved per request.
-- [Policies](/concepts/policies/) — capability-based authorization, path matching, and
+  certificate, JWT, OIDC, Kubernetes, and SPIFFE backends.
+- [Tokens](/identity/tokens/) — what authentication produces: identity tokens, service
+  tokens and tickets, and the root token.
+- [Groups](/identity/groups/) and [Roles](/identity/roles/) — how a caller comes to hold
+  a role on each request, and what the role names.
+- [Entities](/identity/entities/) and [Sponsors](/identity/sponsors/) — registering an
+  agent, and the people who answer for it.
+- [Policies](/identity/policies/) — capability-based authorization, path matching, and
   request-content rules.
-- [CEL Condition Cookbook](/concepts/cel-conditions/) — 20 worked examples for the
-  `condition` expression, from a numeric cap to a full payments stanza.
+- [CEL Condition Cookbook](/identity/cel-conditions/) — worked recipes for the `condition`
+  expression, grouped by whether they gate on the agent alone or on the user it acts for.
 
 ## Brokering access
 
-What Warden actually does: hold the privileged secret and inject a scoped credential
-into each proxied request, so the workload reaches the upstream without ever holding
-a credential of its own.
+What Warden actually does: mint or fetch the upstream credential and inject a scoped one
+into each proxied request, so the workload reaches the upstream without ever holding a
+credential of its own. Warden need not hold a secret to do it — it can federate with the
+upstream, or chain the secret from your own store per request.
 
 - [Credentials](/concepts/credentials/) — sources, specs, drivers, lifetime, and
   rotation.

@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/cap/jwt"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -157,11 +160,12 @@ func TestOIDCIssuer_Mint_VerifiesAgainstJWKS(t *testing.T) {
 	if got := claims["warden_role"]; got != "payments-agent" {
 		t.Errorf("warden_role = %v", got)
 	}
-	if got := claims["warden_namespace"]; got != "/acme/prod/" {
-		t.Errorf("warden_namespace = %v", got)
-	}
-	if got := claims["warden_auth_mount"]; got != "auth_jwt_abc" {
-		t.Errorf("warden_auth_mount = %v", got)
+	// The agent's composite sub carries its namespace and mount, so neither is
+	// stated again.
+	for _, gone := range []string{"warden_namespace", "warden_auth_mount", "warden_sub"} {
+		if got, ok := claims[gone]; ok {
+			t.Errorf("%s = %v, want absent", gone, got)
+		}
 	}
 }
 
@@ -1038,11 +1042,12 @@ func TestPropagationFloor(t *testing.T) {
 	})
 }
 
-// TestOIDCIssuer_Mint_WardenUserAndSubClaims verifies that warden_sub always
-// carries the raw agent principal (while sub carries the composite wid subject),
-// and that a UserClaims projection rides under a nested warden_user claim (with the
-// user's own raw sub) while the assertion's own sub/warden_sub stay the agent.
-func TestOIDCIssuer_Mint_WardenUserAndSubClaims(t *testing.T) {
+// TestOIDCIssuer_Mint_UserDisclosure verifies, through the signed and JWKS-validated
+// token, that the default profile decides the subject from AssertionClaims.User and
+// never from UserClaims: with no user, or with UserClaims but no User (how the core
+// withholds a user), sub is the agent's composite and no act is emitted; with a User,
+// sub is the user's raw id and the agent moves to act.
+func TestOIDCIssuer_Mint_UserDisclosure(t *testing.T) {
 	const issuerURL = "https://warden-oidc.example.com"
 	iss := newReadyIssuer(t, issuerURL)
 	jwks := serveJWKS(t, iss)
@@ -1056,30 +1061,625 @@ func TestOIDCIssuer_Mint_WardenUserAndSubClaims(t *testing.T) {
 	require.NoError(t, err)
 	expected := jwt.Expected{Issuer: issuerURL, Audiences: []string{audience}, SigningAlgorithms: []jwt.Alg{jwt.RS256}}
 
-	// warden_sub is always the raw agent principal; sub carries the composite wid:.
-	base, err := iss.MintIdentityAssertion(ctx, te, AssertionClaims{Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgRS256})
-	require.NoError(t, err)
-	claims, err := validator.Validate(ctx, base, expected)
-	require.NoError(t, err)
-	assert.Equal(t, "agent-principal", claims["warden_sub"], "warden_sub must be the raw principal")
-	assert.Equal(t, wardenSubject(te), claims["sub"], "sub must be the composite wid subject")
-	_, present := claims["warden_user"]
-	assert.False(t, present, "warden_user must be absent without UserClaims")
+	userClaims := map[string]string{"sub": "alice-raw-sub", "username": "alice"}
+	for name, c := range map[string]AssertionClaims{
+		"no user":                    {Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgRS256},
+		"user claims, user withheld": {Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgRS256, UserClaims: userClaims},
+	} {
+		tok, err := iss.MintIdentityAssertion(ctx, te, c)
+		require.NoError(t, err, name)
+		claims, err := validator.Validate(ctx, tok, expected)
+		require.NoError(t, err, name)
+		assert.Equal(t, wardenSubject(te), claims["sub"], "%s: sub must be the agent's composite", name)
+		for _, absent := range []string{"act", "warden_metadata", "warden_namespace", "warden_sub", "warden_user"} {
+			assert.NotContains(t, claims, absent, name)
+		}
+	}
 
-	// With UserClaims: nested warden_user carries the user's own sub + projected
-	// claims, while the assertion's sub/warden_sub stay the AGENT.
-	withUser, err := iss.MintIdentityAssertion(ctx, te, AssertionClaims{
+	// With User disclosed: the user is sub, and the agent is act.
+	delegated, err := iss.MintIdentityAssertion(ctx, te, AssertionClaims{
 		Audience: audience, TTL: 5 * time.Minute, Alg: oidcAlgRS256,
-		UserClaims: map[string]string{"sub": "alice-raw-sub", "username": "alice"},
+		UserClaims: userClaims,
+		User:       &credential.AssertionIdentity{PrincipalID: "alice-raw-sub", NamespacePath: "n/", RoleName: "users"},
 	})
 	require.NoError(t, err)
-	claims, err = validator.Validate(ctx, withUser, expected)
+	claims, err := validator.Validate(ctx, delegated, expected)
 	require.NoError(t, err)
-	assert.Equal(t, wardenSubject(te), claims["sub"], "assertion sub stays the agent composite")
-	assert.Equal(t, "agent-principal", claims["warden_sub"], "warden_sub stays the agent principal")
-	wu, ok := claims["warden_user"].(map[string]interface{})
-	require.True(t, ok, "warden_user missing or wrong type: %v", claims["warden_user"])
-	assert.Equal(t, "alice-raw-sub", wu["sub"])
-	assert.Equal(t, "alice", wu["username"])
-	assert.Len(t, wu, 2)
+	assert.Equal(t, "alice-raw-sub", claims["sub"])
+	assert.Equal(t, "n/", claims["warden_namespace"])
+	assert.Equal(t, map[string]any{"username": "alice"}, claims["warden_metadata"])
+	act, ok := claims["act"].(map[string]any)
+	require.True(t, ok, "act missing or wrong type: %v", claims["act"])
+	assert.Equal(t, wardenSubject(te), act["sub"])
+	assert.Equal(t, issuerURL, act["iss"])
+}
+
+// profileRoster records, per assertion profile, exactly which claims that profile
+// emits and which cache dimension covers each one. It is the doc-comment table that
+// used to live above this test, turned into data so the tripwire can be driven off
+// the registry instead of off one hardcoded mint.
+type profileRoster struct {
+	// claims is the exact, sorted claim set a fully-populated mint must produce.
+	claims []string
+	// coverage maps each claim to the cache dimension that covers it. Every entry
+	// must be non-empty: "which dimension covers this?" is the question the
+	// tripwire exists to force an answer to.
+	coverage map[string]string
+}
+
+// assertionRosters is the tripwire's data, not a behaviour fixture.
+//
+// Every claim here is something a downstream may bind its authorization to, so every
+// one of them has to be inside a cache key — otherwise a cached answer can be served
+// to a caller who would have been told something different. warden_role was exactly
+// that defect: minted, documented as bindable, and in no key, so one principal's two
+// roles shared a chained-secret entry.
+//
+// Adding a claim, or a whole profile, without a matching cache dimension re-opens
+// that class and nothing else would notice. The test below fails if a registered
+// profile has no roster here, if a roster names an unregistered profile, if a
+// profile's minted claims differ from its roster, or if any claim's coverage is
+// blank — so whoever adds either has to come here and record the dimension.
+//
+// It can only see what the mint below emits, so a claim gated behind a new input
+// would ship past it silently: populate every optional field in the mint, or the
+// tripwire is blind to exactly the case it exists for.
+var assertionRosters = map[string]profileRoster{
+	// The mint below discloses a user, so this is the DELEGATION branch: the top
+	// level is the user and act the agent. The no-user branch emits the agent's
+	// sub and warden_metadata at the top level, so each coverage below names both
+	// principals where a name serves both, and the agent's warden_role, which in
+	// this branch rides act (covered there): a user runs under no role.
+	credential.DefaultAssertionProfileName: {
+		// No warden_sub, warden_user or warden_auth_mount, and no warden_namespace at
+		// the agent's level: its composite sub carries the namespace.
+		claims: []string{
+			"act", "aud", "exp", "iat", "iss", "jti", "nbf", "sub",
+			"warden_metadata", "warden_namespace", "warden_resource",
+		},
+		coverage: map[string]string{
+			// Volatile or constant by design — the reason cacheIdentity exists at
+			// all, rather than keying on the assertion bytes.
+			"iss": "volatile/constant by design",
+			"iat": "volatile/constant by design",
+			"nbf": "volatile/constant by design",
+			"exp": "volatile/constant by design",
+			"jti": "volatile/constant by design",
+
+			// The user's raw principal, fixed for the life of the user's token entry,
+			// so the user token id keys it; with no user, the agent's composite.
+			"sub": "the user via the \":u:\" token-id dimension on the manager's cache keys; " +
+				"the agent via cacheIdentity's first fragment (wardenSubject)",
+			"aud": "cacheIdentity's second fragment",
+			// The agent's composite sub, its role and projected metadata, the issuer
+			// URL (constant), and the user token's own act chain, read from the same
+			// credential the user token id hashes, so fixed per user token.
+			"act": "the agent's sub via cacheIdentity's first fragment (wardenSubject), its role via the " +
+				"\"role=\" fragment, its metadata via the metadata fingerprint, the nested user chain via " +
+				"the \":u:\" token-id dimension",
+			// The user's namespace, fixed for the life of the user's token entry.
+			"warden_namespace": "the \":u:\" token-id dimension on the manager's cache keys (the user's namespace)",
+			"warden_resource":  "cacheIdentity's \"res=\" fragment",
+			// The user's projected claims, rendered per request from the user
+			// mount's naming, so keyed by their own fingerprint (see
+			// buildAssertionSetup); with no user, the agent's projected metadata.
+			"warden_metadata": "the user via cacheIdentity's \"user=\" fragment; " +
+				"the agent via cacheIdentity's metadata fingerprint",
+		},
+	},
+	profiles.AWSProfileName: {
+		// No warden_resource: the mint below populates a Resource, and aws must
+		// still not emit it.
+		claims: []string{
+			"aud", "exp", "https://aws.amazon.com/tags", "iat", "iss", "jti", "nbf", "sub",
+		},
+		coverage: map[string]string{
+			"iss": "volatile/constant by design",
+			"iat": "volatile/constant by design",
+			"nbf": "volatile/constant by design",
+			"exp": "volatile/constant by design",
+			"jti": "volatile/constant by design",
+
+			// The same composite as default's agent, so the same fragment covers it.
+			"sub": "cacheIdentity's first fragment (wardenSubject)",
+			"aud": "cacheIdentity's second fragment",
+			// The session tags carry the role and the projected metadata. Both are
+			// already dimensions; the fact that they are rendered as AWS tags at all
+			// is what the "prof=aws" fragment keys.
+			"https://aws.amazon.com/tags": "the role via cacheIdentity's \"role=\" fragment, the metadata " +
+				"via its metadata fingerprint, and the tag shape itself via \"prof=aws\"",
+		},
+	},
+	profiles.MinimalProfileName: {
+		// Registered claims only: the mint below populates metadata, a resource and
+		// user claims, and minimal must emit none of them.
+		claims: []string{"aud", "exp", "iat", "iss", "jti", "nbf", "sub"},
+		coverage: map[string]string{
+			"iss": "volatile/constant by design",
+			"iat": "volatile/constant by design",
+			"nbf": "volatile/constant by design",
+			"exp": "volatile/constant by design",
+			"jti": "volatile/constant by design",
+
+			// The same composite as default's agent, so the same fragment covers it.
+			"sub": "cacheIdentity's first fragment (wardenSubject)",
+			"aud": "cacheIdentity's second fragment",
+		},
+	},
+}
+
+func TestMintIdentityAssertion_ClaimRoster(t *testing.T) {
+	reg := credential.NewAssertionProfileRegistry()
+	require.NoError(t, profiles.RegisterBuiltinProfiles(reg))
+
+	registered := reg.ListProfiles()
+
+	// Every registered profile must have a roster. This is the tripwire's teeth: a
+	// new profile cannot land without recording its claims and their cache coverage.
+	for _, name := range registered {
+		_, ok := assertionRosters[name]
+		assert.True(t, ok,
+			"profile %q is registered but has no roster entry: add one to assertionRosters recording each claim's cache dimension", name)
+	}
+	// And every roster must name a registered profile, so a removed profile does not
+	// leave a stale roster that silently asserts nothing.
+	for name := range assertionRosters {
+		assert.True(t, reg.HasProfile(name),
+			"roster entry %q names no registered profile (available: %v)", name, registered)
+	}
+
+	te := &logical.TokenEntry{
+		PrincipalID:   "spiffe://acme.internal/agent/refund-bot",
+		RoleName:      "payments-agent",
+		NamespaceID:   "ns-1234",
+		NamespacePath: "/acme/prod/",
+		MountAccessor: "auth_jwt_abc",
+	}
+
+	for _, name := range registered {
+		roster, ok := assertionRosters[name]
+		if !ok {
+			continue // already reported above
+		}
+		t.Run(name, func(t *testing.T) {
+			profile, err := reg.GetByName(name)
+			require.NoError(t, err)
+
+			iss := newReadyIssuer(t, "https://warden-oidc.example")
+
+			// Every optional claim populated, so the roster is the full surface
+			// rather than whatever a minimal mint happens to emit.
+			token, err := iss.MintIdentityAssertion(context.Background(), te, AssertionClaims{
+				Audience:   "https://sts.example/aud",
+				TTL:        5 * time.Minute,
+				Alg:        oidcAlgRS256,
+				Metadata:   map[string]string{"team": "payments"},
+				Resource:   "https://api.example/db",
+				UserClaims: map[string]string{"sub": "alice", "username": "alice"},
+				User: &credential.AssertionIdentity{
+					PrincipalID: "alice", NamespaceID: "ns-1234", MountAccessor: "auth_oidc_def",
+					Actors: []credential.AssertionActor{{Subject: "broker-beta", Issuer: "https://idp.example"}},
+				},
+				Profile: profile,
+			})
+			require.NoError(t, err)
+
+			claims := decodeAssertionClaims(t, token)
+
+			got := make([]string, 0, len(claims))
+			for k := range claims {
+				got = append(got, k)
+			}
+			sort.Strings(got)
+
+			want := append([]string(nil), roster.claims...)
+			sort.Strings(want)
+
+			assert.Equal(t, want, got,
+				"profile %q's claims changed: put the new claim in a cache dimension, then update its roster", name)
+
+			// Every rostered claim needs a non-blank dimension recorded.
+			for _, claim := range roster.claims {
+				dimension, ok := roster.coverage[claim]
+				assert.True(t, ok, "profile %q claim %q has no cache-coverage entry", name, claim)
+				assert.NotEmpty(t, dimension,
+					"profile %q claim %q records a blank cache dimension", name, claim)
+			}
+			// And no STALE rows: a coverage entry for a claim the profile no longer
+			// emits would otherwise linger, quietly asserting nothing while making
+			// the roster look complete.
+			for claim := range roster.coverage {
+				assert.Contains(t, roster.claims, claim,
+					"profile %q records cache coverage for %q, which it does not emit", name, claim)
+			}
+		})
+	}
+}
+
+// mintedLifetime mints with the requested TTL and returns exp - iat, the lifetime
+// the issuer actually granted.
+func mintedLifetime(t *testing.T, iss *OIDCIssuer, requested time.Duration) time.Duration {
+	t.Helper()
+	c := profileTestClaims(nil)
+	c.TTL = requested
+	tok, err := iss.MintIdentityAssertion(context.Background(), profileTestTokenEntry(), c)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+	// JSON numbers decode as float64.
+	exp, iat := claims["exp"].(float64), claims["iat"].(float64)
+	return time.Duration(exp-iat) * time.Second
+}
+
+// TestMinAssertionTTL_CoversClockSkewLeeway is the drift guard for the spec-level
+// assertion_ttl floor. credential.MinAssertionTTL cannot reference the issuer's
+// leeway (credential cannot import core), so this pins the premise it is derived
+// from: the issuer backdates nbf by clockSkewLeeway because a verifier's clock may
+// lag by that much, so by the same premise it may lead by that much — and an
+// assertion shorter than the leeway can be judged expired on arrival. Lower the
+// floor below the leeway, or raise the leeway above it, and this fails.
+func TestMinAssertionTTL_CoversClockSkewLeeway(t *testing.T) {
+	assert.GreaterOrEqual(t, credential.MinAssertionTTL, defaultClockSkewLeeway,
+		"MinAssertionTTL (%s) must be at least the issuer's clock-skew leeway (%s)",
+		credential.MinAssertionTTL, defaultClockSkewLeeway)
+}
+
+// TestMintIdentityAssertion_CapsTTLAtIssuerTTL pins that the issuer, not its
+// callers, enforces the premise retired-key pruning rests on: no assertion outlives
+// the issuer's own AssertionTTL(). An assertion allowed to would outlive its signing
+// key once the key is pruned, and fail verification upstream — intermittently,
+// gated on rotation timing.
+func TestMintIdentityAssertion_CapsTTLAtIssuerTTL(t *testing.T) {
+	iss := newReadyIssuer(t, "https://warden-oidc.example")
+	require.Equal(t, defaultAssertionTTL, iss.AssertionTTL(), "precondition: default 5m ceiling")
+
+	// Longer than the ceiling → capped at the ceiling.
+	assert.Equal(t, defaultAssertionTTL, mintedLifetime(t, iss, 2*time.Hour),
+		"a request above the issuer's AssertionTTL must be capped, not honoured")
+
+	// Shorter than the ceiling → honoured as-is: a spec may narrow.
+	assert.Equal(t, 90*time.Second, mintedLifetime(t, iss, 90*time.Second))
+
+	// Exactly the ceiling → unchanged (today's only production path).
+	assert.Equal(t, defaultAssertionTTL, mintedLifetime(t, iss, defaultAssertionTTL))
+}
+
+// TestMintIdentityAssertion_CapFollowsRuntimeTTLChange is why the cap CAPS rather
+// than rejects: AssertionTTL() can change at runtime, so a caller that read the old
+// value just before an operator lowered it must still get a (shorter) assertion,
+// not an error. The ceiling is read under the same lock the mint already takes.
+func TestMintIdentityAssertion_CapFollowsRuntimeTTLChange(t *testing.T) {
+	iss := newReadyIssuer(t, "https://warden-oidc.example")
+
+	stale := iss.AssertionTTL() // a caller reads 5m...
+	iss.SetAssertionTTL(time.Minute)
+
+	// ...and mints after the operator lowered it to 1m: capped, not failed.
+	assert.Equal(t, time.Minute, mintedLifetime(t, iss, stale))
+
+	// Raising the ceiling lets a longer request through, up to the new ceiling.
+	iss.SetAssertionTTL(time.Hour)
+	assert.Equal(t, 30*time.Minute, mintedLifetime(t, iss, 30*time.Minute))
+	assert.Equal(t, time.Hour, mintedLifetime(t, iss, 3*time.Hour))
+}
+
+func profileTestTokenEntry() *logical.TokenEntry {
+	return &logical.TokenEntry{
+		PrincipalID:   "agent-checkout-7",
+		RoleName:      "orders-reader",
+		NamespaceID:   "ns-3f2a1b",
+		NamespacePath: "team-payments/",
+		MountAccessor: "auth_jwt_9c1e",
+	}
+}
+
+func profileTestClaims(p credential.AssertionProfile) AssertionClaims {
+	return AssertionClaims{
+		Audience:   "sts.amazonaws.com",
+		TTL:        5 * time.Minute,
+		Alg:        oidcAlgRS256,
+		Metadata:   map[string]string{"team": "payments"},
+		Resource:   "aws-iam:arn:aws:iam::1:role/OrdersReader",
+		UserClaims: map[string]string{"sub": "alice@example.com"},
+		Profile:    p,
+	}
+}
+
+// decodeAssertionHeader and decodeAssertionClaims are shared with
+// request_handler_test.go.
+
+// TestMintIdentityAssertion_NilProfileMatchesDefault pins that the issuer's nil
+// fallback and the registered default profile mint identically — i.e. that "no
+// profile" and "profile=default" cannot drift apart at the issuer.
+//
+// It is NOT the proof of the default shape itself: both sides run the same code, and
+// nil resolves to profiles.Default(), so the comparison is circular for that purpose.
+// The shape is pinned by the hand-written expected maps of
+// TestDefaultProfile_Claims_AgentOnly / _Delegation in credential/profiles (keys,
+// int64 times, the opt-in claims), plus Typ()=="JWT" for the header.
+func TestMintIdentityAssertion_NilProfileMatchesDefault(t *testing.T) {
+	iss := newReadyIssuer(t, "https://warden-oidc.example")
+	te := profileTestTokenEntry()
+
+	implicit, err := iss.MintIdentityAssertion(context.Background(), te, profileTestClaims(nil))
+	require.NoError(t, err)
+	explicit, err := iss.MintIdentityAssertion(context.Background(), te, profileTestClaims(profiles.Default()))
+	require.NoError(t, err)
+
+	assert.Equal(t, decodeAssertionHeader(t, implicit), decodeAssertionHeader(t, explicit),
+		"a nil Profile must sign with the same header as the default profile")
+
+	implicitClaims := decodeAssertionClaims(t, implicit)
+	explicitClaims := decodeAssertionClaims(t, explicit)
+
+	// jti is random and the time claims move between the two mints, so compare the
+	// claim NAMES exactly and the stable values exactly.
+	assert.ElementsMatch(t, mapKeys(implicitClaims), mapKeys(explicitClaims))
+	for _, k := range []string{
+		"iss", "sub", "aud", "warden_role", "warden_metadata", "warden_resource",
+	} {
+		require.Contains(t, explicitClaims, k, "claim %q is not minted, so comparing it proves nothing", k)
+		assert.Equal(t, implicitClaims[k], explicitClaims[k], "claim %q differs", k)
+	}
+}
+
+func mapKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// brokenProfile lets each test bend exactly one part of the contract.
+type brokenProfile struct {
+	name    string
+	typ     string
+	claims  func(credential.AssertionRequest) map[string]any
+	claimsE error
+}
+
+func (b brokenProfile) Name() string { return b.name }
+func (b brokenProfile) Typ() string {
+	if b.typ == "" {
+		return "JWT"
+	}
+	if b.typ == "<empty>" {
+		return ""
+	}
+	return b.typ
+}
+func (b brokenProfile) ValidateSpec(credential.Config) error { return nil }
+func (b brokenProfile) Claims(req credential.AssertionRequest) (map[string]any, error) {
+	if b.claimsE != nil {
+		return nil, b.claimsE
+	}
+	return b.claims(req), nil
+}
+
+// goodClaims is what a correct profile returns, for a test to then break one field of.
+func goodClaims(req credential.AssertionRequest) map[string]any {
+	return map[string]any{
+		"iss": req.Issuer,
+		"sub": req.Identity.WardenSubject(),
+		"aud": req.Audience,
+		"iat": req.IssuedAt.Unix(),
+		"nbf": req.NotBefore.Unix(),
+		"exp": req.ExpiresAt.Unix(),
+		"jti": req.JTI,
+	}
+}
+
+// TestMintIdentityAssertion_ProfileGuard is the fail-closed guard: a buggy profile
+// must never get an assertion signed. Each case returns no token and names the real
+// defect, so a contributor debugging a profile is not sent hunting.
+func TestMintIdentityAssertion_ProfileGuard(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile credential.AssertionProfile
+		wantErr string
+	}{
+		{
+			name: "drops exp",
+			profile: brokenProfile{name: "no_exp", claims: func(req credential.AssertionRequest) map[string]any {
+				c := goodClaims(req)
+				delete(c, "exp")
+				return c
+			}},
+			wantErr: `claim "exp" is missing`,
+		},
+		{
+			name: "stretches exp",
+			profile: brokenProfile{name: "long_exp", claims: func(req credential.AssertionRequest) map[string]any {
+				c := goodClaims(req)
+				c["exp"] = req.ExpiresAt.Add(24 * time.Hour).Unix()
+				return c
+			}},
+			wantErr: `claim "exp" must be`,
+		},
+		{
+			// A profile emitting the right number in the wrong type must be told
+			// that, not handed the misleading "exp mismatch" a bare interface
+			// comparison would report.
+			name: "emits exp as int not int64",
+			profile: brokenProfile{name: "int_exp", claims: func(req credential.AssertionRequest) map[string]any {
+				c := goodClaims(req)
+				c["exp"] = int(req.ExpiresAt.Unix())
+				return c
+			}},
+			wantErr: `claim "exp" must be int64 Unix seconds, got int`,
+		},
+		{
+			name: "wrong iss",
+			profile: brokenProfile{name: "bad_iss", claims: func(req credential.AssertionRequest) map[string]any {
+				c := goodClaims(req)
+				c["iss"] = "https://attacker.example"
+				return c
+			}},
+			wantErr: `claim "iss" must be`,
+		},
+		{
+			name: "drops sub",
+			profile: brokenProfile{name: "no_sub", claims: func(req credential.AssertionRequest) map[string]any {
+				c := goodClaims(req)
+				delete(c, "sub")
+				return c
+			}},
+			wantErr: `claim "sub" is missing`,
+		},
+		{
+			name: "empty sub",
+			profile: brokenProfile{name: "blank_sub", claims: func(req credential.AssertionRequest) map[string]any {
+				c := goodClaims(req)
+				c["sub"] = ""
+				return c
+			}},
+			wantErr: `claim "sub" must not be empty`,
+		},
+		{
+			name: "wrong aud",
+			profile: brokenProfile{name: "bad_aud", claims: func(req credential.AssertionRequest) map[string]any {
+				c := goodClaims(req)
+				c["aud"] = "https://elsewhere.example"
+				return c
+			}},
+			wantErr: `claim "aud" must be`,
+		},
+		{
+			name: "wrong jti",
+			profile: brokenProfile{name: "bad_jti", claims: func(req credential.AssertionRequest) map[string]any {
+				c := goodClaims(req)
+				c["jti"] = "attacker-chosen"
+				return c
+			}},
+			wantErr: `claim "jti" must be`,
+		},
+		{
+			name: "shifts nbf",
+			profile: brokenProfile{name: "bad_nbf", claims: func(req credential.AssertionRequest) map[string]any {
+				c := goodClaims(req)
+				c["nbf"] = req.NotBefore.Add(-time.Hour).Unix()
+				return c
+			}},
+			wantErr: `claim "nbf" must be`,
+		},
+		{
+			name:    "empty typ",
+			profile: brokenProfile{name: "no_typ", typ: "<empty>", claims: goodClaims},
+			wantErr: "blank typ header",
+		},
+		{
+			// Whitespace is blank: a typ of " " would sign `"typ":" "` into a header
+			// a verifier may reject. The registry refuses it too, but Profile is an
+			// exported field an unregistered profile can arrive through.
+			name:    "whitespace-only typ",
+			profile: brokenProfile{name: "space_typ", typ: "  ", claims: goodClaims},
+			wantErr: "blank typ header",
+		},
+		{
+			name:    "returns no claims",
+			profile: brokenProfile{name: "nil_claims", claims: func(credential.AssertionRequest) map[string]any { return nil }},
+			wantErr: "returned no claims",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			iss := newReadyIssuer(t, "https://warden-oidc.example")
+			token, err := iss.MintIdentityAssertion(context.Background(), profileTestTokenEntry(),
+				profileTestClaims(tc.profile))
+
+			require.Error(t, err, "a broken profile must not get an assertion signed")
+			assert.Empty(t, token, "no token may be returned alongside the error")
+			assert.Contains(t, err.Error(), tc.wantErr)
+			// The profile is named, so the operator knows which one to fix.
+			assert.Contains(t, err.Error(), tc.profile.Name())
+		})
+	}
+}
+
+// iat and nbf are OPTIONAL per RFC 7519, so a profile that omits them still mints.
+func TestMintIdentityAssertion_ProfileMayOmitIatNbf(t *testing.T) {
+	iss := newReadyIssuer(t, "https://warden-oidc.example")
+
+	p := brokenProfile{name: "no_iat_nbf", claims: func(req credential.AssertionRequest) map[string]any {
+		c := goodClaims(req)
+		delete(c, "iat")
+		delete(c, "nbf")
+		return c
+	}}
+
+	token, err := iss.MintIdentityAssertion(context.Background(), profileTestTokenEntry(), profileTestClaims(p))
+	require.NoError(t, err)
+
+	claims := decodeAssertionClaims(t, token)
+	assert.NotContains(t, claims, "iat")
+	assert.NotContains(t, claims, "nbf")
+	assert.Contains(t, claims, "exp", "exp stays mandatory")
+}
+
+// A profile's own error is surfaced, wrapped with its name, and mints nothing.
+func TestMintIdentityAssertion_ProfileClaimsError(t *testing.T) {
+	iss := newReadyIssuer(t, "https://warden-oidc.example")
+
+	p := brokenProfile{name: "angry_shape", claimsE: assert.AnError}
+	token, err := iss.MintIdentityAssertion(context.Background(), profileTestTokenEntry(), profileTestClaims(p))
+
+	require.Error(t, err)
+	assert.Empty(t, token)
+	assert.ErrorIs(t, err, assert.AnError)
+	assert.Contains(t, err.Error(), "angry_shape")
+}
+
+// The profile controls typ, and it reaches the signed header.
+func TestMintIdentityAssertion_ProfileControlsTyp(t *testing.T) {
+	iss := newReadyIssuer(t, "https://warden-oidc.example")
+
+	p := brokenProfile{name: "rfc9068_shape", typ: "at+jwt", claims: goodClaims}
+	token, err := iss.MintIdentityAssertion(context.Background(), profileTestTokenEntry(), profileTestClaims(p))
+	require.NoError(t, err)
+
+	header := decodeAssertionHeader(t, token)
+	assert.Equal(t, "at+jwt", header["typ"])
+	// alg and kid stay the issuer's: a profile controls claims and typ, nothing else.
+	assert.Equal(t, oidcAlgRS256, header["alg"])
+	assert.NotEmpty(t, header["kid"])
+}
+
+// TestIdentityFromTokenEntry pins the projection that lets package credential stay
+// free of a logical import.
+func TestIdentityFromTokenEntry(t *testing.T) {
+	te := profileTestTokenEntry()
+	id := identityFromTokenEntry(te)
+
+	assert.Equal(t, credential.AssertionIdentity{
+		PrincipalID:   "agent-checkout-7",
+		RoleName:      "orders-reader",
+		NamespaceID:   "ns-3f2a1b",
+		NamespacePath: "team-payments/",
+		MountAccessor: "auth_jwt_9c1e",
+	}, id)
+
+	// wardenSubject is now a thin wrapper over the moved method; the two must agree,
+	// because cacheIdentity uses the wrapper while the default profile uses the method.
+	assert.Equal(t, id.WardenSubject(), wardenSubject(te))
+}
+
+// identityFromTokenEntry must COPY the act chain: the token entry is shared across
+// requests by the token cache, so a profile must never hold its slice. And no chain
+// means a nil slice, so the common path allocates nothing.
+func TestIdentityFromTokenEntry_CopiesActors(t *testing.T) {
+	te := &logical.TokenEntry{
+		PrincipalID: "alice", NamespaceID: "ns1", MountAccessor: "auth_oidc_2",
+		Actors: []logical.ActorRef{{Subject: "broker-beta", Issuer: "https://idp.example"}, {Subject: "agents/alpha"}},
+	}
+	id := identityFromTokenEntry(te)
+	assert.Equal(t, []credential.AssertionActor{
+		{Subject: "broker-beta", Issuer: "https://idp.example"},
+		{Subject: "agents/alpha"},
+	}, id.Actors)
+
+	te.Actors[0].Subject = "tampered"
+	assert.Equal(t, "broker-beta", id.Actors[0].Subject, "the identity aliases the token entry's chain")
+
+	assert.Nil(t, identityFromTokenEntry(&logical.TokenEntry{PrincipalID: "p"}).Actors)
 }

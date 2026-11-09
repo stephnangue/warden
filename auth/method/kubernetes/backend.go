@@ -15,6 +15,7 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
@@ -46,21 +47,40 @@ type KubernetesAuthConfig struct {
 
 	// Issuer, if set, gates login on the workload JWT's `iss` claim
 	// matching this value (cheap unverified parse, before the TokenReview
-	// round-trip). Per-mount issuer pinning is the right place to do this
-	// — the introspect aggregator stays config-agnostic.
+	// round-trip). It also bounds what discovery costs: without it, any
+	// JWT-shaped bearer costs one TokenReview per kubernetes target mount.
 	Issuer string `json:"issuer,omitempty"`
 
 	// DisableIssValidation lets operators opt out of the `iss` pre-filter
 	// even when Issuer is non-empty.
 	DisableIssValidation bool `json:"disable_iss_validation,omitempty"`
 
-	// TokenTTL is the default TTL for issued Warden tokens; per-role
-	// TokenTTL overrides this.
+	// TokenTTL is how long an admitted workload token is reused before it is
+	// reviewed again, capped by the token's own expiry.
 	TokenTTL time.Duration `json:"token_ttl" default:"1h"`
 
-	// DefaultRole, if set, is used by transparent-mode flows when the
-	// caller doesn't specify a role.
-	DefaultRole string `json:"default_role,omitempty"`
+	// removed names the removed keys (helper.RemovedConfigKeys) the config
+	// was built from, which it ignores; a config read warns about each.
+	removed []string
+
+	// BoundAudiences are the audiences a workload token must carry for the
+	// mount to admit it, any one of them, sent as the TokenReview's
+	// spec.audiences. Validated (no empty entry). Empty, the review checks
+	// the API server's own audience, which a config read warns about.
+	BoundAudiences []string `json:"bound_audiences,omitempty"`
+
+	// MaxAge bounds a workload token's age at admission, from its iat: one
+	// older, or without an iat, is not admitted. Zero is unset. Validated
+	// (not negative) and enforced by admitToken, through helper.CheckMaxAge.
+	MaxAge time.Duration `json:"max_age,omitempty"`
+
+	// Facts: entity_kind, and the TokenReview fields the mount publishes
+	// under other names beyond its built-in facts. Compiled in buildConfig. A
+	// config write refuses facts that do not compile, so they are never
+	// stored; ones that still fail at load (the mount table's, or storage
+	// written under looser rules) are installed with a nil naming: the mount
+	// answers no fact, so nothing that reads facts can match it.
+	helper.FactsConfig
 
 	// Internal runtime state — derived from the stored config on Initialize.
 	httpClient *http.Client `json:"-"`
@@ -69,10 +89,20 @@ type KubernetesAuthConfig struct {
 // kubernetesAuthBackend is the framework-based kubernetes auth method.
 type kubernetesAuthBackend struct {
 	*framework.Backend
-	config      *KubernetesAuthConfig
-	configMu    sync.RWMutex
-	logger      *logger.GatedLogger
-	storageView sdklogical.Storage
+	config   *KubernetesAuthConfig
+	configMu sync.RWMutex
+	// configWriteMu serializes config writes and the storage load: a write
+	// merges onto the live config, so two racing would lose one writer's keys.
+	configWriteMu sync.Mutex
+	logger        *logger.GatedLogger
+	storageView   sdklogical.Storage
+
+	// mountFacts holds the naming in force and is shared by pointer with
+	// every admission this mount produces. installConfig publishes it under
+	// configMu together with the config it was compiled from, so a reader
+	// holding configMu sees the two agree; admissions and FactNames load it
+	// without a lock and see one published naming, whole.
+	mountFacts *logical.MountFacts
 }
 
 var _ logical.Factory = Factory
@@ -82,6 +112,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	b := &kubernetesAuthBackend{
 		logger:      conf.Logger,
 		storageView: conf.StorageView,
+		mountFacts:  &logical.MountFacts{},
 	}
 
 	b.Backend = &framework.Backend{
@@ -91,16 +122,24 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		PathsSpecial: &logical.Paths{
 			Unauthenticated: []string{
 				"login",
-				"introspect/roles",
 			},
 		},
-		Paths: []*framework.Path{
+		Paths: append([]*framework.Path{
 			b.pathLogin(),
 			b.pathConfig(),
-			b.pathRole(),
-			b.pathRoleList(),
-			b.pathIntrospect(),
-		},
+			helper.AdmitPath(b.admit),
+		}, pathRoles()...),
+	}
+
+	// Release the TokenReview client's pooled connections on unmount/seal. The
+	// config stays: closing idle connections only costs a later request a dial.
+	b.Backend.Clean = func(context.Context) {
+		b.configMu.RLock()
+		cfg := b.config
+		b.configMu.RUnlock()
+		if cfg != nil && cfg.httpClient != nil {
+			cfg.httpClient.CloseIdleConnections()
+		}
 	}
 
 	if err := b.Backend.Setup(ctx, conf); err != nil {
@@ -116,32 +155,92 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	return b, nil
 }
 
-// setupConfig parses the operator-supplied config map, builds the HTTP
-// client used for TokenReview calls, validates required fields, and
-// installs the resulting KubernetesAuthConfig under the backend mutex.
-func (b *kubernetesAuthBackend) setupConfig(_ context.Context, conf map[string]any) error {
-	cfg, err := mapToKubernetesAuthConfig(conf)
+// setupConfig builds the operator-supplied config map and installs the
+// resulting KubernetesAuthConfig under the backend mutex. It serves the mount
+// table's config when the mount is set up and the stored config when it is
+// loaded, which a failure here would turn into a failed mount (and, at unseal,
+// a failed unseal). Facts that do not compile are therefore logged and
+// installed as a nil naming, which answers no fact: closed for every reader of
+// facts, while logins and the config itself keep working.
+func (b *kubernetesAuthBackend) setupConfig(ctx context.Context, conf map[string]any) error {
+	cfg, err := buildConfig(ctx, conf)
 	if err != nil {
 		return err
 	}
+	if err := cfg.FactsConfig.Err(); err != nil {
+		b.logger.Error(helper.FactsDoNotCompileLog, logger.Err(err))
+	}
+	if len(cfg.removed) > 0 {
+		b.logger.Warn("auth mount config sets removed keys, which are ignored", logger.Any("keys", cfg.removed))
+	}
+	b.installConfig(cfg)
+	return nil
+}
+
+// installConfig makes cfg the live configuration and publishes its naming (nil
+// when it does not compile, which answers no fact) in the same critical
+// section. It cannot fail.
+//
+// Each config carries its own TokenReview client, so the one replaced is closed:
+// its idle connections are released, while a login still using the old config
+// keeps the connection it holds.
+func (b *kubernetesAuthBackend) installConfig(cfg *KubernetesAuthConfig) {
+	b.configMu.Lock()
+	outgoing := b.config
+	b.config = cfg
+	b.mountFacts.Publish(cfg.Naming())
+	b.configMu.Unlock()
+	if outgoing != nil && outgoing.httpClient != nil && outgoing.httpClient != cfg.httpClient {
+		outgoing.httpClient.CloseIdleConnections()
+	}
+}
+
+// buildConfig parses the operator-supplied config map, validates required
+// fields, and builds the HTTP client used for TokenReview calls, without
+// touching the backend.
+func buildConfig(_ context.Context, conf map[string]any) (*KubernetesAuthConfig, error) {
+	cfg, err := mapToKubernetesAuthConfig(conf)
+	if err != nil {
+		return nil, err
+	}
+	cfg.removed = helper.RemovedConfigKeys(conf)
 
 	if cfg.KubernetesHost == "" {
-		return fmt.Errorf("kubernetes_host is required")
+		return nil, fmt.Errorf("kubernetes_host is required")
 	}
 	if cfg.KubernetesCACert == "" && !cfg.TLSSkipVerify {
-		return fmt.Errorf("kubernetes_ca_cert is required unless tls_skip_verify is true")
+		return nil, fmt.Errorf("kubernetes_ca_cert is required unless tls_skip_verify is true")
 	}
+	// Facts that do not compile are kept on the config, not returned: the
+	// caller decides whether to refuse them or fail closed.
+	cfg.CompileFields(kubernetesBuiltinFacts(), kubernetesAliasPolicy)
 
 	client, err := buildKubernetesClient(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to build kubernetes HTTP client: %w", err)
+		return nil, fmt.Errorf("failed to build kubernetes HTTP client: %w", err)
 	}
 	cfg.httpClient = client
 
-	b.configMu.Lock()
-	b.config = cfg
-	b.configMu.Unlock()
-	return nil
+	return cfg, nil
+}
+
+// normalizedConfig is cfg in the form storage holds, so a restart parses
+// consistent types.
+func normalizedConfig(cfg *KubernetesAuthConfig) map[string]any {
+	return map[string]any{
+		"kubernetes_host":        cfg.KubernetesHost,
+		"kubernetes_ca_cert":     cfg.KubernetesCACert,
+		"token_reviewer_jwt":     cfg.TokenReviewerJWT,
+		"tls_skip_verify":        cfg.TLSSkipVerify,
+		"issuer":                 cfg.Issuer,
+		"disable_iss_validation": cfg.DisableIssValidation,
+		"token_ttl":              cfg.TokenTTL.String(),
+		"bound_audiences":        cfg.BoundAudiences,
+		"max_age":                cfg.MaxAge.String(),
+		"entity_kind":            cfg.EntityKind,
+		"facts":                  cfg.Facts,
+		"alias_name_source":      cfg.AliasNameSource,
+	}
 }
 
 // Initialize loads persisted config from storage and re-runs setupConfig
@@ -150,6 +249,12 @@ func (b *kubernetesAuthBackend) Initialize(ctx context.Context) error {
 	if b.storageView == nil {
 		return nil
 	}
+
+	// The mount is routed before it is initialized, so a config write can
+	// already be under way; loading storage over it would undo it.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
 	entry, err := b.storageView.Get(ctx, "config")
 	if err != nil {
 		return fmt.Errorf("failed to read config from storage: %w", err)
@@ -187,5 +292,7 @@ The "kubernetes" auth method validates workload service-account tokens
 by calling the Kubernetes TokenReview API on the issuing kube-apiserver.
 
 Configure: kubernetes_host, kubernetes_ca_cert, optionally token_reviewer_jwt.
-Roles bind to bound_service_account_names and bound_service_account_namespaces.
+The mount's bound_audiences are the audiences each TokenReview checks; its
+entity_kind and facts name what it admits. A login selects no role: the role
+a request runs under is granted per request by the namespace's groups.
 `

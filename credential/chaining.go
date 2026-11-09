@@ -17,6 +17,11 @@ const (
 	// ConfigSecretField names which key of the referenced credential's Data carries
 	// the single secret value. Optional: a single-key payload auto-detects, and a
 	// typed referenced credential can fall back to its primary field.
+	//
+	// It modifies a reference rather than standing alone, so a source-level value
+	// applies only while it still describes the payload being fetched: not when the
+	// source names a secret_spec and a spec on it overrides that with a different
+	// one. See sourceModifiersApply.
 	ConfigSecretField = "secret_field"
 
 	// MaxSecretChainDepth bounds chaining: a referenced secret-spec may not itself
@@ -32,6 +37,11 @@ const (
 	// rotation-sensitive referenced secret such as a single-use refresh token). When
 	// set, the fetched material is shared across a caller's requests (per agent
 	// identity, and per user when the referenced fetch is user-scoped) for the TTL.
+	//
+	// Like ConfigSecretField it modifies a reference: a caching policy is chosen for
+	// one secret's rotation profile, so a source-level value does not carry onto a
+	// spec that overrode the source's secret_spec with a different one. See
+	// sourceModifiersApply.
 	ConfigSecretCacheTTL = "secret_cache_ttl"
 )
 
@@ -72,9 +82,9 @@ type Caller struct {
 	// nil for an agent-only request. It is identity for scoping only — never an
 	// authorizer — and carries just the user token id, the one datum the manager
 	// (this package) needs and cannot reach across the import boundary. The user's
-	// identity (wardenSubject) and login-derived metadata are NOT duplicated here:
-	// core reads them from the request's user token entry at the point of use (the
-	// warden_user assertion claim and the audit stamp). Built by core.
+	// identity and login-derived metadata are NOT duplicated here: core reads them
+	// from the request's user token entry at the point of use (the assertion's user
+	// level and the audit stamp). Built by core.
 	User *UserContext
 }
 
@@ -84,7 +94,7 @@ type Caller struct {
 // *credential.Credential), so a token entry on a credential type would form a
 // credential→logical→credential import cycle. Anything richer about the user
 // (identity subject, metadata) is read by core from the request's user token entry
-// where it is consumed (the warden_user assertion claim), not projected here.
+// where it is consumed (the assertion's user level), not projected here.
 type UserContext struct {
 	// TokenID is the user token's ID — the per-user credential-cache dimension,
 	// mirroring the agent's Caller.TokenID (both principals keyed by token id, not

@@ -5,7 +5,6 @@ package fullchain
 import (
 	"encoding/json"
 	"testing"
-	"time"
 
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
@@ -49,11 +48,8 @@ func setSpecAPIKey(t *testing.T, env h.ProviderEnv, key, restore string) {
 // spec changes what a new session sends upstream.
 //
 // The agent presents a fresh certificate, so this is a new session with no
-// credential of its own yet — the case that must always reflect current
-// configuration. A minted credential is cached per session, so an existing
-// session legitimately keeps the credential it was issued; that bound is the
-// subject of the row below, and the two together say when a rotation takes
-// effect.
+// credential of its own yet. A session that already holds one is the row
+// further down: it too takes up the change on its next request.
 func TestFullChain_UpdatedSpecReachesUpstream(t *testing.T) {
 	ensureEnv(t)
 
@@ -133,23 +129,21 @@ func TestFullChain_ResendingAMaskedConfigKeepsTheSecret(t *testing.T) {
 	})
 }
 
-// TestFullChain_LiveSessionKeepsItsCredential pins the other half: a session that
-// already holds a minted credential keeps using it after the spec changes.
+// TestFullChain_LiveSessionTakesUpTheEditedSpec pins the other half: a session
+// that already holds a minted credential stops sending it once the spec changes.
+// A key rewritten because it leaked has to stop travelling on the next request,
+// not when the session ends.
 //
-// This is deliberate — a credential is issued to a session, and re-minting on
-// every request would defeat the point of issuing one — but it is the part
-// operators are most likely to be surprised by, because it means rewriting a
-// spec does not immediately stop the old secret being sent.
+// The session keeps its credential across requests otherwise — the second
+// request below is the cached one — so this is the edit re-keying the cache, not
+// a mint on every request.
 //
 // Both the certificate *and* the user JWT are captured once and reused, and both
 // are load-bearing: a minted credential is keyed on the agent token and the user
 // token together, so re-fetching either would change the key and mint afresh.
 // Calling h.FullChainUserJWT at each request site would look harmless and
 // silently turn this into the row above, since every call issues a new JWT.
-//
-// What bounds the staleness is the session's own lifetime, which the row below
-// checks.
-func TestFullChain_LiveSessionKeepsItsCredential(t *testing.T) {
+func TestFullChain_LiveSessionTakesUpTheEditedSpec(t *testing.T) {
 	ensureEnv(t)
 
 	cert := agentCert(t)
@@ -180,77 +174,69 @@ func TestFullChain_LiveSessionKeepsItsCredential(t *testing.T) {
 
 	h.AssertChain(t, upstream, status, body, h.ChainWant{
 		Status: 200,
-		// The credential issued to this session, not the rewritten spec.
-		Injected:      map[string]string{"Authorization": "Bearer " + splunkKey},
+		// The rewritten spec, not the credential the session was first issued.
+		Injected:      map[string]string{"Authorization": "Bearer " + rotated},
 		Absent:        h.AlwaysAbsent(),
 		UpstreamCalls: 1,
 	})
 }
 
-// TestFullChain_CredentialStalenessIsBoundedBySessionTTL pins the bound an
-// operator actually experiences: with the same certificate presented throughout,
-// a rewritten spec takes effect once the session expires, rather than never.
-//
-// The row above shows a live session keeping its credential, which on its own is
-// equally consistent with caching it forever — the difference between a rotation
-// delayed and one that never happens. A role whose tokens last two seconds
-// settles that.
-//
-// It pins the observable bound, not the mechanism. Once the token expires the
-// next request authenticates afresh and mints under a new cache key, so a
-// manager that also kept the old entry indefinitely would pass this row
-// identically. Distinguishing the key becoming unreachable from the entry being
-// evicted on its own TTL is an in-process question, not one a client can ask.
-func TestFullChain_CredentialStalenessIsBoundedBySessionTTL(t *testing.T) {
+// freshnessEnv is a mount of its own for the row below, which deletes its spec:
+// deleting splunk's would leave the other rows without one if the row died midway.
+var freshnessEnv = h.ProviderEnv{
+	Mount:      "fc-spec-fresh",
+	Type:       "dynatrace",
+	URLKey:     "dynatrace_url",
+	CredType:   "api_key",
+	CredConfig: map[string]string{"api_key": "fc-fresh-key-v1"},
+}
+
+// TestFullChain_RecreatedSpecReachesALiveSession: a spec deleted and created
+// again under the same name is a new spec, and a session that held a credential
+// minted from the old one sends the new one's on its next request.
+func TestFullChain_RecreatedSpecReachesALiveSession(t *testing.T) {
 	ensureEnv(t)
 
-	const (
-		shortRole  = "fc-splunk-shorttl"
-		rotated    = "fc-splunk-rotated-after-expiry"
-		sessionTTL = 2 * time.Second
-	)
-
-	// A dedicated role, so shortening the session cannot affect other rows.
-	h.APIRequest(t, "DELETE", "auth/cert/role/"+shortRole, leaderPort, "")
-	status, resp := h.APIRequest(t, "POST", "auth/cert/role/"+shortRole, leaderPort,
-		`{"allowed_common_names":["`+h.FullChainAgentCN+`"],`+
-			`"token_policies":["`+splunkEnv.Policy()+`"],`+
-			`"cred_spec_name":"`+splunkEnv.Spec()+`","token_ttl":2}`)
-	switch status {
-	case 200, 201, 204:
-	default:
-		t.Fatalf("create short-TTL role (status %d): %s", status, resp)
-	}
-	t.Cleanup(func() { h.APIRequest(t, "DELETE", "auth/cert/role/"+shortRole, leaderPort, "") })
-
 	cert := agentCert(t)
-	user := h.FullChainUserJWT(t)
-
-	// Establish the session against the current spec.
-	status, body, _ := h.ChainRequest(t, leaderPort, splunkEnv, h.ChainOpts{
-		AgentCertPEM: cert, Bearer: user, Role: shortRole,
+	user := h.FullChainUserJWT(t) // once: see the row above
+	call := func(wantKey string) {
+		t.Helper()
+		upstream.Reset()
+		status, body, _ := h.ChainRequest(t, leaderPort, freshnessEnv, h.ChainOpts{
+			AgentCertPEM: cert,
+			Bearer:       user,
+			Role:         freshnessEnv.CertRole(),
+		})
+		h.AssertChain(t, upstream, status, body, h.ChainWant{
+			Status:        200,
+			Injected:      map[string]string{"Authorization": "Api-Token " + wantKey},
+			Absent:        h.AlwaysAbsent(),
+			UpstreamCalls: 1,
+		})
+	}
+	create := func(key string) {
+		t.Helper()
+		payload := `{"type":"api_key","source":"` + freshnessEnv.Source() + `","config":{"api_key":"` + key + `"}}`
+		if status, body := h.APIRequest(t, "POST", "sys/cred/specs/"+freshnessEnv.Spec(), leaderPort, payload); status != 201 {
+			t.Fatalf("spec create: status %d, body %s", status, body)
+		}
+	}
+	recreate := func(key string) {
+		t.Helper()
+		if status, body := h.APIRequest(t, "DELETE", "sys/cred/specs/"+freshnessEnv.Spec(), leaderPort, ""); status != 200 && status != 204 {
+			t.Fatalf("spec delete: status %d, body %s", status, body)
+		}
+		create(key)
+	}
+	// Leave the mount as setup made it, whatever state the row died in.
+	t.Cleanup(func() {
+		h.APIRequest(t, "DELETE", "sys/cred/specs/"+freshnessEnv.Spec(), leaderPort, "")
+		create("fc-fresh-key-v1")
 	})
-	h.AssertChain(t, upstream, status, body, h.ChainWant{
-		Status:        200,
-		Injected:      map[string]string{"Authorization": "Bearer " + splunkKey},
-		UpstreamCalls: 1,
-	})
 
-	setSpecAPIKey(t, splunkEnv, rotated, splunkKey)
+	call("fc-fresh-key-v1")
+	call("fc-fresh-key-v1") // the session's cached credential
 
-	// Past the session's lifetime, the cached credential can no longer be
-	// reached — the token it was keyed to has expired — so the next request
-	// mints against the spec as it now stands.
-	time.Sleep(sessionTTL + time.Second)
-
-	upstream.Reset()
-	status, body, _ = h.ChainRequest(t, leaderPort, splunkEnv, h.ChainOpts{
-		AgentCertPEM: cert, Bearer: user, Role: shortRole,
-	})
-	h.AssertChain(t, upstream, status, body, h.ChainWant{
-		Status:        200,
-		Injected:      map[string]string{"Authorization": "Bearer " + rotated},
-		Absent:        h.AlwaysAbsent(),
-		UpstreamCalls: 1,
-	})
+	recreate("fc-fresh-key-v2")
+	call("fc-fresh-key-v2")
 }

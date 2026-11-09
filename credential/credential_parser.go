@@ -128,6 +128,26 @@ func (p *CredentialParser) ParseAndValidate(
 		return nil, fmt.Errorf("failed to parse credential: %w", err)
 	}
 
+	// Step 3b: bound how long the credential is served. Every mint path passes here
+	// with its spec, so this is the one place the rules hold for every type.
+	//
+	// A negative lease is an upstream expiry already in the past, or an overflow:
+	// served, IsExpired would be true at once and every request would mint again.
+	//
+	// max_ttl bounds how long Warden serves a credential before minting or reading
+	// it again. It cannot shorten the upstream's own lease, and a type whose upstream
+	// takes a requested lifetime refuses a longer one before this point. A dynamic
+	// lease past it is capped here; a static credential keeps LeaseTTL 0, so it
+	// still reads as static to everything downstream, and MaxServe bounds its cache
+	// entry instead.
+	if cred.LeaseTTL < 0 {
+		return nil, fmt.Errorf("credential for spec %q reports a lifetime already past (%s)", spec.Name, cred.LeaseTTL)
+	}
+	if spec.MaxTTL > 0 && cred.LeaseTTL > spec.MaxTTL {
+		cred.LeaseTTL = spec.MaxTTL
+	}
+	cred.MaxServe = spec.MaxTTL
+
 	// Step 4: Set source information
 	cred.SourceName = spec.Source
 	cred.SourceType = driver.Type()

@@ -1,0 +1,639 @@
+package remotesign
+
+import (
+	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/hashicorp/vault/api"
+	"github.com/stephnangue/warden/logger"
+)
+
+// BackendTypeTransit is the persisted discriminator for the transit backend, and the
+// value a consumer matches on to decide which backend a chained payload describes.
+const BackendTypeTransit = "transit"
+
+// TransitConfig configures a transit-backed remote signer. It mirrors the fields
+// of the `signer "transit"` HCL stanza.
+type TransitConfig struct {
+	Address        string
+	Token          string // optional; falls back to VAULT_TOKEN via api.NewClient
+	MountPath      string // transit mount, e.g. "transit"
+	KeyNamePrefix  string // e.g. "warden-oidc" -> keys warden-oidc-rs256, warden-oidc-es256
+	Namespace      string
+	RequestTimeout time.Duration
+	DisableRenewal bool
+
+	TLSCACert     string
+	TLSCAPath     string
+	TLSClientCert string
+	TLSClientKey  string
+	TLSServerName string
+	TLSSkipVerify bool
+}
+
+// TransitBackend signs via a transit secrets engine, where
+// the private key is created non-exportable and never leaves the KMS.
+type TransitBackend struct {
+	client        *api.Client
+	mountPath     string
+	keyNamePrefix string
+	timeout       time.Duration
+	watcher       *api.LifetimeWatcher
+	log           *logger.GatedLogger
+}
+
+var _ Backend = (*TransitBackend)(nil)
+
+// transitAlg is what transit calls a JWS alg's key type, hash and RSA padding.
+type transitAlg struct {
+	keyType  string // transit key type, e.g. "rsa-2048"
+	hashName string // transit hash_algorithm, e.g. "sha2-256"
+	sigAlg   string // transit signature_algorithm for RSA ("pkcs1v15" or "pss"); empty for ECDSA
+}
+
+// transitAlgs covers exactly the algs in algParamsByAlg; a test keeps the two in step.
+var transitAlgs = map[string]transitAlg{
+	"RS256": {keyType: "rsa-2048", hashName: "sha2-256", sigAlg: "pkcs1v15"},
+	"RS384": {keyType: "rsa-3072", hashName: "sha2-384", sigAlg: "pkcs1v15"},
+	"PS256": {keyType: "rsa-2048", hashName: "sha2-256", sigAlg: "pss"},
+	"ES256": {keyType: "ecdsa-p256", hashName: "sha2-256"},
+	"ES384": {keyType: "ecdsa-p384", hashName: "sha2-384"},
+}
+
+// transitVersion reads a transit key version, which is a positive decimal counter.
+// Zero is refused along with everything else that is not positive: transit resolves
+// zero to "latest" server-side, so letting it through would sign with whatever
+// version happens to be newest — the pre-published next key included — rather than
+// the one the caller named.
+func transitVersion(version string) (int, error) {
+	v, err := strconv.Atoi(version)
+	if err != nil || v < 1 {
+		return 0, fmt.Errorf("remotesign: transit key version must be a positive integer, got %q", version)
+	}
+	return v, nil
+}
+
+// NewTransitBackend builds a transit-backed signer client. A construction failure
+// (bad TLS material, malformed address) is a config error and is returned here;
+// transit being unreachable is not detected until a key operation. log may be nil.
+func NewTransitBackend(cfg TransitConfig, log *logger.GatedLogger) (*TransitBackend, error) {
+	if strings.TrimSpace(cfg.MountPath) == "" {
+		return nil, fmt.Errorf("remotesign: transit mount_path is required")
+	}
+	if strings.TrimSpace(cfg.KeyNamePrefix) == "" {
+		return nil, fmt.Errorf("remotesign: transit key_name_prefix is required")
+	}
+
+	apiCfg := api.DefaultConfig()
+	if cfg.Address != "" {
+		apiCfg.Address = cfg.Address
+	}
+	if cfg.TLSCACert != "" || cfg.TLSCAPath != "" || cfg.TLSClientCert != "" ||
+		cfg.TLSClientKey != "" || cfg.TLSServerName != "" || cfg.TLSSkipVerify {
+		tls := &api.TLSConfig{
+			CACert:        cfg.TLSCACert,
+			CAPath:        cfg.TLSCAPath,
+			ClientCert:    cfg.TLSClientCert,
+			ClientKey:     cfg.TLSClientKey,
+			TLSServerName: cfg.TLSServerName,
+			Insecure:      cfg.TLSSkipVerify,
+		}
+		if err := apiCfg.ConfigureTLS(tls); err != nil {
+			return nil, fmt.Errorf("remotesign: configure transit TLS: %w", err)
+		}
+	}
+
+	client, err := api.NewClient(apiCfg)
+	if err != nil {
+		return nil, fmt.Errorf("remotesign: create transit client: %w", err)
+	}
+	if cfg.Token != "" {
+		client.SetToken(cfg.Token)
+	}
+	if cfg.Namespace != "" {
+		client.SetNamespace(cfg.Namespace)
+	}
+
+	b := &TransitBackend{
+		client:        client,
+		mountPath:     strings.Trim(cfg.MountPath, "/"),
+		keyNamePrefix: cfg.KeyNamePrefix,
+		timeout:       cfg.RequestTimeout,
+		log:           log,
+	}
+	b.startRenewal(cfg.DisableRenewal)
+	return b, nil
+}
+
+// NewTransitClientBackend wraps an already-authenticated client instead of building
+// one. It starts no token renewal and holds no goroutine, so a caller may build one
+// per request and discard it: the token's lifetime belongs to whoever obtained it, and
+// renewing a short-lived per-request token would be both useless and a leak. Close is
+// therefore a no-op here.
+//
+// The returned backend has no key-name prefix, so it serves only the operations that
+// take an explicit key name — Sign, PublicKey, NamedKeyInfo. EnsureKey and NewVersion
+// derive a name from an algorithm and report that they are unavailable.
+func NewTransitClientBackend(client *api.Client, mountPath string, timeout time.Duration, log *logger.GatedLogger) (*TransitBackend, error) {
+	if client == nil {
+		return nil, fmt.Errorf("remotesign: a transit client is required")
+	}
+	if strings.TrimSpace(mountPath) == "" {
+		return nil, fmt.Errorf("remotesign: transit mount_path is required")
+	}
+	return &TransitBackend{
+		client:    client,
+		mountPath: strings.Trim(mountPath, "/"),
+		timeout:   timeout,
+		log:       log,
+	}, nil
+}
+
+// startRenewal keeps a renewable token alive for the life of the backend, mirroring
+// the transit auto-seal wrapper. A non-renewable or short-lived static token simply
+// runs without a watcher; signing fails closed once it expires.
+func (b *TransitBackend) startRenewal(disable bool) {
+	if disable || b.client.Token() == "" {
+		return
+	}
+	// Bound the initial renew so a down KMS cannot hang construction (the HTTP
+	// client's 60s default would otherwise apply). A non-renewable token simply
+	// runs without a watcher and fails closed when it expires.
+	renewTimeout := b.timeout
+	if renewTimeout <= 0 {
+		renewTimeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), renewTimeout)
+	defer cancel()
+	secret, err := b.client.Auth().Token().RenewTokenAsSelfWithContext(ctx, b.client.Token(), 0)
+	if err != nil {
+		b.logInfo("remotesign: transit token not renewable, disabling renewal", logger.Err(err))
+		return
+	}
+	watcher, err := b.client.NewLifetimeWatcher(&api.LifetimeWatcherInput{Secret: secret})
+	if err != nil {
+		b.logInfo("remotesign: failed to start transit token renewal", logger.Err(err))
+		return
+	}
+	b.watcher = watcher
+	go func() {
+		for {
+			select {
+			case err := <-watcher.DoneCh():
+				if err != nil {
+					b.logError("remotesign: transit token renewal stopped", logger.Err(err))
+				}
+				return
+			case <-watcher.RenewCh():
+			}
+		}
+	}()
+	go watcher.Start()
+}
+
+func (b *TransitBackend) Type() string { return BackendTypeTransit }
+
+// Close stops token renewal.
+func (b *TransitBackend) Close() {
+	if b.watcher != nil {
+		b.watcher.Stop()
+	}
+}
+
+// keyNameFor derives the transit key name for a JWS alg, e.g. "warden-oidc-rs256".
+// A backend built around an existing client has no prefix and addresses keys by
+// explicit name, so deriving one is refused rather than producing "-rs256".
+func (b *TransitBackend) keyNameFor(alg string) (string, error) {
+	if b.keyNamePrefix == "" {
+		return "", fmt.Errorf("remotesign: this backend has no key name prefix and addresses keys by explicit name; cannot derive a key name for %s", alg)
+	}
+	return b.keyNamePrefix + "-" + strings.ToLower(alg), nil
+}
+
+// EnsureKey creates alg's key if absent (idempotent) and returns its latest version.
+func (b *TransitBackend) EnsureKey(ctx context.Context, alg string) (KeyInfo, error) {
+	ta, ok := transitAlgs[alg]
+	if !ok {
+		return KeyInfo{}, fmt.Errorf("remotesign: unsupported signing algorithm %q", alg)
+	}
+	name, err := b.keyNameFor(alg)
+	if err != nil {
+		return KeyInfo{}, err
+	}
+	ctx, cancel := b.withTimeout(ctx)
+	defer cancel()
+	if _, err := b.client.Logical().WriteWithContext(ctx, b.keysPath(name), map[string]interface{}{
+		"type": ta.keyType,
+	}); err != nil {
+		return KeyInfo{}, fmt.Errorf("remotesign: ensure transit key %q: %w", name, err)
+	}
+	return b.latestKeyInfo(ctx, alg)
+}
+
+// NewVersion rotates alg's key and returns the new latest version.
+func (b *TransitBackend) NewVersion(ctx context.Context, alg string) (KeyInfo, error) {
+	if _, ok := transitAlgs[alg]; !ok {
+		return KeyInfo{}, fmt.Errorf("remotesign: unsupported signing algorithm %q", alg)
+	}
+	name, err := b.keyNameFor(alg)
+	if err != nil {
+		return KeyInfo{}, err
+	}
+	ctx, cancel := b.withTimeout(ctx)
+	defer cancel()
+	if _, err := b.client.Logical().WriteWithContext(ctx, b.keysPath(name)+"/rotate", nil); err != nil {
+		return KeyInfo{}, fmt.Errorf("remotesign: rotate transit key %q: %w", name, err)
+	}
+	return b.latestKeyInfo(ctx, alg)
+}
+
+// PublicKey fetches one specific version's public key, re-asserting the key type
+// and non-exportability (transit allows flipping a key to exportable after
+// creation, so this rarer path cheaply re-checks the invariant).
+func (b *TransitBackend) PublicKey(ctx context.Context, ref KeyRef) (crypto.PublicKey, error) {
+	version, err := transitVersion(ref.Version)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := b.withTimeout(ctx)
+	defer cancel()
+	kd, err := b.readKey(ctx, ref.KeyName)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateTransitKey(kd, ref.KeyName, ref.Alg); err != nil {
+		return nil, err
+	}
+	return kd.publicKeyForVersion(version)
+}
+
+// validateTransitKey enforces the two invariants a signing key must hold: it is
+// the type the alg expects, and it is non-exportable (the whole point of remote
+// signing).
+func validateTransitKey(kd *transitKeyData, name, alg string) error {
+	ta, ok := transitAlgs[alg]
+	if !ok {
+		return fmt.Errorf("remotesign: unsupported signing algorithm %q", alg)
+	}
+	if kd.Type != ta.keyType {
+		return fmt.Errorf("remotesign: transit key %q has type %q, expected %q for %s", name, kd.Type, ta.keyType, alg)
+	}
+	if kd.Exportable {
+		return fmt.Errorf("remotesign: transit key %q is exportable; the OIDC issuer key must be non-exportable (recreate with exportable=false)", name)
+	}
+	return nil
+}
+
+// NamedKeyInfo reads a key by explicit name and returns the requested version, or the
+// latest when version is empty. Unlike latestKeyInfo it applies the relaxed
+// compatibility rules below, because the key was provisioned by an operator rather than
+// created by this package.
+//
+// Resolving "latest" to a concrete number here is deliberate: a caller that carries the
+// resolved version forward keeps signing with the version it validated, instead of
+// whatever is newest whenever the signature is eventually produced.
+func (b *TransitBackend) NamedKeyInfo(ctx context.Context, name, alg, version string) (KeyInfo, error) {
+	if strings.TrimSpace(name) == "" {
+		return KeyInfo{}, fmt.Errorf("remotesign: a key name is required")
+	}
+	want := 0
+	if version != "" {
+		v, err := transitVersion(version)
+		if err != nil {
+			return KeyInfo{}, err
+		}
+		want = v
+	}
+	ctx, cancel := b.withTimeout(ctx)
+	defer cancel()
+	kd, err := b.readKey(ctx, name)
+	if err != nil {
+		return KeyInfo{}, err
+	}
+	if err := validateKeyForAlg(kd, name, alg); err != nil {
+		return KeyInfo{}, err
+	}
+	if want == 0 {
+		want = kd.LatestVersion
+	}
+	pub, err := kd.publicKeyForVersion(want)
+	if err != nil {
+		return KeyInfo{}, err
+	}
+	created, err := kd.creationTimeForVersion(want)
+	if err != nil {
+		return KeyInfo{}, err
+	}
+	return KeyInfo{
+		Ref:       KeyRef{KeyName: name, Version: strconv.Itoa(want), Alg: alg},
+		Public:    pub,
+		CreatedAt: created,
+	}, nil
+}
+
+// checkPadding refuses signer options that disagree with the alg's padding. The alg
+// decides what the store is asked for, so a caller handing PSS options for an RS*
+// alg — or a hash for a PS* one — would otherwise get a signature in a padding it did
+// not ask for, which no verifier of that alg accepts.
+func checkPadding(alg string, p algParams, opts crypto.SignerOpts) error {
+	pssOpts, isPSS := opts.(*rsa.PSSOptions)
+	switch {
+	case p.pss && !isPSS:
+		return fmt.Errorf("remotesign: %s is RSASSA-PSS and needs *rsa.PSSOptions", alg)
+	case !p.pss && isPSS:
+		return fmt.Errorf("remotesign: %s does not use RSASSA-PSS", alg)
+	case isPSS && pssOpts.SaltLength != rsa.PSSSaltLengthEqualsHash && pssOpts.SaltLength != p.hash.Size():
+		return fmt.Errorf("remotesign: %s requires a salt as long as the hash", alg)
+	}
+	return nil
+}
+
+// validateKeyForAlg checks that an operator-provisioned key can sign alg. It is looser
+// than validateTransitKey, which pins an exact key type because this package created
+// that key: an RSA key of any supported size signs any RS* algorithm, so refusing
+// rsa-4096 for RS256 would reject a legitimate — indeed stronger — key. Curves stay
+// exact, since an ES256 signature only verifies against P-256.
+//
+// Non-exportability is enforced on both paths. It is the entire premise of asking a
+// remote service to sign rather than fetching the key.
+func validateKeyForAlg(kd *transitKeyData, name, alg string) error {
+	p, ok := algParamsByAlg[alg]
+	ta, tok := transitAlgs[alg]
+	if !ok || !tok {
+		return fmt.Errorf("remotesign: unsupported signing algorithm %q", alg)
+	}
+	if p.isRSA {
+		if !strings.HasPrefix(kd.Type, "rsa-") {
+			return fmt.Errorf("remotesign: key %q has type %q and cannot sign %s; an RSA key is required", name, kd.Type, alg)
+		}
+	} else if kd.Type != ta.keyType {
+		return fmt.Errorf("remotesign: key %q has type %q, expected %q for %s", name, kd.Type, ta.keyType, alg)
+	}
+	if kd.Exportable {
+		return fmt.Errorf("remotesign: key %q is exportable; a remotely signed key must be non-exportable (recreate it with exportable=false)", name)
+	}
+	return nil
+}
+
+// Sign signs an already-hashed digest with the exact version in ref via
+// transit/sign. RSA padding is always named rather than left to transit's default
+// (PSS): PKCS#1 v1.5 for RS*, and for PS* PSS with a salt as long as the hash. ECDSA
+// is requested in ASN.1 form, matching the crypto.Signer contract.
+func (b *TransitBackend) Sign(ctx context.Context, ref KeyRef, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	p, ok := algParamsByAlg[ref.Alg]
+	ta, tok := transitAlgs[ref.Alg]
+	if !ok || !tok {
+		return nil, fmt.Errorf("remotesign: unsupported signing algorithm %q", ref.Alg)
+	}
+	if err := checkPadding(ref.Alg, p, opts); err != nil {
+		return nil, err
+	}
+	version, err := transitVersion(ref.Version)
+	if err != nil {
+		return nil, err
+	}
+	// Guard the digest against an alg/hash mismatch. For ECDSA transit signs
+	// whatever prehashed bytes arrive, so a wrong-hash digest would produce a
+	// well-formed but permanently unverifiable signature — fail fast instead.
+	if opts.HashFunc() != p.hash {
+		return nil, fmt.Errorf("remotesign: %s requires a %v digest, got %v", ref.Alg, p.hash, opts.HashFunc())
+	}
+	if len(digest) != p.hash.Size() {
+		return nil, fmt.Errorf("remotesign: %s digest must be %d bytes, got %d", ref.Alg, p.hash.Size(), len(digest))
+	}
+
+	data := map[string]interface{}{
+		"input":                base64.StdEncoding.EncodeToString(digest),
+		"prehashed":            true,
+		"hash_algorithm":       ta.hashName,
+		"key_version":          version,
+		"marshaling_algorithm": "asn1",
+	}
+	if p.isRSA {
+		data["signature_algorithm"] = ta.sigAlg
+	}
+	if p.pss {
+		// transit's own default, "auto", signs with the longest salt the key allows,
+		// which verifiers holding to the JWS length refuse.
+		data["salt_length"] = "hash"
+	}
+	ctx, cancel := b.withTimeout(ctx)
+	defer cancel()
+	secret, err := b.client.Logical().WriteWithContext(ctx, b.signPath(ref.KeyName), data)
+	if err != nil {
+		return nil, fmt.Errorf("remotesign: transit sign %q: %w", ref.KeyName, err)
+	}
+	if secret == nil || secret.Data == nil {
+		return nil, fmt.Errorf("remotesign: transit sign %q returned no data", ref.KeyName)
+	}
+	// The response's key_version is the authoritative, template-independent proof
+	// of which version signed; verify it pinned to the version we asked for.
+	if signedVer, err := asInt(secret.Data["key_version"]); err == nil && signedVer != version {
+		return nil, fmt.Errorf("remotesign: transit signed with key version %d, expected %d", signedVer, version)
+	}
+	raw, _ := secret.Data["signature"].(string)
+	return decodeTransitSignature(raw)
+}
+
+// latestKeyInfo reads alg's key, validates it, and returns its latest version.
+func (b *TransitBackend) latestKeyInfo(ctx context.Context, alg string) (KeyInfo, error) {
+	name, err := b.keyNameFor(alg)
+	if err != nil {
+		return KeyInfo{}, err
+	}
+	kd, err := b.readKey(ctx, name)
+	if err != nil {
+		return KeyInfo{}, err
+	}
+	if err := validateTransitKey(kd, name, alg); err != nil {
+		return KeyInfo{}, err
+	}
+	pub, err := kd.publicKeyForVersion(kd.LatestVersion)
+	if err != nil {
+		return KeyInfo{}, err
+	}
+	created, err := kd.creationTimeForVersion(kd.LatestVersion)
+	if err != nil {
+		return KeyInfo{}, err
+	}
+	return KeyInfo{
+		Ref:       KeyRef{KeyName: name, Version: strconv.Itoa(kd.LatestVersion), Alg: alg},
+		Public:    pub,
+		CreatedAt: created,
+	}, nil
+}
+
+func (b *TransitBackend) keysPath(name string) string { return b.mountPath + "/keys/" + name }
+func (b *TransitBackend) signPath(name string) string { return b.mountPath + "/sign/" + name }
+
+func (b *TransitBackend) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if b.timeout > 0 {
+		return context.WithTimeout(ctx, b.timeout)
+	}
+	return context.WithCancel(ctx)
+}
+
+func (b *TransitBackend) logInfo(msg string, f ...logger.TypedField) {
+	if b.log != nil {
+		b.log.Info(msg, f...)
+	}
+}
+
+func (b *TransitBackend) logError(msg string, f ...logger.TypedField) {
+	if b.log != nil {
+		b.log.Error(msg, f...)
+	}
+}
+
+// transitKeyData is the parsed subset of a transit/keys/<name> read response.
+type transitKeyData struct {
+	Type          string
+	Exportable    bool
+	LatestVersion int
+	Keys          map[string]transitKeyVersion
+}
+
+type transitKeyVersion struct {
+	PublicKey    string `json:"public_key"`
+	CreationTime string `json:"creation_time"`
+}
+
+// readKey reads and parses a transit key's metadata (type, exportable, versions).
+func (b *TransitBackend) readKey(ctx context.Context, name string) (*transitKeyData, error) {
+	secret, err := b.client.Logical().ReadWithContext(ctx, b.keysPath(name))
+	if err != nil {
+		return nil, fmt.Errorf("remotesign: read transit key %q: %w", name, err)
+	}
+	if secret == nil || secret.Data == nil {
+		return nil, fmt.Errorf("remotesign: transit key %q not found", name)
+	}
+	kd := &transitKeyData{}
+	kd.Type, _ = secret.Data["type"].(string)
+	kd.Exportable, _ = secret.Data["exportable"].(bool)
+	lv, err := asInt(secret.Data["latest_version"])
+	if err != nil {
+		return nil, fmt.Errorf("remotesign: transit key %q: bad latest_version: %w", name, err)
+	}
+	kd.LatestVersion = lv
+	// Re-marshal the versions map through JSON to decode into typed structs. This
+	// is best-effort: a symmetric key (AES/ChaCha) returns "keys" as a map of
+	// creation timestamps (numbers), which fails to decode here — leaving Keys nil
+	// so the caller's type check reports the clean "wrong key type" error instead.
+	if rawKeys, ok := secret.Data["keys"]; ok {
+		if buf, err := json.Marshal(rawKeys); err == nil {
+			_ = json.Unmarshal(buf, &kd.Keys)
+		}
+	}
+	return kd, nil
+}
+
+func (kd *transitKeyData) versionEntry(version int) (transitKeyVersion, error) {
+	v, ok := kd.Keys[strconv.Itoa(version)]
+	if !ok {
+		return transitKeyVersion{}, fmt.Errorf("remotesign: transit key has no version %d", version)
+	}
+	return v, nil
+}
+
+func (kd *transitKeyData) publicKeyForVersion(version int) (crypto.PublicKey, error) {
+	v, err := kd.versionEntry(version)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePublicKeyPEM(v.PublicKey)
+}
+
+func (kd *transitKeyData) creationTimeForVersion(version int) (time.Time, error) {
+	v, err := kd.versionEntry(version)
+	if err != nil {
+		return time.Time{}, err
+	}
+	t, err := time.Parse(time.RFC3339Nano, v.CreationTime)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("remotesign: parse transit key creation_time %q: %w", v.CreationTime, err)
+	}
+	return t, nil
+}
+
+// ParsePublicKeyPEM decodes a PKIX PEM public key and ensures it is RSA or ECDSA.
+func ParsePublicKeyPEM(pemStr string) (crypto.PublicKey, error) {
+	if pemStr == "" {
+		return nil, fmt.Errorf("remotesign: empty public key")
+	}
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		return nil, fmt.Errorf("remotesign: public key is not valid PEM")
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("remotesign: parse public key: %w", err)
+	}
+	switch pub.(type) {
+	case *rsa.PublicKey, *ecdsa.PublicKey:
+		return pub, nil
+	default:
+		return nil, fmt.Errorf("remotesign: unsupported public key type %T", pub)
+	}
+}
+
+// MarshalPublicKeyPEM encodes an RSA/ECDSA public key as a PKIX PEM block, the
+// form persisted alongside a remote key handle (so JWKS/unseal need no KMS call).
+func MarshalPublicKeyPEM(pub crypto.PublicKey) (string, error) {
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return "", fmt.Errorf("remotesign: marshal public key: %w", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
+}
+
+// decodeTransitSignature extracts the raw signature bytes from transit's
+// "<prefix>:v<N>:<base64>" envelope. The base64 payload is the final
+// colon-delimited segment (standard base64 contains no colon), so this tolerates a
+// custom version_template in the prefix; the key version itself is validated by the
+// caller against the response's authoritative key_version field. asn1 marshaling
+// uses standard base64.
+func decodeTransitSignature(sig string) ([]byte, error) {
+	if sig == "" {
+		return nil, fmt.Errorf("remotesign: transit returned an empty signature")
+	}
+	i := strings.LastIndex(sig, ":")
+	if i < 0 || i == len(sig)-1 {
+		return nil, fmt.Errorf("remotesign: malformed transit signature")
+	}
+	raw, err := base64.StdEncoding.DecodeString(sig[i+1:])
+	if err != nil {
+		return nil, fmt.Errorf("remotesign: decode transit signature: %w", err)
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("remotesign: transit returned an empty signature payload")
+	}
+	return raw, nil
+}
+
+// asInt coerces a JSON-decoded number (json.Number, float64, int, or string) to int.
+func asInt(v interface{}) (int, error) {
+	switch n := v.(type) {
+	case json.Number:
+		i, err := n.Int64()
+		return int(i), err
+	case float64:
+		return int(n), nil
+	case int:
+		return n, nil
+	case string:
+		i, err := strconv.Atoi(n)
+		return i, err
+	default:
+		return 0, fmt.Errorf("not a number: %T", v)
+	}
+}

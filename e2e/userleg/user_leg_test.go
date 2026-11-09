@@ -250,6 +250,10 @@ func assertUserAttributed(t *testing.T, port int, wantSubject string) {
 	for time.Now().Before(deadline) {
 		for _, e := range h.ReadAuditEntries(t, nodeNum, h.UserLegMount) {
 			if e.Auth != nil && e.Auth.User != nil && strings.Contains(e.Auth.User.Subject, wantSubject) {
+				// The user is in the root namespace, whose stored path is empty.
+				if e.Auth.User.NamespacePath != "" {
+					t.Errorf("audited user namespace_path = %q, want the root namespace's empty path", e.Auth.User.NamespacePath)
+				}
 				return
 			}
 		}

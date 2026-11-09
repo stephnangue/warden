@@ -31,9 +31,10 @@ The relayed token is validated by the auth method that matches its issuer: the
 `kubernetes` method verifies a ServiceAccount token via the cluster's
 TokenReview API; the `jwt` method verifies a CI OIDC token against the
 provider's discovery URL or JWKS. With no `X-Warden-Token` on the request,
-Warden uses [transparent authentication](/concepts/authentication/#transparent-authentication)
-to resolve the token to a role per request and caches the result. See
-[Authentication](/concepts/authentication/#auth-methods).
+Warden uses [implicit authentication](/identity/authentication/#implicit-authentication):
+the mount admits the token and Warden caches the admission. On every request,
+the [groups](/identity/groups/) that match the token's facts decide whether the
+role the request names is granted, and the role's policies authorize the call.
 
 ## In practice
 
@@ -42,9 +43,9 @@ release agent that promotes builds and needs short-lived AWS access to do it. Th
 runner exposes a per-job OIDC token; the agent fetches it (via
 `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN`) and attaches
 it to its requests to Warden as `Authorization: Bearer`. Warden validates the
-token through the `jwt` method against GitHub's OIDC issuer, checks the repository
-and branch claims via the role, mints short-lived AWS credentials, and proxies the
-calls. No long-lived AWS keys ever live in the repository's secrets, and the
+token through the `jwt` method against GitHub's OIDC issuer, grants the role only
+through a group whose rule matches the repository and branch claims, mints
+short-lived AWS credentials, and proxies the calls. No long-lived AWS keys ever live in the repository's secrets, and the
 identity is scoped to the exact workflow run.
 
 ## When to choose it
@@ -73,5 +74,5 @@ identity is scoped to the exact workflow run.
 - [Self-Minted SVID](/agent-identity/self-minted-identity/) — the agent presents its own
   credential here too, but mints a SPIFFE SVID instead of relaying a platform
   token.
-- [Authentication](/concepts/authentication/) — transparent auth and the
+- [Authentication](/identity/authentication/) — implicit authentication and the
   `kubernetes` / `jwt` methods.

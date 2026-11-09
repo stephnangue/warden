@@ -470,6 +470,13 @@ func BenchmarkIsUnauthenticatedPath_NoMatch(b *testing.B) {
 	}
 }
 
+func TestStreamingBackend_StreamBodyLimit(t *testing.T) {
+	b := &StreamingBackend{Backend: &Backend{BackendType: "test"}}
+	assert.Equal(t, int64(0), b.StreamBodyLimit(nil), "no cap set: core's own applies")
+	b.SetMaxBodySize(4096)
+	assert.Equal(t, int64(4096), b.StreamBodyLimit(nil))
+}
+
 func TestShouldParseStreamBody(t *testing.T) {
 	r := httptest.NewRequest("POST", "/v1/test/gateway/foo", nil)
 

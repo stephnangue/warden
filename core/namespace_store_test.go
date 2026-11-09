@@ -5,12 +5,14 @@ package core
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
+	wlogical "github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -217,6 +219,33 @@ func TestNamespaceStore_ModifyNamespaceByPath_RootRefused(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "refusing to modify root namespace")
+}
+
+// A namespace's own record is out of reach from inside it: an empty path there
+// names the namespace itself, and is refused like root's.
+func TestNamespaceStore_ModifyNamespaceByPath_SelfRefused(t *testing.T) {
+	core := createTestCore(t)
+	rootCtx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	_, err := core.namespaceStore.ModifyNamespaceByPath(rootCtx, "team", nil)
+	require.NoError(t, err)
+	team, err := core.namespaceStore.GetNamespaceByPath(rootCtx, "team")
+	require.NoError(t, err)
+	teamCtx := namespace.ContextWithNamespace(context.Background(), team)
+
+	called := false
+	_, err = core.namespaceStore.ModifyNamespaceByPath(teamCtx, "", func(ctx context.Context, ns *namespace.Namespace) (*namespace.Namespace, error) {
+		called = true
+		ns.EnableBuiltinRoles = true
+		return ns, nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to modify a namespace from inside it")
+	assert.False(t, called, "the callback never runs")
+
+	// Its children are still its to write.
+	child, err := core.namespaceStore.ModifyNamespaceByPath(teamCtx, "dev", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "team/dev/", child.Path)
 }
 
 // TestNamespaceStore_ListAllNamespaces tests listing all namespaces
@@ -820,6 +849,7 @@ func TestNamespaceStore_ParentMustExist(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing parent")
+	assert.Equal(t, http.StatusBadRequest, wlogical.GetErrorCode(err), "a missing parent is the caller's mistake")
 }
 
 // TestNamespaceStore_TaintedNamespace tests that tainted namespaces cannot be modified
@@ -845,6 +875,56 @@ func TestNamespaceStore_TaintedNamespace(t *testing.T) {
 	// Should fail because namespace is tainted
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tainted")
+}
+
+// namespaceTestJob runs a function on the namespace job dispatcher.
+type namespaceTestJob struct {
+	run func()
+}
+
+func (j *namespaceTestJob) Execute() error  { j.run(); return nil }
+func (j *namespaceTestJob) OnFailure(error) {}
+
+// TestPreSeal_WaitsForNamespaceJobs tests that a seal stops the namespace jobs
+// before tearing down what they read.
+func TestPreSeal_WaitsForNamespaceJobs(t *testing.T) {
+	core := createTestCore(t)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var managerPresent bool
+	core.namespaceStore.deletionDispatcher.AddJob(&namespaceTestJob{run: func() {
+		close(started)
+		<-release
+		managerPresent = core.credentialManager != nil
+	}}, "test-queue")
+
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("namespace job never started")
+	}
+
+	sealed := make(chan struct{})
+	go func() {
+		defer close(sealed)
+		_ = core.preSeal()
+	}()
+
+	select {
+	case <-sealed:
+		close(release)
+		t.Fatal("preSeal returned while a namespace job was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-sealed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("preSeal did not return after the namespace job finished")
+	}
+	assert.True(t, managerPresent, "credential manager was torn down under a running namespace job")
 }
 
 // TestNamespaceStore_ClearNamespaceResources tests that clearNamespaceResources
@@ -880,11 +960,10 @@ func TestNamespaceStore_ClearNamespaceResources(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		authData := &AuthData{
 			PrincipalID: "user",
-			RoleName:    "role",
 			ExpireAt:    time.Now().Add(1 * time.Hour),
 			Policies:    []string{"default"},
 		}
-		_, err := core.tokenStore.GenerateToken(nsCtx, TypeWardenToken, authData)
+		_, err := core.tokenStore.GenerateToken(nsCtx, TypeServiceToken, authData)
 		require.NoError(t, err)
 	}
 
@@ -899,9 +978,9 @@ func TestNamespaceStore_ClearNamespaceResources(t *testing.T) {
 		Source: "test-src",
 		MinTTL: 1 * time.Minute,
 		MaxTTL: 1 * time.Hour,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"token": "test-token",
-		},
+		}),
 	}))
 
 	// Register rotation entry
@@ -975,4 +1054,252 @@ func TestNamespaceStore_ClearNamespaceResources_NilManagers(t *testing.T) {
 	// clearNamespaceResources should not panic with nil managers
 	err := core.namespaceStore.clearNamespaceResources(nsCtx, childNs)
 	require.NoError(t, err)
+}
+
+// TestNamespaceStore_ClearNamespaceResourcesClosesDrivers asserts that deleting a
+// namespace releases the credential drivers its sources left behind.
+//
+// Nothing closed them before: CloseAllDriversForNamespace existed across three
+// layers with no production caller, so every driver in a deleted namespace kept its
+// HTTP clients, pooled connections and cached upstream tokens for the life of the
+// process.
+func TestNamespaceStore_ClearNamespaceResourcesClosesDrivers(t *testing.T) {
+	core := createTestCore(t)
+	defer core.tokenStore.Close()
+
+	driver := &mockRotatableDriver{supportsRotation: true}
+	require.NoError(t, core.credentialDriverRegistry.RegisterFactory(&mockDriverFactory{driver: driver}))
+
+	// Rebuild the manager so it resolves through the registry the mock is in.
+	credManager, err := credential.NewManager(
+		core.credentialTypeRegistry, core.credentialDriverRegistry, core.credConfigStore, core.logger)
+	require.NoError(t, err)
+	core.credentialManager.Stop()
+	core.credentialManager = credManager
+
+	childNs := &namespace.Namespace{
+		ID:   "driver-cleanup-ns",
+		UUID: "driver-cleanup-ns-uuid",
+		Path: "driver-cleanup/",
+	}
+	nsCtx := namespace.ContextWithNamespace(context.Background(), childNs)
+
+	require.NoError(t, core.credConfigStore.CreateSource(nsCtx, &credential.CredSource{
+		Name: "mock-src",
+		Type: "mock",
+	}))
+
+	// Instantiate the driver, the way a mint would.
+	_, err = core.credentialManager.GetOrCreateDriver(nsCtx, "mock-src")
+	require.NoError(t, err)
+
+	// The factory hands back one shared instance, so the connection probe that
+	// source validation runs has already torn it down once. Measure the delta.
+	before := driver.GetDriverCleanupCount()
+
+	require.NoError(t, core.namespaceStore.clearNamespaceResources(nsCtx, childNs))
+
+	assert.Equal(t, before+1, driver.GetDriverCleanupCount(),
+		"deleting the namespace must close the drivers its sources created")
+}
+
+// nsRecordIn reports whether holder's view stores the record of the namespace
+// with the given UUID.
+func nsRecordIn(t *testing.T, c *Core, holder *namespace.Namespace, uuid string) bool {
+	t.Helper()
+	entry, err := NamespaceView(c.barrier, holder).SubView(namespaceStoreSubPath).Get(context.Background(), uuid)
+	require.NoError(t, err)
+	return entry != nil
+}
+
+// nsListView lists the namespace records holder's view stores.
+func nsListView(t *testing.T, c *Core, holder *namespace.Namespace) []string {
+	t.Helper()
+	keys, err := NamespaceView(c.barrier, holder).SubView(namespaceStoreSubPath).List(context.Background(), "")
+	require.NoError(t, err)
+	return keys
+}
+
+// nsReload builds a second store over the same storage, as an unseal does.
+func nsReload(t *testing.T, c *Core) *NamespaceStore {
+	t.Helper()
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	reloaded, err := NewNamespaceStore(ctx, c, c.logger.WithSystem("namespace"))
+	require.NoError(t, err)
+	return reloaded
+}
+
+func nsModify(t *testing.T, c *Core, ctx context.Context, path string, metadata map[string]string) *namespace.Namespace {
+	t.Helper()
+	entry, err := c.namespaceStore.ModifyNamespaceByPath(ctx, path, func(ctx context.Context, ns *namespace.Namespace) (*namespace.Namespace, error) {
+		if metadata != nil {
+			ns.CustomMetadata = metadata
+		}
+		return ns, nil
+	})
+	require.NoError(t, err)
+	return entry
+}
+
+// TestNamespaceStore_NestedCreateFromAncestor_Reloads creates nested namespaces
+// by their full path from root: each record must land in its parent's view, so
+// the tree loads whatever order storage lists the records in.
+func TestNamespaceStore_NestedCreateFromAncestor_Reloads(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	acme := nsModify(t, core, ctx, "acme", nil)
+	dev := nsModify(t, core, ctx, "acme/dev", nil)
+	leaf := &namespace.Namespace{Path: "acme/dev/leaf/"}
+	require.NoError(t, core.namespaceStore.SetNamespace(ctx, leaf))
+
+	assert.True(t, nsRecordIn(t, core, acme, dev.UUID), "acme/dev/ is stored under acme/")
+	assert.False(t, nsRecordIn(t, core, namespace.RootNamespace, dev.UUID), "acme/dev/ is not stored under root")
+	assert.True(t, nsRecordIn(t, core, dev, leaf.UUID), "acme/dev/leaf/ is stored under acme/dev/")
+	assert.False(t, nsRecordIn(t, core, namespace.RootNamespace, leaf.UUID), "acme/dev/leaf/ is not stored under root")
+
+	reloaded := nsReload(t, core)
+	for path, uuid := range map[string]string{"acme/": acme.UUID, "acme/dev/": dev.UUID, "acme/dev/leaf/": leaf.UUID} {
+		got, err := reloaded.GetNamespaceByPath(ctx, path)
+		require.NoError(t, err)
+		require.NotNil(t, got, path)
+		assert.Equal(t, uuid, got.UUID, path)
+	}
+}
+
+// TestNamespaceStore_NestedUpdateFromAncestor_SingleRecord updates a namespace
+// created by its parent from root: the update rewrites the one record rather
+// than leaving a second copy in root's view.
+func TestNamespaceStore_NestedUpdateFromAncestor_SingleRecord(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	acme := nsModify(t, core, ctx, "acme", nil)
+	dev := nsModify(t, core, namespace.ContextWithNamespace(context.Background(), acme), "dev", nil)
+	nsModify(t, core, ctx, "acme/dev", map[string]string{"env": "staging"})
+
+	assert.True(t, nsRecordIn(t, core, acme, dev.UUID))
+	assert.False(t, nsRecordIn(t, core, namespace.RootNamespace, dev.UUID))
+
+	got, err := nsReload(t, core).GetNamespaceByPath(ctx, "acme/dev/")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "staging", got.CustomMetadata["env"])
+}
+
+// TestNamespaceStore_NestedDeleteFromAncestor_NotResurrected deletes a nested
+// namespace from root: its record must go, or the next load brings the
+// namespace back with its resources already cleared.
+func TestNamespaceStore_NestedDeleteFromAncestor_NotResurrected(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	acme := nsModify(t, core, ctx, "acme", nil)
+	dev := nsModify(t, core, namespace.ContextWithNamespace(context.Background(), acme), "dev", nil)
+
+	_, err := core.namespaceStore.DeleteNamespace(ctx, "acme/dev")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		got, err := core.namespaceStore.GetNamespaceByPath(ctx, "acme/dev/")
+		return err == nil && got == nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	assert.False(t, nsRecordIn(t, core, acme, dev.UUID))
+	assert.False(t, nsRecordIn(t, core, namespace.RootNamespace, dev.UUID))
+
+	got, err := nsReload(t, core).GetNamespaceByPath(ctx, "acme/dev/")
+	require.NoError(t, err)
+	assert.Nil(t, got, "a deleted namespace must not come back on reload")
+}
+
+// TestNamespaceStore_NestedFromParent_Unchanged keeps the parent-scoped form:
+// create, update and delete from the parent's context.
+func TestNamespaceStore_NestedFromParent_Unchanged(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	acme := nsModify(t, core, ctx, "acme", nil)
+	acmeCtx := namespace.ContextWithNamespace(context.Background(), acme)
+	dev := nsModify(t, core, acmeCtx, "dev", nil)
+	nsModify(t, core, acmeCtx, "dev", map[string]string{"env": "dev"})
+
+	assert.True(t, nsRecordIn(t, core, acme, dev.UUID))
+	got, err := nsReload(t, core).GetNamespaceByPath(ctx, "acme/dev/")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "dev", got.CustomMetadata["env"])
+
+	_, err = core.namespaceStore.DeleteNamespace(acmeCtx, "dev")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		got, err := core.namespaceStore.GetNamespaceByPath(ctx, "acme/dev/")
+		return err == nil && got == nil
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.False(t, nsRecordIn(t, core, acme, dev.UUID))
+}
+
+// TestNamespaceStore_LockFromAncestor locks and unlocks a nested namespace from
+// root; the lock state survives a reload from the one record.
+func TestNamespaceStore_LockFromAncestor(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	acme := nsModify(t, core, ctx, "acme", nil)
+	dev := nsModify(t, core, ctx, "acme/dev", nil)
+
+	key, err := core.namespaceStore.LockNamespace(ctx, "acme/dev/")
+	require.NoError(t, err)
+	assert.True(t, nsRecordIn(t, core, acme, dev.UUID))
+	assert.False(t, nsRecordIn(t, core, namespace.RootNamespace, dev.UUID))
+
+	got, err := nsReload(t, core).GetNamespaceByPath(ctx, "acme/dev/")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.Locked)
+
+	require.NoError(t, core.namespaceStore.UnlockNamespace(ctx, key, "acme/dev/"))
+	got, err = nsReload(t, core).GetNamespaceByPath(ctx, "acme/dev/")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.False(t, got.Locked)
+}
+
+// TestNamespaceStore_CreateOutsideRequestNamespace_Refused keeps the request
+// namespace as the authority: a request in acme/ cannot write under other/.
+func TestNamespaceStore_CreateOutsideRequestNamespace_Refused(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	acme := nsModify(t, core, ctx, "acme", nil)
+	nsModify(t, core, ctx, "other", nil)
+
+	err := core.namespaceStore.SetNamespace(namespace.ContextWithNamespace(context.Background(), acme), &namespace.Namespace{Path: "other/x/"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lacks parent")
+}
+
+// TestNamespaceStore_CreateUnderBusyParent_Refused refuses a child under a
+// parent that is being created or deleted, and writes nothing.
+func TestNamespaceStore_CreateUnderBusyParent_Refused(t *testing.T) {
+	for name, busy := range map[string]func(s *NamespaceStore, parent *namespace.Namespace){
+		"in progress": func(s *NamespaceStore, parent *namespace.Namespace) { s.creationDeletionMap[parent.UUID] = true },
+		"tainted":     func(s *NamespaceStore, parent *namespace.Namespace) { parent.Tainted = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			core := createTestCore(t)
+			ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+			acme := nsModify(t, core, ctx, "acme", nil)
+
+			store := core.namespaceStore
+			store.lock.Lock()
+			busy(store, store.namespacesByPath.Get(acme.Path))
+			store.lock.Unlock()
+
+			_, err := store.ModifyNamespaceByPath(ctx, "acme/dev", nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "being created or deleted")
+			assert.Equal(t, http.StatusBadRequest, wlogical.GetErrorCode(err))
+			assert.Empty(t, nsListView(t, core, acme), "nothing is written under the parent")
+		})
+	}
 }

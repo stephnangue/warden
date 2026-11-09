@@ -230,3 +230,59 @@ starlight-toc a {
     max-width: 16rem;
   }
 }
+
+/*
+ * Getting started: what the reader asks their agent. The generated tour uses a
+ * blockquote for nothing else, so each prompt reads as the line to type, not as
+ * a quotation.
+ */
+.tour blockquote {
+  position: relative;
+  margin-block: 0.75rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.7rem 0.6rem 2.5rem;
+  border-inline-start: 4px solid var(--sl-color-accent);
+  border-radius: 0 0.5rem 0.5rem 0;
+  background: color-mix(in srgb, var(--sl-color-accent) 9%, transparent);
+  color: var(--sl-color-white);
+  font-size: var(--sl-text-lg);
+  font-weight: 600;
+  font-style: normal;
+}
+.tour blockquote::before {
+  content: '›';
+  position: absolute;
+  inset-inline-start: 1rem;
+  top: 0.45rem;
+  color: var(--sl-color-accent);
+  font-size: 1.5em;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.tour blockquote p {
+  margin: 0;
+}
+.tour blockquote p {
+  flex: 1;
+}
+/* Starlight spaces every block after the first; the button sits beside the
+   prompt, not below it. */
+.tour .copy-prompt {
+  flex: none;
+  margin: 0;
+  padding: 0.2rem 0.65rem;
+  border: 1px solid color-mix(in srgb, var(--sl-color-accent) 45%, transparent);
+  border-radius: 0.4rem;
+  background: var(--sl-color-bg);
+  color: var(--sl-color-gray-2);
+  font-size: var(--sl-text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.tour .copy-prompt:hover,
+.tour .copy-prompt:focus-visible {
+  border-color: var(--sl-color-accent);
+  color: var(--sl-color-white);
+}

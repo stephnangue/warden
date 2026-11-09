@@ -2,7 +2,55 @@
 title: "Ansible Tower"
 ---
 
-The Ansible Tower provider enables proxied access to the Ansible Tower (AWX / Red Hat Ansible Automation Platform) REST API through Warden. It forwards requests to Ansible Tower API endpoints (Job Templates, Jobs, Inventories, Projects, Hosts, Workflow Templates, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer <token>` header using Personal Access Tokens (PATs) or OAuth2 application tokens. One credential mode is supported: static bearer tokens (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
+The Ansible Tower provider enables proxied access to the Ansible Tower (AWX / Red Hat Ansible Automation Platform) REST API through Warden. It forwards requests to Ansible Tower API endpoints (Job Templates, Jobs, Inventories, Projects, Hosts, Workflow Templates, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer <token>` header using Personal Access Tokens (PATs) or OAuth2 application tokens. Chain the token from your secret store (recommended), or store it in Warden (`apikey` source type).
+
+## How a request flows
+
+This mount injects `Authorization: Bearer <token>` from an **`api_key`** credential. The question is where that
+OAuth2 token lives.
+
+The recommended setup keeps it in the vault that manages it, read per request.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the Ansible Automation Platform OAuth2 token from an external vault at a path templated by the agent's team and environment, and injects it to the Ansible Automation Platform API" src="/images/warden-prov-awx-vault-apikey.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to a KMS-backed
+   issuer unsigned, where one is configured.
+4. The issuer returns it signed.
+5. Warden authenticates to the **external vault** and reads
+   `secret/awx/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the OAuth2 token for that team and environment.
+7. Warden injects it and forwards.
+
+The credential is served **verbatim** — nothing is minted. What chaining buys is custody:
+it stays in the store that manages it, and the read path decides who reaches which one.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the credential, so most requests skip from step 2 to step 7. The entry is
+keyed by namespace, the agent's token id and the spec name — plus the user's token id when
+the mount carries a user.
+:::
+
+### The simpler variant
+
+<p align="center"><img alt="Warden reads a static Ansible Automation Platform OAuth2 token from its encrypted storage and injects it to the Ansible Automation Platform API for every caller" src="/images/warden-prov-awx-inline-apikey.png" width="860"></p>
+
+**Inline.** The credential sits in Warden's storage. Shortest to set up, weakest custody:
+one long-lived credential for every caller.
+
+## Credential modes
+
+| Mode | What Ansible Automation Platform sees | Where the credential lives |
+|---|---|---|
+| **Chained** ✅ *recommended* | One long-lived credential, scoped by path | The vault; nothing in Warden |
+| **Inline** ⚠️ | One long-lived credential, shared | Warden's storage |
+
+Ansible Automation Platform exposes no workload-identity federation and mints nothing per request, so the
+credential is long-lived in both rows; what changes is whether Warden holds it.
+
+See the [apikey credential driver](/credential-drivers/apikey/) for every source and spec
+key.
 
 ## Prerequisites
 
@@ -14,21 +62,23 @@ The Ansible Tower provider enables proxied access to the Ansible Tower (AWX / Re
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/ansible-tower-user \
-    token_policies="ansible-tower-access" \
-    user_claim=sub \
-    cred_spec_name=ansible-tower-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -83,80 +133,65 @@ warden read ansible_tower/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static Personal Access Token
+### Option A: Chained (recommended)
 
-The credential source holds only connection info (`api_url`). The PAT is stored on the credential spec below, allowing multiple specs with different tokens to share one source.
-
-First, create a Personal Access Token in Ansible Tower:
-
-```bash
-# Via Ansible Tower REST API (requires admin access)
-curl -k -u admin:password -X POST \
-  "https://tower.example.com/api/v2/users/1/personal_tokens/" \
-  -H "Content-Type: application/json" \
-  -d '{"scope": "write"}'
-```
-
-Save the token from the response, then create the Warden credential source and spec:
+The flow in the first diagram. The vault holds the credential; Warden reads it per request
+and injects it.
 
 ```bash
-warden cred source create ansible-tower-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://tower.example.com \
-  -config=verify_endpoint=/api/v2/ping/ \
-  -config=auth_header_type=bearer \
-  -config=display_name=Ansible\ Tower
+# The store Warden reads from, reached keylessly — no vault token in Warden
+warden cred source create vault-keyless -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-agents",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+
+warden cred spec create ansible-tower-ops -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "static_apikey",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "awx/{{agent.team}}/{{agent.env}}"
+  }
+}'
 ```
 
-Create a credential spec that references the credential source. The spec carries the PAT and gets associated with tokens at login time.
+The KV secret must carry the credential under **`api_key`**.
 
+Both principals are available to the path template: `{{agent.sub}}` is free,
+`{{agent.<claim>}}` needs `assertion_metadata_claims`, and `{{user.<claim>}}` needs
+`assertion_user_claims` plus a user on the request. Swap `{{agent.team}}` for
+`{{user.sub}}` to give each person their own credential. Templates resolve at **mint,
+not at write**, so a path naming an unprojected claim is accepted by `spec create` and
+fails on the first request.
+
+### Option B: Inline
+
+⚠️ 
 ```bash
-warden cred spec create ansible-tower-ops \
-  -source ansible-tower-src \
-  -config api_key=your-ansible-tower-pat
+warden cred source create ansible-tower-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://awx.example.com/api/v2",
+    "verify_endpoint": "/ping/",
+    "display_name": "Ansible Automation Platform"
+  }
+}'
+
+printf '{"source":"ansible-tower-src","min_ttl":3600,"max_ttl":86400,"config":{"api_key":"%s"}}' \
+  "$(cat /path/to/awx-token)" | warden cred spec create ansible-tower-ops -json -
 ```
 
-The PAT is validated at creation time via a `GET /api/v2/ping/` call to the Ansible Tower API (SpecVerifier). If the token is invalid, spec creation will fail.
-
-### Option B: Vault/OpenBao as Credential Source
-
-Instead of storing PATs directly in Warden, you can store them in a Vault/OpenBao KV v2 secret engine and have Warden fetch them at runtime.
-
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your Ansible Tower token (e.g., at `secret/ansible-tower/ops` with an `api_key` field)
-- An AppRole configured for Warden access
-
-```bash
-# Create a Vault credential source
-warden cred source create ansible-tower-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
-```
-
-Create a credential spec using the `static_apikey` mint method:
-
-```bash
-warden cred spec create ansible-tower-ops \
-  -source ansible-tower-vault-src \
-  -config mint_method=static_apikey \
-  -config kv2_mount=secret \
-  -config secret_path=ansible-tower/ops
-```
-
-The KV v2 secret at `secret/ansible-tower/ops` should contain an `api_key` field with the Ansible Tower PAT. Warden fetches the secret from Vault on each credential request.
-
-Verify:
-
-```bash
-warden cred spec read ansible-tower-ops
-```
+One long-lived credential for every caller. Prefer Option A.
 
 ## Step 4: Create a Policy
 
@@ -224,7 +259,33 @@ Verify:
 warden policy read ansible-tower-access
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 5: Grant Agents the Role
+
+Create the role that binds the credential spec and policy, then a virtual group that grants it to callers of the JWT mount. The provider must already be configured with its `auto_auth_path` (Step 2), so the role is reachable through it. See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+```bash
+warden role create ansible-tower-user -json '{
+  "policies": ["ansible-tower-access"],
+  "cred_spec_name": "ansible-tower-ops",
+  "provider_path": "ansible_tower/"
+}'
+
+warden identity group create ansible-tower-user-agents -json '{
+  "type": "virtual",
+  "roles": ["ansible-tower-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, such as `"sub": ["agent-*"]`.
+
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -327,13 +388,13 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 ## TLS Certificate Authentication
 
-Steps 1-3 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+The steps above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 1 and 5 with the following.
+Steps 2-4 (provider, credential and policy setup) are identical. Replace Steps 1, 5 and 6 with the following.
 
 ### Enable Cert Auth
 
@@ -346,23 +407,8 @@ warden auth enable cert
 Provide the PEM-encoded CA certificate that signs your client certificates:
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=ansible-tower-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
-
-### Create a Cert Role
-
-Create a role that binds allowed certificate identities to a credential spec and policy:
-
-```bash
-warden write auth/cert/role/ansible-tower-user \
-    allowed_common_names="agent-*" \
-    token_policies="ansible-tower-access" \
-    cred_spec_name=ansible-tower-ops
-```
-
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ### Configure Provider for Cert Auth
 
@@ -378,6 +424,28 @@ warden write ansible_tower/config <<EOF
 }
 EOF
 ```
+
+### Grant the Role to Certificates
+
+Create the role as in Step 5, and grant it with a group whose rule matches certificate fields:
+
+```bash
+warden role create ansible-tower-user -json '{
+  "policies": ["ansible-tower-access"],
+  "cred_spec_name": "ansible-tower-ops",
+  "provider_path": "ansible_tower/"
+}'
+
+warden identity group create ansible-tower-user-agents -json '{
+  "type": "virtual",
+  "roles": ["ansible-tower-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+Values support glob patterns; a rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
 
 ### Make Requests with Certificates
 

@@ -2,6 +2,18 @@ package drivers
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,37 +101,73 @@ func TestGCPDriverFactory_ValidateConfig(t *testing.T) {
 	f := &GCPDriverFactory{}
 
 	t.Run("missing service_account_key", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{})
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "service_account_key")
 	})
 
 	t.Run("invalid JSON", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account_key": "not-json",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "valid JSON")
 	})
 
 	t.Run("missing client_email", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
-			"service_account_key": `{"private_key": "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n"}`,
-		})
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
+			"service_account_key": `{"type":"service_account","project_id":"p","private_key_id":"kid","private_key": "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n"}`,
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "client_email")
 	})
 
 	t.Run("missing private_key", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
-			"service_account_key": `{"client_email": "test@project.iam.gserviceaccount.com"}`,
-		})
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
+			"service_account_key": `{"type":"service_account","project_id":"p","private_key_id":"kid","client_email": "test@project.iam.gserviceaccount.com"}`,
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "private_key")
 	})
 
+	// The library this driver hands the key to dispatches on the document's own
+	// "type": an external_account names a file or URL for it to go and read, which
+	// would turn writing a credential source into reading host files and calling
+	// arbitrary endpoints as this process. Only a service account is ever valid here.
+	t.Run("non-service-account credential type rejected", func(t *testing.T) {
+		for _, typ := range []string{"external_account", "impersonated_service_account", "authorized_user", ""} {
+			err := f.ValidateConfig(credential.NewConfig(map[string]string{
+				"service_account_key": `{"type":"` + typ + `","project_id":"p","private_key_id":"kid","client_email":"x@y.iam.gserviceaccount.com","private_key":"k","token_url":"https://attacker.example","credential_source":{"file":"/etc/passwd"}}`,
+			}))
+			require.Errorf(t, err, "type=%q must be refused", typ)
+			assert.Contains(t, err.Error(), "service_account")
+		}
+	})
+
+	// Rotation addresses the key by project and key id, so a document missing either
+	// cannot be rotated and would build a request path with a hole in it.
+	t.Run("missing rotation identity fields", func(t *testing.T) {
+		for field, keyJSON := range map[string]string{
+			"project_id":     `{"type":"service_account","private_key_id":"kid","client_email":"x@y.iam.gserviceaccount.com","private_key":"k"}`,
+			"private_key_id": `{"type":"service_account","project_id":"p","client_email":"x@y.iam.gserviceaccount.com","private_key":"k"}`,
+		} {
+			err := f.ValidateConfig(credential.NewConfig(map[string]string{"service_account_key": keyJSON}))
+			require.Errorf(t, err, "missing %s must be refused", field)
+			assert.Contains(t, err.Error(), field)
+		}
+	})
+
+	// "Unmarshals without error" is not a check: these are the documents that passed
+	// the old one and would have been stored as the source's credential.
+	t.Run("degenerate JSON rejected", func(t *testing.T) {
+		for _, keyJSON := range []string{`null`, `{}`} {
+			err := f.ValidateConfig(credential.NewConfig(map[string]string{"service_account_key": keyJSON}))
+			require.Errorf(t, err, "%s must be refused", keyJSON)
+		}
+	})
+
 	t.Run("valid config", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account_key": `{
 				"type": "service_account",
 				"project_id": "my-project",
@@ -128,7 +176,7 @@ func TestGCPDriverFactory_ValidateConfig(t *testing.T) {
 				"client_email": "test@my-project.iam.gserviceaccount.com",
 				"client_id": "123456789"
 			}`,
-		})
+		}))
 		require.NoError(t, err)
 	})
 }
@@ -137,7 +185,7 @@ func TestGCPDriver_Type(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.Equal(t, credential.SourceTypeGCP, d.Type())
@@ -147,7 +195,7 @@ func TestGCPDriver_Cleanup(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	require.NoError(t, d.Cleanup(context.TODO()))
@@ -157,7 +205,7 @@ func TestGCPDriver_Revoke_NoOp(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	require.NoError(t, d.Revoke(context.TODO(), "some-lease-id"))
@@ -167,7 +215,7 @@ func TestGCPDriver_SupportsRotation(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.True(t, d.SupportsRotation())
@@ -177,15 +225,15 @@ func TestGCPDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "invalid_method",
-		},
+		}),
 	}
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
@@ -197,16 +245,16 @@ func TestGCPDriver_MintCredential_ImpersonationMissingTarget(t *testing.T) {
 	d := &GCPDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGCP,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 		tokenCache: NewTokenCache(),
 	}
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "impersonated_access_token",
-		},
+		}),
 	}
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
@@ -218,7 +266,7 @@ func TestGCPDriver_ParseServiceAccountKey(t *testing.T) {
 	t.Run("valid key", func(t *testing.T) {
 		d := &GCPDriver{
 			credSource: &credential.CredSource{
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"service_account_key": `{
 						"type": "service_account",
 						"project_id": "my-project",
@@ -227,7 +275,7 @@ func TestGCPDriver_ParseServiceAccountKey(t *testing.T) {
 						"client_email": "test@my-project.iam.gserviceaccount.com",
 						"client_id": "123456789"
 					}`,
-				},
+				}),
 			},
 		}
 
@@ -241,7 +289,7 @@ func TestGCPDriver_ParseServiceAccountKey(t *testing.T) {
 	t.Run("empty key", func(t *testing.T) {
 		d := &GCPDriver{
 			credSource: &credential.CredSource{
-				Config: map[string]string{},
+				Config: credential.NewConfig(map[string]string{}),
 			},
 		}
 
@@ -253,9 +301,9 @@ func TestGCPDriver_ParseServiceAccountKey(t *testing.T) {
 	t.Run("invalid JSON", func(t *testing.T) {
 		d := &GCPDriver{
 			credSource: &credential.CredSource{
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"service_account_key": "not-json",
-				},
+				}),
 			},
 		}
 
@@ -265,17 +313,204 @@ func TestGCPDriver_ParseServiceAccountKey(t *testing.T) {
 	})
 }
 
-func TestSplitScopes(t *testing.T) {
-	t.Run("single scope", func(t *testing.T) {
-		scopes := splitScopes("https://www.googleapis.com/auth/cloud-platform")
-		assert.Equal(t, []string{"https://www.googleapis.com/auth/cloud-platform"}, scopes)
-	})
+// newTestGCPSAKey builds a usable service-account key whose token_uri points at a local
+// server, so the oauth2 library performs a real signed JWT exchange against it.
+func newTestGCPSAKey(t *testing.T, tokenURI, clientEmail string) string {
+	t.Helper()
+	return newTestGCPSAKeyWithID(t, tokenURI, clientEmail, "test-key-id")
+}
 
-	t.Run("multiple scopes", func(t *testing.T) {
-		scopes := splitScopes("https://www.googleapis.com/auth/compute, https://www.googleapis.com/auth/devstorage.read_only")
-		assert.Equal(t, []string{
-			"https://www.googleapis.com/auth/compute",
-			"https://www.googleapis.com/auth/devstorage.read_only",
-		}, scopes)
-	})
+// newTestGCPSAKeyWithID builds a key with a chosen private_key_id, which rotation
+// addresses keys by — the retired key is named by the id carried on the old one.
+func newTestGCPSAKeyWithID(t *testing.T, tokenURI, clientEmail, keyID string) string {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	require.NoError(t, err)
+
+	saKey := map[string]string{
+		"type":           "service_account",
+		"project_id":     "test-project",
+		"private_key_id": keyID,
+		"private_key":    string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+		"client_email":   clientEmail,
+		"token_uri":      tokenURI,
+	}
+	encoded, err := json.Marshal(saKey)
+	require.NoError(t, err)
+	return string(encoded)
+}
+
+// TestGCPDriver_RotationDuringMintDiscardsStaleToken pins the generation guard in
+// getSourceToken. The scope key carries nothing about which SA key minted the token, so
+// the generation is the sole barrier: without the guard, a token whose exchange was in
+// flight when CommitRotation landed is stamped with the new generation and served for
+// its full lifetime, defeating the rotation it outlived.
+func TestGCPDriver_RotationDuringMintDiscardsStaleToken(t *testing.T) {
+	var d *GCPDriver
+	var callCount int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		// Retire the SA key that is minting this very token, mid-exchange.
+		if n == 1 {
+			d.tokenCache.InvalidateGeneration()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": fmt.Sprintf("token-call-%d", n),
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	d = &GCPDriver{
+		credSource: &credential.CredSource{
+			Type:   credential.SourceTypeGCP,
+			Config: credential.NewConfig(map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL, "sa@test-project.iam.gserviceaccount.com")}),
+		},
+		tokenCache: NewTokenCache(),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	token, _, err := d.getSourceToken(context.TODO(), []string{"https://www.googleapis.com/auth/cloud-platform"})
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount), "the in-flight token belonged to the retired SA key, so it must be minted again")
+	assert.Equal(t, "token-call-2", token, "the retired SA key's token must not be returned")
+}
+
+// TestGCPDriver_ConcurrentRotationAndMintIsRaceFree covers the other half: CommitRotation
+// replaces credSource.Config wholesale while mints are reading it. The assertions are
+// incidental — this test earns its keep under -race, which is what catches the driver
+// losing the lock that makes the swap safe.
+func TestGCPDriver_ConcurrentRotationAndMintIsRaceFree(t *testing.T) {
+	var callCount int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": fmt.Sprintf("token-call-%d", n),
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	d := &GCPDriver{
+		credSource: &credential.CredSource{
+			Type:   credential.SourceTypeGCP,
+			Config: credential.NewConfig(map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL, "sa@test-project.iam.gserviceaccount.com")}),
+		},
+		tokenCache: NewTokenCache(),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	rotatedKey := newTestGCPSAKey(t, srv.URL, "sa@test-project.iam.gserviceaccount.com")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := d.getSourceToken(context.TODO(), []string{"https://www.googleapis.com/auth/cloud-platform"})
+			assert.NoError(t, err)
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		assert.NoError(t, d.CommitRotation(context.TODO(), map[string]string{"service_account_key": rotatedKey}))
+	}()
+
+	wg.Wait()
+
+	// Whatever the interleaving, the driver ends on the rotated key.
+	assert.Equal(t, rotatedKey, d.getServiceAccountKey())
+}
+
+// gcpAssertionIssuer reads the client_email out of the signed JWT the oauth2 library
+// sends, so a test server can tell which service-account key minted a given request.
+// The signature is irrelevant here — only which key was used.
+func gcpAssertionIssuer(t *testing.T, r *http.Request) string {
+	t.Helper()
+	require.NoError(t, r.ParseForm())
+
+	parts := strings.Split(r.FormValue("assertion"), ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+
+	var claims struct {
+		Iss string `json:"iss"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return claims.Iss
+}
+
+// TestGCPDriver_TokenFromRetiredKeyIsNeverServed is the GCP twin of the IBM test: a real
+// CommitRotation lands while a mint's exchange is held open, so the response genuinely
+// carries a token the retired SA key minted. That token must be discarded, not served.
+func TestGCPDriver_TokenFromRetiredKeyIsNeverServed(t *testing.T) {
+	const oldSA = "old-sa@test-project.iam.gserviceaccount.com"
+	const newSA = "new-sa@test-project.iam.gserviceaccount.com"
+
+	mintStarted := make(chan struct{})
+	rotationDone := make(chan struct{})
+	var once sync.Once
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		issuer := gcpAssertionIssuer(t, r)
+
+		// Hold the outgoing key's exchange open until the rotation has landed; the
+		// rotated key's exchanges (including CommitRotation's own verify) pass through.
+		if issuer == oldSA {
+			once.Do(func() { close(mintStarted) })
+			<-rotationDone
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "token-from-" + issuer,
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	d := &GCPDriver{
+		credSource: &credential.CredSource{
+			Type:   credential.SourceTypeGCP,
+			Config: credential.NewConfig(map[string]string{"service_account_key": newTestGCPSAKey(t, srv.URL, oldSA)}),
+		},
+		tokenCache: NewTokenCache(),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	rotatedKey := newTestGCPSAKey(t, srv.URL, newSA)
+	scopes := []string{"https://www.googleapis.com/auth/cloud-platform"}
+
+	var token string
+	var mintErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		token, _, mintErr = d.getSourceToken(context.TODO(), scopes)
+	}()
+
+	<-mintStarted
+	require.NoError(t, d.CommitRotation(context.TODO(), map[string]string{"service_account_key": rotatedKey}))
+	close(rotationDone)
+	wg.Wait()
+
+	require.NoError(t, mintErr)
+	assert.Equal(t, "token-from-"+newSA, token,
+		"the exchange completed against the retired SA key; its token must be discarded, not served")
 }

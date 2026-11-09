@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,8 +18,10 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,6 +85,23 @@ func TestCheckToken_StandbyNode(t *testing.T) {
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	_, _, _, err := core.CheckToken(ctx, req, false)
 	assert.ErrorIs(t, err, ErrStandby)
+}
+
+// A refusal by a deny stanza names its policy on the Auth the audit is built from.
+func TestCheckToken_RecordsDenyingPolicy(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+	storeTestPolicy(t, c, "closed", PolicyTypeCBP, `path "kv/*" { capabilities = ["deny"] }`)
+
+	te := &logical.TokenEntry{ID: "tok-denied", NamespaceID: namespace.RootNamespaceID, Policies: []string{"closed"}}
+	req := &logical.Request{Path: "kv/x", Operation: logical.ReadOperation, ClientToken: te.ID}
+	req.SetTokenEntry(te)
+
+	auth, _, _, err := c.CheckToken(ctx, req, false)
+	require.Error(t, err)
+	require.NotNil(t, auth)
+	assert.False(t, auth.PolicyResults.Allowed)
+	assert.Equal(t, "closed", auth.DenyingPolicy)
 }
 
 // TestHandleRequest_NamespaceNotFound tests that requests fail when namespace is not found
@@ -203,6 +223,8 @@ func TestSynthesizeGatewayPath(t *testing.T) {
 		{"empty middle segment", "gitlab//prod", "r", "p", "", true},
 		{"bare double-dot", "..", "r", "p", "", true},
 		{"trailing double-dot", "gitlab/..", "r", "p", "", true},
+		{"bare dot", ".", "r", "p", "", true},
+		{"dot segment", "gitlab/./prod", "r", "p", "", true},
 		{"whitespace only passes synthesis", "   ", "r", "p", "   /role/r/gateway/p", false},
 	}
 	// Whitespace is not stripped or rejected per-segment; the helper trusts
@@ -365,6 +387,38 @@ func TestApplyRoleHeader(t *testing.T) {
 			got := applyRoleHeader(tc.path, tc.role)
 			assert.Equal(t, tc.want, got)
 		})
+	}
+}
+
+// TestHandleRequest_RoleHeaderMustBeARoleName: X-Warden-Role is spliced into
+// the path policies are matched against, after the HTTP layer checked that
+// path, so a value that adds or walks a segment is refused in both routing
+// modes before anything is rewritten.
+func TestHandleRequest_RoleHeaderMustBeARoleName(t *testing.T) {
+	core := createTestCore(t)
+
+	for _, role := range []string{"..", ".", "a/b", "../../other", "-x"} {
+		for _, provider := range []string{"", "somemount"} {
+			path := "somemount/role/old-role/gateway/v1/secret"
+			target := "/v1/" + path
+			if provider != "" {
+				path, target = "v1/secret", "/v1/v1/secret"
+			}
+			httpReq := httptest.NewRequest(http.MethodGet, target, nil)
+			httpReq.Header.Set("X-Warden-Role", role)
+			if provider != "" {
+				httpReq.Header.Set("X-Warden-Provider", provider)
+			}
+			req := &logical.Request{Path: path, Operation: logical.ReadOperation, HTTPRequest: httpReq}
+
+			resp, err := core.HandleRequest(context.Background(), req)
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "role %q, provider %q", role, provider)
+			require.Error(t, resp.Err)
+			assert.Contains(t, resp.Err.Error(), "invalid X-Warden-Role", "role %q, provider %q", role, provider)
+			assert.Equal(t, path, req.Path, "nothing is rewritten for role %q", role)
+		}
 	}
 }
 
@@ -641,7 +695,7 @@ func TestParseJSONBody(t *testing.T) {
 			HTTPRequest: httpReq,
 			Data:        make(map[string]any),
 		}
-		err := core.parseJSONBody(req)
+		err := core.parseJSONBody(req, maxRequestBodySize)
 		require.NoError(t, err)
 	})
 
@@ -661,7 +715,7 @@ func TestParseJSONBody(t *testing.T) {
 			HTTPRequest: httpReq,
 			Data:        make(map[string]any),
 		}
-		err := core.parseJSONBody(req)
+		err := core.parseJSONBody(req, maxRequestBodySize)
 		require.NoError(t, err)
 
 		// Scalar leaf values are unchanged
@@ -684,7 +738,7 @@ func TestParseJSONBody(t *testing.T) {
 			HTTPRequest: httpReq,
 			Data:        make(map[string]any),
 		}
-		err := core.parseJSONBody(req)
+		err := core.parseJSONBody(req, maxRequestBodySize)
 		require.NoError(t, err)
 
 		nested := req.Data["a"].(map[string]interface{})
@@ -700,7 +754,7 @@ func TestParseJSONBody(t *testing.T) {
 			HTTPRequest: httpReq,
 			Data:        make(map[string]any),
 		}
-		err := core.parseJSONBody(req)
+		err := core.parseJSONBody(req, maxRequestBodySize)
 		require.NoError(t, err)
 
 		assert.Equal(t, "1h", req.Data["ttl"])
@@ -717,7 +771,7 @@ func TestParseJSONBody(t *testing.T) {
 			HTTPRequest: httpReq,
 			Data:        make(map[string]any),
 		}
-		err := core.parseJSONBody(req)
+		err := core.parseJSONBody(req, maxRequestBodySize)
 		require.NoError(t, err)
 
 		assert.Equal(t, map[string]interface{}{}, req.Data["a"])
@@ -733,7 +787,7 @@ func TestParseJSONBody(t *testing.T) {
 			HTTPRequest: httpReq,
 			Data:        make(map[string]any),
 		}
-		err := core.parseJSONBody(req)
+		err := core.parseJSONBody(req, maxRequestBodySize)
 		require.NoError(t, err)
 
 		assert.Equal(t, "test", req.Data["model"])
@@ -820,6 +874,123 @@ func TestParseRequestBody_ErrorsAreCodedAndOpaque(t *testing.T) {
 		req := &logical.Request{HTTPRequest: httpReq}
 
 		err := core.parseRequestBody(req)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusRequestEntityTooLarge, logical.GetErrorCode(err))
+	})
+}
+
+// Media types are case-insensitive and +json types are JSON, so a caller cannot
+// relabel a JSON body to keep policy from reading it.
+func TestBodyMediaType(t *testing.T) {
+	tests := []struct {
+		contentType string
+		mediaType   string
+		json        bool
+	}{
+		{"", "", true},
+		{"application/json", "application/json", true},
+		{"Application/JSON", "application/json", true},
+		{"application/json; charset=utf-8", "application/json", true},
+		{"application/json;;", "application/json", true}, // malformed parameter
+		{"text/json", "text/json", true},
+		{"application/vnd.api+json", "application/vnd.api+json", true},
+		{"application/merge-patch+json", "application/merge-patch+json", true},
+		{"application/x-www-form-urlencoded", "application/x-www-form-urlencoded", false},
+		{"text/plain", "text/plain", false},
+		{"application/jsonl", "application/jsonl", false}, // a stream of documents, not one
+		{"multipart/form-data; boundary=x", "multipart/form-data", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.contentType, func(t *testing.T) {
+			got := bodyMediaType(tt.contentType)
+			assert.Equal(t, tt.mediaType, got)
+			assert.Equal(t, tt.json, isJSONMediaType(got))
+		})
+	}
+}
+
+func TestParseRequestBody_MediaTypeSpellings(t *testing.T) {
+	core := createTestCore(t)
+	post := func(contentType, body string) *logical.Request {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", contentType)
+		return &logical.Request{HTTPRequest: httpReq}
+	}
+
+	for _, ct := range []string{"Application/JSON", "text/json", "application/vnd.api+json"} {
+		t.Run(ct+" is parsed", func(t *testing.T) {
+			req := post(ct, `{"amount":500}`)
+			require.NoError(t, core.parseRequestBody(req))
+			assert.Equal(t, float64(500), req.Data["amount"])
+		})
+		t.Run(ct+" that is not JSON is refused", func(t *testing.T) {
+			err := core.parseRequestBody(post(ct, "not json"))
+			require.Error(t, err)
+			assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
+		})
+	}
+
+	t.Run("Application/X-WWW-Form-Urlencoded is parsed", func(t *testing.T) {
+		req := post("Application/X-WWW-Form-Urlencoded", "amount=500")
+		require.NoError(t, core.parseRequestBody(req))
+		assert.Equal(t, "500", req.Data["amount"])
+	})
+
+	t.Run("text/plain is left alone", func(t *testing.T) {
+		req := post("text/plain", `{"amount":500}`)
+		require.NoError(t, core.parseRequestBody(req))
+		assert.NotContains(t, req.Data, "amount")
+	})
+}
+
+// limitedBackend is a backend that reports a body cap, as a streaming backend does.
+type limitedBackend struct {
+	logical.Backend
+	limit int64
+}
+
+func (b limitedBackend) StreamBodyLimit(*http.Request) int64 { return b.limit }
+
+// A streamed body is parsed up to the backend's own cap, so core never buffers more
+// than the backend would forward, and a mount configured above core's default can
+// still have its larger bodies parsed.
+func TestStreamBodyParseLimit(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/bank-api/gateway/x", nil)
+
+	assert.Equal(t, int64(maxRequestBodySize), streamBodyParseLimit(struct{ logical.Backend }{}, r), "a backend reporting no cap keeps core's")
+	assert.Equal(t, int64(maxRequestBodySize), streamBodyParseLimit(limitedBackend{limit: 0}, r), "a zero cap keeps core's")
+	assert.Equal(t, int64(1024), streamBodyParseLimit(limitedBackend{limit: 1024}, r))
+	assert.Equal(t, int64(64<<20), streamBodyParseLimit(limitedBackend{limit: 64 << 20}, r), "a cap above core's default is honoured")
+}
+
+func TestParseRequestBodyLimit(t *testing.T) {
+	core := createTestCore(t)
+	const limit = 64
+
+	jsonReq := func(body string) *logical.Request {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		return &logical.Request{HTTPRequest: httpReq}
+	}
+
+	t.Run("under the cap is parsed", func(t *testing.T) {
+		req := jsonReq(`{"amount":50}`)
+		require.NoError(t, core.parseRequestBodyLimit(req, limit))
+		assert.Equal(t, float64(50), req.Data["amount"])
+	})
+
+	t.Run("over the cap is 413 and names the cap", func(t *testing.T) {
+		req := jsonReq(`{"amount":50,"memo":"` + strings.Repeat("x", limit) + `"}`)
+		err := core.parseRequestBodyLimit(req, limit)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusRequestEntityTooLarge, logical.GetErrorCode(err))
+		assert.Contains(t, err.Error(), "64 bytes")
+	})
+
+	t.Run("form bodies use the same cap", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader("memo="+strings.Repeat("x", limit)))
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		err := core.parseRequestBodyLimit(&logical.Request{HTTPRequest: httpReq}, limit)
 		require.Error(t, err)
 		assert.Equal(t, http.StatusRequestEntityTooLarge, logical.GetErrorCode(err))
 	})
@@ -948,6 +1119,55 @@ func TestLoginCreateToken(t *testing.T) {
 		assert.True(t, result.StatusCode == http.StatusForbidden || result.StatusCode == http.StatusInternalServerError,
 			"expected Forbidden or InternalServerError, got %d", result.StatusCode)
 	})
+}
+
+// failingTokenType is a token type whose Generate always fails, to reach the error
+// path of LoginCreateToken.
+type failingTokenType struct{}
+
+func (failingTokenType) Metadata() TokenTypeMetadata {
+	return TokenTypeMetadata{Name: "failing_token", IDPrefix: "fail_", Description: "always fails"}
+}
+func (failingTokenType) Generate(context.Context, *AuthData, *TokenEntry) (map[string]string, error) {
+	return nil, errors.New("token storage unavailable")
+}
+func (failingTokenType) ValidateValue(string) bool { return false }
+func (failingTokenType) ComputeID(v string) string { return "fail_" + v }
+func (failingTokenType) LookupKey() string         { return "token" }
+
+// A login whose token cannot be generated is logged for the operator, but never
+// with the login credential itself — the caller's JWT, kept in the auth data as
+// TokenValue — nor the login claims it carries in Metadata.
+func TestLoginCreateToken_FailureLogsNoCredential(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	require.NoError(t, core.tokenStore.RegisterTokenType(failingTokenType{}))
+
+	var buf bytes.Buffer
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+	core.logger = log
+
+	const loginJWT = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhZ2VudC0xIn0.login-credential-signature"
+	resp := &logical.Response{Auth: &logical.Auth{
+		TokenType:   "failing_token",
+		ClientToken: loginJWT,
+		PrincipalID: "agent-1",
+		Policies:    []string{"default"},
+		TokenTTL:    time.Hour,
+		Metadata:    map[string]string{"email": "alice@example.com"},
+	}}
+	result, err := core.LoginCreateToken(ctx, nil, resp)
+	require.Error(t, err)
+	assert.Equal(t, http.StatusInternalServerError, result.StatusCode)
+
+	out := buf.String()
+	require.Contains(t, out, "Failed to generate token", "the failure must still be logged")
+	assert.Contains(t, out, "token storage unavailable", "the cause is what an operator needs")
+	assert.Contains(t, out, "agent-1")
+	assert.NotContains(t, out, "role_name", "a login carries no role to log")
+	assert.NotContains(t, out, loginJWT)
+	assert.NotContains(t, out, "login-credential-signature")
+	assert.NotContains(t, out, "alice@example.com", "login claims stay out of the log")
 }
 
 // TestHandleLoginRequest tests the handleLoginRequest function
@@ -1549,7 +1769,7 @@ func TestHandleTransparentAuth(t *testing.T) {
 			autoAuthPath:    "auth/jwt/",
 		}
 		req := &logical.Request{
-			ClientToken: "cws.not-a-jwt-token",
+			ClientToken: "wds.not-a-jwt-token",
 		}
 
 		err := core.handleTransparentAuth(ctx, req, backend, "terraform")
@@ -1558,21 +1778,18 @@ func TestHandleTransparentAuth(t *testing.T) {
 	})
 
 	t.Run("uses existing JWT token when found in cache", func(t *testing.T) {
-		// Create a JWT token using GenerateToken with the jwt_role type.
+		// Create an identity token for the JWT using GenerateToken.
 		// MountAccessor must match the mount's accessor so the cache write and
 		// the subsequent transparent-auth lookup hash to the same key.
 		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LXVzZXIifQ.test-sig"
 
 		authData := &AuthData{
-			TokenValue:     sampleJWT,
-			MountAccessor:  jwtMount.Accessor,
-			RoleName:       "terraform",
-			PrincipalID:    "test-user",
-			ExpireAt:       time.Now().Add(24 * time.Hour),
-			Policies:       []string{"default"},
-			CredentialSpec: "test-spec",
+			TokenValue:    sampleJWT,
+			MountAccessor: jwtMount.Accessor,
+			PrincipalID:   "test-user",
+			ExpireAt:      time.Now().Add(24 * time.Hour),
 		}
-		te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+		te, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, authData)
 		require.NoError(t, err)
 		require.NotNil(t, te)
 
@@ -1623,8 +1840,8 @@ func spiffeReqWithCert(cert *x509.Certificate, clientToken string) *logical.Requ
 }
 
 // TestHandleTransparentAuth_Spiffe drives the full performImplicitAuth dispatch
-// for a "spiffe" mount: a pre-seeded spiffe_role cache entry is resolved through
-// the case "spiffe" branch for both the JWT-SVID and the X.509-SVID credential,
+// for a "spiffe" mount: a pre-seeded identity token is resolved through the
+// spiffe credential format branch for both the JWT-SVID and the X.509-SVID credential,
 // including the JWT-wins precedence and the stray-bearer ClientToken reset.
 func TestHandleTransparentAuth_Spiffe(t *testing.T) {
 	core := createTestCore(t)
@@ -1633,10 +1850,10 @@ func TestHandleTransparentAuth_Spiffe(t *testing.T) {
 	provider := func() *mockTransparentModeProvider {
 		return &mockTransparentModeProvider{transparentMode: true, autoAuthPath: "auth/spiffe/"}
 	}
-	seed := func(t *testing.T, tokenValue, role string) *TokenEntry {
+	seed := func(t *testing.T, tokenValue string) *TokenEntry {
 		t.Helper()
-		te, err := core.tokenStore.GenerateToken(ctx, TypeSpiffeRole, &AuthData{
-			TokenValue: tokenValue, MountAccessor: mount.Accessor, RoleName: role,
+		te, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, &AuthData{
+			TokenValue: tokenValue, MountAccessor: mount.Accessor,
 			PrincipalID: "spiffe://example.org/sa/api", ExpireAt: time.Now().Add(time.Hour),
 		})
 		require.NoError(t, err)
@@ -1645,7 +1862,7 @@ func TestHandleTransparentAuth_Spiffe(t *testing.T) {
 	spiffeJWT := mintK8sJWT(`{"sub":"spiffe://example.org/ns/default/sa/api"}`)
 
 	t.Run("JWT-SVID bearer resolves the cached token", func(t *testing.T) {
-		te := seed(t, spiffeJWT, "api")
+		te := seed(t, spiffeJWT)
 		req := &logical.Request{ClientToken: spiffeJWT}
 		require.NoError(t, core.handleTransparentAuth(ctx, req, provider(), "api"))
 		require.NotNil(t, req.TokenEntry())
@@ -1654,7 +1871,7 @@ func TestHandleTransparentAuth_Spiffe(t *testing.T) {
 
 	t.Run("X.509-SVID forwarded cert resolves the cached token and sets ClientToken", func(t *testing.T) {
 		cert, fingerprint := spiffeFakeCert("der-x509-svid")
-		te := seed(t, fingerprint, "api")
+		te := seed(t, fingerprint)
 		req := spiffeReqWithCert(cert, "")
 		require.NoError(t, core.handleTransparentAuth(ctx, req, provider(), "api"))
 		require.NotNil(t, req.TokenEntry())
@@ -1667,7 +1884,7 @@ func TestHandleTransparentAuth_Spiffe(t *testing.T) {
 	// into the stub mount.
 	t.Run("JWT-SVID wins over an ambient cert", func(t *testing.T) {
 		cert, _ := spiffeFakeCert("ambient-mesh-cert")
-		te := seed(t, spiffeJWT, "api")
+		te := seed(t, spiffeJWT)
 		req := spiffeReqWithCert(cert, spiffeJWT)
 		require.NoError(t, core.handleTransparentAuth(ctx, req, provider(), "api"))
 		assert.Equal(t, te.ID, req.TokenEntry().ID)
@@ -1676,7 +1893,7 @@ func TestHandleTransparentAuth_Spiffe(t *testing.T) {
 	// A-6: a stray non-SVID bearer must not shadow the cert-minted token.
 	t.Run("stray non-SVID bearer does not shadow the cert token", func(t *testing.T) {
 		cert, fingerprint := spiffeFakeCert("der-with-stray-bearer")
-		te := seed(t, fingerprint, "api")
+		te := seed(t, fingerprint)
 		stray := mintK8sJWT(`{"sub":"1234567890"}`) // generic JWT, not a JWT-SVID
 		req := spiffeReqWithCert(cert, stray)
 		require.NoError(t, core.handleTransparentAuth(ctx, req, provider(), "api"))
@@ -1704,15 +1921,12 @@ func TestHandleTransparentAuth_Singleflight(t *testing.T) {
 	sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzaW5nbGVmbGlnaHQtdXNlciJ9.test-sig"
 
 	authData := &AuthData{
-		TokenValue:     sampleJWT,
-		MountAccessor:  jwtMount.Accessor,
-		RoleName:       "terraform",
-		PrincipalID:    "test-user-singleflight",
-		ExpireAt:       time.Now().Add(24 * time.Hour),
-		Policies:       []string{"default"},
-		CredentialSpec: "test-spec",
+		TokenValue:    sampleJWT,
+		MountAccessor: jwtMount.Accessor,
+		PrincipalID:   "test-user-singleflight",
+		ExpireAt:      time.Now().Add(24 * time.Hour),
 	}
-	te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+	te, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, authData)
 	require.NoError(t, err)
 	require.NotNil(t, te)
 
@@ -1770,95 +1984,66 @@ func TestHandleTransparentAuth_Singleflight(t *testing.T) {
 	assert.Equal(t, numGoroutines, resultCount, "should have received results from all goroutines")
 }
 
-// TestHandleTransparentAuth_JWTDifferentRoles tests that the same JWT with different roles
-// produces different tokens, preventing JWT+Role1 from being reused for JWT+Role2
-func TestHandleTransparentAuth_JWTDifferentRoles(t *testing.T) {
+// TestHandleTransparentAuth_JWTCacheKey tests that one JWT at one mount is one
+// admission token, whatever role a request asks for, and two at two mounts.
+func TestHandleTransparentAuth_JWTCacheKey(t *testing.T) {
 	core := createTestCore(t)
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	// Sample JWT for testing (format is valid but signature is not verified in tests)
 	sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature"
 
-	t.Run("same JWT with different roles should produce different token IDs", func(t *testing.T) {
-		jwtType := &JWTRoleTokenType{}
-
-		// Create token for JWT + Role1
-		entry1 := &TokenEntry{
-			Data: map[string]string{},
-		}
-		authData1 := &AuthData{
-			TokenValue:  sampleJWT,
-			RoleName:    "role1",
-			PrincipalID: "test-user",
-			ExpireAt:    time.Now().Add(1 * time.Hour),
-			Policies:    []string{"policy1"},
-		}
-		_, err := jwtType.Generate(context.Background(), authData1, entry1)
-		require.NoError(t, err)
-		id1 := jwtType.ComputeID(entry1.Data["jwt"])
-
-		// Create token for JWT + Role2
-		entry2 := &TokenEntry{
-			Data: map[string]string{},
-		}
-		authData2 := &AuthData{
-			TokenValue:  sampleJWT,
-			RoleName:    "role2",
-			PrincipalID: "test-user",
-			ExpireAt:    time.Now().Add(1 * time.Hour),
-			Policies:    []string{"policy2"},
-		}
-		_, err = jwtType.Generate(context.Background(), authData2, entry2)
-		require.NoError(t, err)
-		id2 := jwtType.ComputeID(entry2.Data["jwt"])
-
-		// The token IDs should be different
-		assert.NotEqual(t, id1, id2, "Same JWT with different roles should have different token IDs")
-	})
-
-	t.Run("LookupTransparentTokenWithRole returns error for non-existent JWT token", func(t *testing.T) {
+	t.Run("LookupTransparentToken returns error for non-existent JWT token", func(t *testing.T) {
 		sampleJWT2 := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.test"
-		jwtType := &JWTRoleTokenType{}
 
-		// Looking up a token that doesn't exist should return an error
-		_, err := core.LookupTransparentTokenWithRole(ctx, jwtType, sampleJWT2, "test-accessor", "terraform")
+		_, err := core.LookupTransparentToken(ctx, sampleJWT2, "test-accessor")
 		assert.Error(t, err, "Looking up non-existent JWT token should return error")
-
-		// Looking up with different role should also fail
-		_, err = core.LookupTransparentTokenWithRole(ctx, jwtType, sampleJWT2, "test-accessor", "different-role")
-		assert.Error(t, err, "Looking up with different role should not find the token")
 	})
 
 	t.Run("LookupValue and ComputeID match token creation ID", func(t *testing.T) {
-		jwtType := &JWTRoleTokenType{}
-
-		// Simulate token creation: Generate stores hash of (accessor, JWT, role) in entry.Data["jwt"]
+		// Simulate token creation: Generate stores hash of (accessor, JWT) in entry.Data["credential"]
 		entry := &TokenEntry{
 			Data: map[string]string{},
 		}
-		authData := &AuthData{TokenValue: sampleJWT, MountAccessor: "acc1", RoleName: "terraform"}
-		jwtType.Generate(context.Background(), authData, entry)
+		authData := &AuthData{TokenValue: sampleJWT, MountAccessor: "acc1"}
+		_, err := identityTokenType.Generate(context.Background(), authData, entry)
+		require.NoError(t, err)
 
-		// Verify the stored value is a hash of (accessor, JWT, role) — not raw value
-		expectedHash := sha256.Sum256([]byte("acc1:" + sampleJWT + ":terraform"))
-		assert.Equal(t, hex.EncodeToString(expectedHash[:]), entry.Data["jwt"])
+		// Verify the stored value is a hash of (accessor, JWT) — not raw value
+		expectedHash := sha256.Sum256([]byte("acc1:" + sampleJWT))
+		assert.Equal(t, hex.EncodeToString(expectedHash[:]), entry.Data["credential"])
 
 		// Token ID is computed from the stored hash
-		tokenID := jwtType.ComputeID(entry.Data["jwt"])
+		tokenID := identityTokenType.ComputeID(entry.Data["credential"])
 
 		// Lookup: hash first, then compute ID - should match
-		lookupHash := jwtType.LookupValue(sampleJWT, "acc1", "terraform")
-		lookupID := jwtType.ComputeID(lookupHash)
+		lookupHash := identityTokenType.LookupValue(sampleJWT, "acc1")
+		lookupID := identityTokenType.ComputeID(lookupHash)
 
 		assert.Equal(t, tokenID, lookupID, "Token creation and lookup should produce same ID")
 	})
 
-	t.Run("same JWT + role on different mounts produces different token IDs", func(t *testing.T) {
-		jwtType := &JWTRoleTokenType{}
-		hashA := jwtType.LookupValue(sampleJWT, "accessor-A", "deploy")
-		hashB := jwtType.LookupValue(sampleJWT, "accessor-B", "deploy")
-		assert.NotEqual(t, hashA, hashB, "Same JWT + role on two mounts must not share a cache entry")
-		assert.NotEqual(t, jwtType.ComputeID(hashA), jwtType.ComputeID(hashB))
+	t.Run("same JWT on different mounts produces different token IDs", func(t *testing.T) {
+		hashA := identityTokenType.LookupValue(sampleJWT, "accessor-A")
+		hashB := identityTokenType.LookupValue(sampleJWT, "accessor-B")
+		assert.NotEqual(t, hashA, hashB, "Same JWT on two mounts must not share a cache entry")
+		assert.NotEqual(t, identityTokenType.ComputeID(hashA), identityTokenType.ComputeID(hashB))
+	})
+
+	t.Run("requests for two roles resolve one cached entry", func(t *testing.T) {
+		mount := mountStubAuthMethod(t, core, "jwt-key/", "jwt")
+		te, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, &AuthData{
+			TokenValue: sampleJWT, MountAccessor: mount.Accessor,
+			PrincipalID: "test-user", ExpireAt: time.Now().Add(time.Hour),
+		})
+		require.NoError(t, err)
+		backend := &mockTransparentModeProvider{transparentMode: true, autoAuthPath: "auth/jwt-key/"}
+		for _, role := range []string{"reader", "writer"} {
+			req := &logical.Request{ClientToken: sampleJWT}
+			require.NoError(t, core.handleTransparentAuth(ctx, req, backend, role))
+			assert.Equal(t, te.ID, req.TokenEntry().ID, "role %q", role)
+			assert.Equal(t, role, req.RequestedRole)
+		}
 	})
 }
 
@@ -1870,6 +2055,121 @@ type mockStreamBodyParserBackend struct {
 
 func (m *mockStreamBodyParserBackend) ShouldParseStreamBody(_ *http.Request) bool {
 	return m.parseStreamBody
+}
+
+// deadlineRecordingWriter records the connection deadlines set on it.
+// httptest.ResponseRecorder supports neither, so it cannot tell "cleared"
+// apart from "never attempted".
+type deadlineRecordingWriter struct {
+	http.ResponseWriter
+	read  []time.Time
+	write []time.Time
+}
+
+func newDeadlineRecordingWriter() *deadlineRecordingWriter {
+	return &deadlineRecordingWriter{ResponseWriter: httptest.NewRecorder()}
+}
+
+func (d *deadlineRecordingWriter) SetReadDeadline(t time.Time) error {
+	d.read = append(d.read, t)
+	return nil
+}
+
+func (d *deadlineRecordingWriter) SetWriteDeadline(t time.Time) error {
+	d.write = append(d.write, t)
+	return nil
+}
+
+// bodyReadRecordingBackend records the deadlines in force at the moment the
+// request body is buffered, which is the ordering the fix depends on and
+// which asserting only the end state would not catch.
+type bodyReadRecordingBackend struct {
+	*mockStreamBodyParserBackend
+	w             *deadlineRecordingWriter
+	readAtBuffer  []time.Time
+	writeAtBuffer []time.Time
+}
+
+func (b *bodyReadRecordingBackend) ShouldParseStreamBody(r *http.Request) bool {
+	b.readAtBuffer = append([]time.Time{}, b.w.read...)
+	b.writeAtBuffer = append([]time.Time{}, b.w.write...)
+	return b.mockStreamBodyParserBackend.ShouldParseStreamBody(r)
+}
+
+// TestHandleNonLoginRequest_StreamingClearsConnectionDeadlines pins the fix
+// for the listener deadlines severing proxied traffic, including the ordering
+// it turns on: the write deadline goes immediately, while the read deadline
+// is held to a finite window across the pre-authentication body buffering and
+// only removed once the body is in hand. Clearing the read deadline up front
+// would leave an unauthenticated dribbler unbounded; leaving it armed would
+// tear down an idle stream.
+func TestHandleNonLoginRequest_StreamingClearsConnectionDeadlines(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	w := newDeadlineRecordingWriter()
+	backend := &bodyReadRecordingBackend{
+		mockStreamBodyParserBackend: &mockStreamBodyParserBackend{parseStreamBody: true},
+		w:                           w,
+	}
+	entry := &MountEntry{
+		Path:        "vault/",
+		Type:        "vault",
+		Class:       mountClassProvider,
+		UUID:        "vault-deadline-uuid",
+		Accessor:    "vault_deadline",
+		NamespaceID: namespace.RootNamespaceID,
+		namespace:   namespace.RootNamespace,
+	}
+	view := &mockBarrierView{prefix: "provider/vault-deadline-uuid/"}
+	require.NoError(t, core.router.Mount("vault/", backend, entry, view))
+
+	t.Run("streaming request sheds the write deadline and windows the read", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/vault/gateway/v1/pki/issue/my-role", strings.NewReader(`{"key":"value"}`))
+		httpReq.Header.Set("Content-Type", "application/json")
+		req := &logical.Request{
+			Path:           "vault/gateway/v1/pki/issue/my-role",
+			Operation:      logical.CreateOperation,
+			HTTPRequest:    httpReq,
+			ResponseWriter: logical.NewStatusRecordingWriter(w),
+		}
+
+		// Authorization fails after this point; the deadline work is all
+		// ahead of it.
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+
+		require.True(t, req.Streamed)
+
+		require.Len(t, w.write, 1, "the write deadline truncates a proxied response mid-flight")
+		assert.True(t, w.write[0].IsZero())
+
+		require.Len(t, w.read, 2, "the read deadline is windowed across the buffering, then removed")
+		assert.False(t, w.read[0].IsZero(), "an unauthenticated dribbler must stay bounded while the body is read")
+		assert.True(t, w.read[1].IsZero(), "an armed read deadline tears down an idle stream")
+
+		// The ordering is the point: at the moment the body was buffered the
+		// window was already in force and had not yet been lifted.
+		require.Len(t, backend.writeAtBuffer, 1, "the write deadline must be gone before the body is read")
+		require.Len(t, backend.readAtBuffer, 1, "the body must be read inside the window, not after it lifts")
+		assert.False(t, backend.readAtBuffer[0].IsZero())
+	})
+
+	t.Run("control-plane request keeps its caps", func(t *testing.T) {
+		w := newDeadlineRecordingWriter()
+		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/seal-status", nil)
+		req := &logical.Request{
+			Path:           "sys/seal-status",
+			Operation:      logical.ReadOperation,
+			HTTPRequest:    httpReq,
+			ResponseWriter: logical.NewStatusRecordingWriter(w),
+		}
+
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+
+		assert.False(t, req.Streamed)
+		assert.Empty(t, w.write, "clearing the write deadline for the whole API would remove the control plane's bound")
+		assert.Empty(t, w.read)
+	})
 }
 
 // TestHandleNonLoginRequest_StreamingBodyParsing tests opt-in body parsing for streaming requests
@@ -1958,6 +2258,56 @@ func TestHandleNonLoginRequest_StreamingBodyParsing(t *testing.T) {
 		assert.True(t, req.Streamed)
 		// Data map is initialized (for query params) but binary body is not parsed into it
 		assert.Empty(t, req.Data)
+	})
+}
+
+// limitedStreamBodyParserBackend is a body-parsing streaming backend that reports its
+// own body cap, as an httpproxy mount does.
+type limitedStreamBodyParserBackend struct {
+	mockStreamBodyParserBackend
+	limit int64
+}
+
+func (b *limitedStreamBodyParserBackend) StreamBodyLimit(*http.Request) int64 { return b.limit }
+
+// Through handleNonLoginRequest: the backend's own cap, not core's 32 MB, governs how
+// much of a streamed body is buffered for policy, in both directions.
+func TestHandleNonLoginRequest_StreamingBodyParsingUsesTheBackendCap(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	mount := func(t *testing.T, name string, limit int64) {
+		t.Helper()
+		backend := &limitedStreamBodyParserBackend{mockStreamBodyParserBackend: mockStreamBodyParserBackend{parseStreamBody: true}, limit: limit}
+		entry := &MountEntry{
+			Path: name + "/", Type: "rest", Class: mountClassProvider,
+			UUID: name + "-uuid", Accessor: "rest_" + name,
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+		}
+		require.NoError(t, core.router.Mount(name+"/", backend, entry, &mockBarrierView{prefix: "provider/" + name + "-uuid/"}))
+	}
+	streamed := func(path, body string) *logical.Request {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/"+path, strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		return &logical.Request{Path: path, Operation: logical.CreateOperation, HTTPRequest: httpReq}
+	}
+
+	t.Run("a cap below core's refuses what it would have parsed", func(t *testing.T) {
+		mount(t, "small", 64)
+		req := streamed("small/gateway/x", `{"memo":"`+strings.Repeat("x", 128)+`"}`)
+		resp, _, _ := core.handleNonLoginRequest(ctx, req)
+		require.NotNil(t, resp)
+		require.Error(t, resp.Error())
+		assert.Equal(t, http.StatusRequestEntityTooLarge, logical.GetErrorCode(resp.Error()))
+		assert.Contains(t, resp.Error().Error(), "64 bytes")
+	})
+
+	t.Run("a cap above core's parses a body core's would have refused", func(t *testing.T) {
+		mount(t, "large", 40<<20)
+		pad := strings.Repeat("x", 33<<20)
+		req := streamed("large/gateway/x", `{"amount":50,"pad":"`+pad+`"}`)
+		_, _, _ = core.handleNonLoginRequest(ctx, req)
+		assert.Equal(t, float64(50), req.Data["amount"], "a 33 MB body on a 40 MB mount reaches policy")
 	})
 }
 
@@ -2140,15 +2490,12 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 		sampleJWT := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjYWNoZWQtdXNlciJ9.cached-sig"
 
 		authData := &AuthData{
-			TokenValue:     sampleJWT,
-			MountAccessor:  jwtMount.Accessor,
-			RoleName:       "ops-reader",
-			PrincipalID:    "cached-user",
-			ExpireAt:       time.Now().Add(24 * time.Hour),
-			Policies:       []string{"default"},
-			CredentialSpec: "test-spec",
+			TokenValue:    sampleJWT,
+			MountAccessor: jwtMount.Accessor,
+			PrincipalID:   "cached-user",
+			ExpireAt:      time.Now().Add(24 * time.Hour),
 		}
-		te, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+		te, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, authData)
 		require.NoError(t, err)
 		require.NotNil(t, te)
 
@@ -2247,23 +2594,18 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 		nsCtx := namespace.ContextWithNamespace(context.Background(), ns)
 		precMount := mountStubAuthMethodInNamespace(t, core, "jwt/", "jwt", ns)
 
-		// Pre-create cached tokens for both roles. Token namespace is root
+		// Pre-create the cached admission token: one for the credential at
+		// the mount, whatever role a request asks for. Token namespace is root
 		// (the fake `prec/` namespace isn't in the namespace store, so token
 		// resolution would fail), but the cache key uses the per-mount
 		// accessor — which is what performImplicitAuth threads in.
-		for _, roleName := range []string{"from-query", "from-header"} {
-			authData := &AuthData{
-				TokenValue:     sampleJWT,
-				MountAccessor:  precMount.Accessor,
-				RoleName:       roleName,
-				PrincipalID:    "prec-user",
-				ExpireAt:       time.Now().Add(24 * time.Hour),
-				Policies:       []string{"default"},
-				CredentialSpec: "test-spec",
-			}
-			_, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
-			require.NoError(t, err)
-		}
+		_, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, &AuthData{
+			TokenValue:    sampleJWT,
+			MountAccessor: precMount.Accessor,
+			PrincipalID:   "prec-user",
+			ExpireAt:      time.Now().Add(24 * time.Hour),
+		})
+		require.NoError(t, err)
 
 		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/cred/sources?role=from-query", nil)
 		httpReq.Header.Set("Authorization", "Bearer "+sampleJWT)
@@ -2277,7 +2619,7 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 		_, _, _ = core.handleNonLoginRequest(nsCtx, req)
 		assert.True(t, req.Transparent)
 		require.NotNil(t, req.TokenEntry())
-		assert.Equal(t, "from-query", req.TokenEntry().RoleName)
+		assert.Equal(t, "from-query", req.RequestedRole)
 	})
 
 	t.Run("X-Warden-Role header used when no role query param", func(t *testing.T) {
@@ -2294,17 +2636,14 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 		fallbackMount := mountStubAuthMethodInNamespace(t, core, "jwt/", "jwt", ns)
 
 		authData := &AuthData{
-			TokenValue:     sampleJWT,
-			MountAccessor:  fallbackMount.Accessor,
-			RoleName:       "from-header",
-			PrincipalID:    "fallback-user",
-			ExpireAt:       time.Now().Add(24 * time.Hour),
-			Policies:       []string{"default"},
-			CredentialSpec: "test-spec",
+			TokenValue:    sampleJWT,
+			MountAccessor: fallbackMount.Accessor,
+			PrincipalID:   "fallback-user",
+			ExpireAt:      time.Now().Add(24 * time.Hour),
 		}
 		// Token namespace is root (the fake `fallback/` namespace isn't in
 		// the namespace store); cache key uses the per-mount accessor.
-		_, err := core.tokenStore.GenerateToken(ctx, TypeJWTRole, authData)
+		_, err := core.tokenStore.GenerateToken(ctx, TypeIdentityToken, authData)
 		require.NoError(t, err)
 
 		httpReq := httptest.NewRequest(http.MethodGet, "/v1/sys/cred/sources", nil)
@@ -2319,7 +2658,7 @@ func TestTransparentOps_NonStreamingPath(t *testing.T) {
 		_, _, _ = core.handleNonLoginRequest(nsCtx, req)
 		assert.True(t, req.Transparent)
 		require.NotNil(t, req.TokenEntry())
-		assert.Equal(t, "from-header", req.TokenEntry().RoleName)
+		assert.Equal(t, "from-header", req.RequestedRole)
 	})
 }
 
@@ -2374,7 +2713,7 @@ func exchangeResolveEnv(t *testing.T) (*Core, context.Context) {
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "local-src", Type: "local"}))
 	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
 		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
-		Config: map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"},
+		Config: credential.NewConfig(map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"}),
 	}))
 	return c, ctx
 }
@@ -2385,7 +2724,7 @@ func seedSpec(t *testing.T, c *Core, ctx context.Context, name string, config ma
 		Name:   name,
 		Type:   "vault_token",
 		Source: "local-src",
-		Config: config,
+		Config: credential.NewConfig(config),
 	}))
 }
 
@@ -2397,7 +2736,7 @@ func seedExchangeSpec(t *testing.T, c *Core, ctx context.Context, name string, c
 		Name:   name,
 		Type:   "vault_token",
 		Source: "sts-src",
-		Config: config,
+		Config: credential.NewConfig(config),
 	}))
 }
 
@@ -2424,7 +2763,7 @@ func TestCreateSpec_RejectsInvalidExchangeConfig(t *testing.T) {
 		Name:   "bad-spec",
 		Type:   "vault_token",
 		Source: "local-src",
-		Config: map[string]string{credential.ConfigActorTokenSource: credential.SourceAgentIdentity},
+		Config: credential.NewConfig(map[string]string{credential.ConfigActorTokenSource: credential.SourceAgentIdentity}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "token-exchange config")
@@ -2630,16 +2969,19 @@ func TestResolveExchangeInputs_WardenIdentity_ResourceDerived(t *testing.T) {
 	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
 	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
 		Name: "aws-fed", Type: credential.SourceTypeAWS,
-		Config: map[string]string{"auth_method": "oidc_federation"},
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
 	}))
 	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
 		Name: "wid-res", Type: "vault_token", Source: "aws-fed",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
 			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
-			"mint_method":                       "secrets_manager",
-			"secret_id":                         "prod/db",
-		},
+			// warden_resource is a default-profile claim, and a new AWS federated
+			// spec defaults to aws, which never emits it — so name default.
+			credential.ConfigAssertionProfile: credential.DefaultAssertionProfileName,
+			"mint_method":                     "secrets_manager",
+			"secret_id":                       "prod/db",
+		}),
 	}))
 
 	te := &logical.TokenEntry{CredentialSpec: "wid-res", PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
@@ -2659,23 +3001,71 @@ func TestResolveExchangeInputs_WardenIdentity_ResourceDerived(t *testing.T) {
 // explicit assertion_resource override wins over derivation (emitted verbatim,
 // colon and all) and that assertion_resource=none suppresses the claim even when
 // the spec would otherwise derive one.
+// TestResolveExchangeInputs_WardenIdentity_AssertionTTL drives the spec-level
+// assertion_ttl through the real setup → mint path: the spec's value is a REQUEST
+// the issuer caps at its own AssertionTTL(), so a spec can shorten its assertions
+// but never lengthen them past the retired-key pruning window. Unset keeps today's
+// behavior exactly — the issuer's lifetime.
+func TestResolveExchangeInputs_WardenIdentity_AssertionTTL(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.Equal(t, defaultAssertionTTL, c.oidcIssuer.AssertionTTL(), "precondition: default 5m ceiling")
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-ttl", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+
+	lifetime := func(name, ttl string) time.Duration {
+		t.Helper()
+		cfg := map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+			"mint_method":                       "secrets_manager",
+			"secret_id":                         "prod/db",
+		}
+		if ttl != "" {
+			cfg[credential.ConfigAssertionTTL] = ttl
+		}
+		require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+			Name: name, Type: "vault_token", Source: "aws-ttl", Config: credential.NewConfig(cfg),
+		}))
+		te := &logical.TokenEntry{CredentialSpec: name, PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
+		inputs, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), te)
+		require.NoError(t, err)
+		tok, err := inputs.ResolveSubjectToken(ctx)
+		require.NoError(t, err)
+		claims := decodeAssertionClaims(t, tok)
+		return time.Duration(claims["exp"].(float64)-claims["iat"].(float64)) * time.Second
+	}
+
+	assert.Equal(t, defaultAssertionTTL, lifetime("ttl-unset", ""),
+		"unset must keep the issuer's lifetime, exactly as before")
+	assert.Equal(t, 90*time.Second, lifetime("ttl-short", "90s"),
+		"a spec may request a shorter lifetime")
+	assert.Equal(t, defaultAssertionTTL, lifetime("ttl-long", "2h"),
+		"a spec asking to outlive the issuer's lifetime is capped, not honoured")
+}
+
 func TestResolveExchangeInputs_WardenIdentity_ResourceOverrideAndOptOut(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
 	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
 		Name: "aws-fed2", Type: credential.SourceTypeAWS,
-		Config: map[string]string{"auth_method": "oidc_federation"},
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
 	}))
 	newSpecTE := func(name string, resourceCfg string) *logical.TokenEntry {
 		require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
 			Name: name, Type: "vault_token", Source: "aws-fed2",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
 				credential.ConfigAssertionAudience:  "sts.amazonaws.com",
-				credential.ConfigAssertionResource:  resourceCfg,
-				"mint_method":                       "secrets_manager",
-				"secret_id":                         "prod/db",
-			},
+				// assertion_resource is a default-profile feature; a new AWS federated
+				// spec defaults to aws, which rejects it — so name default.
+				credential.ConfigAssertionProfile:  credential.DefaultAssertionProfileName,
+				credential.ConfigAssertionResource: resourceCfg,
+				"mint_method":                      "secrets_manager",
+				"secret_id":                        "prod/db",
+			}),
 		}))
 		return &logical.TokenEntry{CredentialSpec: name, PrincipalID: "p", NamespaceID: "n", MountAccessor: "m"}
 	}
@@ -2875,9 +3265,9 @@ func parseJWTClaimsForTest(t *testing.T, token string) map[string]interface{} {
 
 // TestResolveExchangeInputs_WardenUserClaims covers the per-user federation path:
 // a warden_identity subject spec with assertion_user_claims projects the user into
-// inputs.UserClaims (for driver templating) and into the assertion's warden_user
-// claim, while the assertion's own sub stays the AGENT. It also covers the sub-only
-// opt-in and the fail-closed cases.
+// inputs.UserClaims (for driver templating) and discloses it to the assertion,
+// which under the default profile makes the user the subject and the agent its
+// actor. It also covers the sub-only opt-in and the fail-closed cases.
 func TestResolveExchangeInputs_WardenUserClaims(t *testing.T) {
 	c, ctx := exchangeResolveEnv(t)
 	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
@@ -2895,7 +3285,7 @@ func TestResolveExchangeInputs_WardenUserClaims(t *testing.T) {
 	agentTE := &logical.TokenEntry{CredentialSpec: "wid-user", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1"}
 	userTE := &logical.TokenEntry{PrincipalID: "alice-sub", NamespaceID: "ns1", MountAccessor: "auth_user", Metadata: map[string]string{"username": "alice"}}
 
-	t.Run("projects user claims and emits warden_user; sub stays the agent", func(t *testing.T) {
+	t.Run("projects user claims and names the user as sub, the agent as act", func(t *testing.T) {
 		req := requestWith("s.opaque-session", nil)
 		req.User = &logical.UserPrincipal{TokenEntry: userTE}
 		inputs, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
@@ -2903,20 +3293,19 @@ func TestResolveExchangeInputs_WardenUserClaims(t *testing.T) {
 		require.NotNil(t, inputs)
 		// UserClaims (driver templating): projected metadata + the user's raw principal.
 		assert.Equal(t, "alice", inputs.UserClaims["username"])
-		assert.Equal(t, "alice-sub", inputs.UserClaims["sub"], "warden_user.sub is the user's raw principal")
+		assert.Equal(t, "alice-sub", inputs.UserClaims["sub"], "the projected sub is the user's raw principal")
 
 		tok, err := inputs.ResolveSubjectToken(ctx)
 		require.NoError(t, err)
 		claims := parseJWTClaimsForTest(t, tok)
-		assert.Equal(t, wardenSubject(agentTE), claims["sub"], "assertion sub stays the AGENT composite")
-		assert.Equal(t, "agent-bot", claims["warden_sub"], "warden_sub is the agent's raw principal")
-		wu, ok := claims["warden_user"].(map[string]interface{})
-		require.True(t, ok, "warden_user missing: %v", claims["warden_user"])
-		assert.Equal(t, "alice", wu["username"])
-		assert.Equal(t, "alice-sub", wu["sub"])
+		assert.Equal(t, "alice-sub", claims["sub"], "{{user.sub}} templates exactly the sub a verifier binds")
+		assert.Equal(t, map[string]interface{}{"username": "alice"}, claims["warden_metadata"])
+		act, ok := claims["act"].(map[string]interface{})
+		require.True(t, ok, "act missing: %v", claims["act"])
+		assert.Equal(t, wardenSubject(agentTE), act["sub"], "the agent, by its composite")
 	})
 
-	t.Run("sub-only opt-in yields identity-only warden_user", func(t *testing.T) {
+	t.Run("sub-only opt-in yields identity-only user claims", func(t *testing.T) {
 		subOnlyAgent := &logical.TokenEntry{CredentialSpec: "wid-subonly", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1"}
 		req := requestWith("s.opaque-session", nil)
 		req.User = &logical.UserPrincipal{TokenEntry: userTE}
@@ -2960,14 +3349,14 @@ func TestResolveExchangeInputs_RetiredSourceFailsClosedAtMint(t *testing.T) {
 
 	require.NoError(t, c.credConfigStore.persistSpec(ns.UUID, &credential.CredSpec{
 		Name: "retired-subject", Type: "vault_token", Source: "local-src",
-		Config: map[string]string{credential.ConfigSubjectTokenSource: "header"},
+		Config: credential.NewConfig(map[string]string{credential.ConfigSubjectTokenSource: "header"}),
 	}))
 	require.NoError(t, c.credConfigStore.persistSpec(ns.UUID, &credential.CredSpec{
 		Name: "retired-actor", Type: "vault_token", Source: "sts-src",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
 			credential.ConfigActorTokenSource:   "header",
-		},
+		}),
 	}))
 
 	t.Run("retired subject source fails closed, names the value", func(t *testing.T) {
@@ -2983,4 +3372,714 @@ func TestResolveExchangeInputs_RetiredSourceFailsClosedAtMint(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "header")
 	})
+}
+
+// TestResolveExchangeInputs_WardenIdentity_RoleIsolatesCacheIdentity pins the role
+// fragment. The assertion asserts warden_role and a downstream is invited to
+// authorize on it, so two roles can get different answers from the same store while
+// subject, audience, resource and metadata are identical — and the chained-secret
+// cache shares a fetch across an agent's sessions rather than asking again. Without
+// this fragment those two roles are one agent to it.
+func TestResolveExchangeInputs_WardenIdentity_RoleIsolatesCacheIdentity(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "wid-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+	})
+
+	req := requestWith("s.opaque-session", nil)
+	entry := func(role string) *logical.TokenEntry {
+		return &logical.TokenEntry{
+			CredentialSpec: "wid-spec",
+			PrincipalID:    "spiffe://acme/agent/bot",
+			NamespaceID:    "ns1",
+			MountAccessor:  "auth_jwt_1",
+			RoleName:       role,
+		}
+	}
+	identityFor := func(te *logical.TokenEntry) *credential.ExchangeInputs {
+		t.Helper()
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, te)
+		require.NoError(t, err)
+		return inputs
+	}
+
+	readTE, writeTE := entry("reader"), entry("writer")
+	read, write := identityFor(readTE), identityFor(writeTE)
+
+	assert.Equal(t,
+		wardenSubject(readTE)+"\x00"+"https://sts.example/aud"+"\x00role=reader",
+		read.SubjectCacheIdentity)
+	assert.NotEqual(t, read.SubjectCacheIdentity, write.SubjectCacheIdentity,
+		"one principal under two roles must not share a cache identity")
+
+	// The fingerprint is what the caches actually key on, so the isolation has to
+	// survive that far — a fragment the fingerprint ignored would prove nothing.
+	assert.NotEqual(t, read.Fingerprint(), write.Fingerprint())
+
+	// A token carrying no role keeps the pre-fragment bytes. This is the byte
+	// stability the conditional buys, and what lets every older pinned literal in
+	// this file stand unchanged.
+	noRole := entry("")
+	assert.Equal(t,
+		wardenSubject(noRole)+"\x00"+"https://sts.example/aud",
+		identityFor(noRole).SubjectCacheIdentity)
+}
+
+// A role value shaped like another fragment's lead must not be readable as that
+// fragment. Each carries a fixed, mutually non-prefix prefix for exactly this.
+func TestResolveExchangeInputs_WardenIdentity_RoleCannotImpersonateAnotherFragment(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "wid-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+		credential.ConfigAssertionResource:  "https://api.example/db",
+	})
+
+	req := requestWith("s.opaque-session", nil)
+	base := func(role string) *logical.TokenEntry {
+		return &logical.TokenEntry{
+			CredentialSpec: "wid-spec",
+			PrincipalID:    "spiffe://acme/agent/bot",
+			NamespaceID:    "ns1",
+			MountAccessor:  "auth_jwt_1",
+			RoleName:       role,
+		}
+	}
+	identity := func(te *logical.TokenEntry) string {
+		t.Helper()
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, te)
+		require.NoError(t, err)
+		return inputs.SubjectCacheIdentity
+	}
+
+	// Ordering is part of the contract: role precedes the resource fragment.
+	spoof := base("x\x00res=https://api.example/other")
+	assert.Equal(t,
+		wardenSubject(spoof)+"\x00"+"https://sts.example/aud"+
+			"\x00role=x\x00res=https://api.example/other"+
+			"\x00res=https://api.example/db",
+		identity(spoof),
+		"a role carrying another fragment's lead must still sit behind its own prefix")
+
+	assert.NotEqual(t, identity(base("x")), identity(spoof))
+}
+
+// The delegation shape keys the actor on the same identity, so the fragment has to
+// reach it too — the agent whose role varies is the actor there, not the subject.
+func TestResolveExchangeInputs_ActorWardenIdentity_RoleIsolatesCacheIdentity(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	// An actor token requires a token_exchange source, so seed that shape.
+	seedExchangeSpec(t, c, ctx, "deleg-spec", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
+		credential.ConfigActorTokenSource:   credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+	})
+
+	req := requestWith("s.opaque-session", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{}, RawToken: "eyJ.user"}
+
+	actorIdentity := func(role string) string {
+		t.Helper()
+		te := &logical.TokenEntry{
+			CredentialSpec: "deleg-spec",
+			PrincipalID:    "spiffe://acme/agent/bot",
+			NamespaceID:    "ns1",
+			MountAccessor:  "auth_jwt_1",
+			RoleName:       role,
+		}
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, te)
+		require.NoError(t, err)
+		return inputs.ActorCacheIdentity
+	}
+
+	assert.NotEqual(t, actorIdentity("reader"), actorIdentity("writer"),
+		"the actor slot keys on the same identity, so the role must isolate it too")
+}
+
+// TestResolveExchangeInputs_ChainedReferencedSpec_CarriesCallerRole pins the seam
+// the per-role isolation actually depends on.
+//
+// A chained mint resolves the REFERENCED spec's inputs through the caller closure,
+// with a spec name that is not the caller's own. The manager keys the chained-secret
+// cache on whatever identity that returns, and treats it opaquely — so if this
+// resolution ever stopped carrying the live token entry (re-fetching it, or
+// rebuilding one from principal and mount without the role), two roles would collapse
+// to one cached secret again while every other test stayed green: the direct-path
+// tests would still pass, and the manager's own tests build identities by hand.
+func TestResolveExchangeInputs_ChainedReferencedSpec_CarriesCallerRole(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+
+	// The consumer chains; the referenced spec is what mints the assertion.
+	seedSpec(t, c, ctx, "referenced-secret", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+	})
+	seedSpec(t, c, ctx, "consumer", map[string]string{
+		credential.ConfigSecretSpec: "referenced-secret",
+	})
+
+	req := requestWith("s.opaque-session", nil)
+	referencedInputs := func(role string) *credential.ExchangeInputs {
+		t.Helper()
+		te := &logical.TokenEntry{
+			CredentialSpec: "consumer",
+			PrincipalID:    "spiffe://acme/agent/bot",
+			NamespaceID:    "ns1",
+			MountAccessor:  "auth_jwt_1",
+			RoleName:       role,
+		}
+		// Through the caller the mint pipeline actually builds, resolving the
+		// REFERENCED spec rather than the caller's own — the shape the closure
+		// exists for. Calling resolveExchangeInputs directly would bypass the very
+		// seam this pins.
+		inputs, err := c.callerFor(req, te, time.Hour, nil).ResolveInputs(ctx, "referenced-secret")
+		require.NoError(t, err)
+		require.NotNil(t, inputs)
+		return inputs
+	}
+
+	reader, writer := referencedInputs("reader"), referencedInputs("writer")
+
+	// Format-independent: the manager only ever sees the fingerprint, so that is
+	// what has to diverge. Asserting bytes here would restate core's own literals.
+	assert.NotEqual(t, reader.Fingerprint(), writer.Fingerprint(),
+		"a chained fetch must resolve a different identity per caller role")
+	assert.Equal(t, reader.Fingerprint(), referencedInputs("reader").Fingerprint(),
+		"the same role must resolve a stable identity, or the cache could never share")
+}
+
+// shapeProfile is a registrable non-default profile for cache-fragment tests. It
+// emits a correct claim set so the issuer's guard passes and the test is only about
+// the cache key.
+type shapeProfile struct{ name string }
+
+func (s shapeProfile) Name() string                         { return s.name }
+func (s shapeProfile) Typ() string                          { return "JWT" }
+func (s shapeProfile) ValidateSpec(credential.Config) error { return nil }
+func (s shapeProfile) Claims(req credential.AssertionRequest) (map[string]any, error) {
+	return map[string]any{
+		"iss": req.Issuer,
+		"sub": req.Identity.WardenSubject(),
+		"aud": req.Audience,
+		"iat": req.IssuedAt.Unix(),
+		"nbf": req.NotBefore.Unix(),
+		"exp": req.ExpiresAt.Unix(),
+		"jti": req.JTI,
+	}, nil
+}
+
+// TestCacheIdentity_ProfileFragment pins that the profile fragment is appended
+// AFTER every existing fragment, and that the default profile appends nothing.
+//
+// The "after" part is contract, not taste: the sibling test
+// ...RoleCannotImpersonateAnotherFragment relies on fragment order, and the golden
+// cacheIdentity literals in the ...MintDeferred, ...ResourceDerived,
+// ...ResourceOverrideAndOptOut and ...RoleIsolatesCacheIdentity tests above are the
+// byte-for-byte proof that keys predating this fragment did not move.
+func TestCacheIdentity_ProfileFragment(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+
+	// Register a non-default profile so a spec may legitimately name it.
+	require.NoError(t, c.assertionProfileRegistry.Register(shapeProfile{name: "x"}))
+
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-prof", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+
+	newSpecTE := func(name, profileName string) *logical.TokenEntry {
+		cfg := map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+			credential.ConfigAssertionResource:  credential.AssertionResourceNone,
+			"mint_method":                       "secrets_manager",
+			"secret_id":                         "prod/db",
+		}
+		spec := &credential.CredSpec{Name: name, Type: "vault_token", Source: "aws-prof"}
+		if profileName != "" {
+			cfg[credential.ConfigAssertionProfile] = profileName
+			spec.Config = credential.NewConfig(cfg)
+			require.NoError(t, c.credConfigStore.CreateSpec(ctx, spec))
+		} else {
+			// "Unset" can only mean a spec stored BEFORE the create-time default
+			// existed: a new AWS federated spec is given assertion_profile=aws.
+			spec.Config = credential.NewConfig(cfg)
+			createSpecAsLegacy(t, c.credConfigStore, ctx, spec)
+		}
+		return &logical.TokenEntry{
+			CredentialSpec: name, PrincipalID: "p", NamespaceID: "n",
+			MountAccessor: "m", RoleName: "reader",
+		}
+	}
+
+	// A spec stored before profiles existed (no key) → no fragment at all, so the
+	// key is byte-identical to a pre-profile key: upgrading moves no cache entry.
+	teUnset := newSpecTE("prof-unset", "")
+	inUnset, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), teUnset)
+	require.NoError(t, err)
+	wantBase := wardenSubject(teUnset) + "\x00sts.amazonaws.com\x00role=reader"
+	assert.Equal(t, wantBase, inUnset.SubjectCacheIdentity,
+		"an unset profile must leave the cache key byte-for-byte unchanged")
+
+	// Explicitly "default" → also no fragment, so it cannot split the cache from unset.
+	teDefault := newSpecTE("prof-default", credential.DefaultAssertionProfileName)
+	inDefault, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), teDefault)
+	require.NoError(t, err)
+	assert.Equal(t, wardenSubject(teDefault)+"\x00sts.amazonaws.com\x00role=reader",
+		inDefault.SubjectCacheIdentity,
+		"assertion_profile=default must key identically to an unset profile")
+
+	// A non-default profile → "prof=" appended after every existing fragment.
+	teX := newSpecTE("prof-x", "x")
+	inX, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), teX)
+	require.NoError(t, err)
+	assert.Equal(t, wardenSubject(teX)+"\x00sts.amazonaws.com\x00role=reader\x00prof=x",
+		inX.SubjectCacheIdentity)
+
+	// And it genuinely separates the two answers.
+	assert.NotEqual(t, inUnset.SubjectCacheIdentity, inX.SubjectCacheIdentity,
+		"two profiles must not share a cache identity")
+}
+
+// TestCacheIdentity_ProfileFragmentAfterAllFragments pins the ordering against a
+// fully-populated key — role, resource and metadata all present.
+func TestCacheIdentity_ProfileFragmentAfterAllFragments(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.NoError(t, c.assertionProfileRegistry.Register(shapeProfile{name: "x"}))
+
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-prof-all", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name: "prof-all", Type: "vault_token", Source: "aws-prof-all",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource:      credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:       "sts.amazonaws.com",
+			credential.ConfigAssertionResource:       "custom:thing",
+			credential.ConfigAssertionMetadataClaims: "team",
+			credential.ConfigAssertionProfile:        "x",
+			"mint_method":                            "secrets_manager",
+			"secret_id":                              "prod/db",
+		}),
+	}))
+
+	te := &logical.TokenEntry{
+		CredentialSpec: "prof-all", PrincipalID: "p", NamespaceID: "n",
+		MountAccessor: "m", RoleName: "reader",
+		Metadata: map[string]string{"team": "payments"},
+	}
+	in, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), te)
+	require.NoError(t, err)
+
+	// prof= is last, after role=, res= and the metadata fingerprint — and the
+	// metadata fragment's '{' lead is pinned too, since the lead-byte discipline
+	// documented in buildAssertionSetup relies on it.
+	assert.Regexp(t,
+		`^.*\x00sts\.amazonaws\.com\x00role=reader\x00res=custom:thing\x00\{.+\}\x00prof=x$`,
+		in.SubjectCacheIdentity)
+}
+
+// TestResolveAssertionProfile_NilRegistry pins the nil-registry case explicitly,
+// because the issuer's nil-Profile fallback would otherwise hide it.
+//
+// Spec-create validation passes on a nil registry, so a spec naming a non-default
+// profile CAN be persisted by a test or bootstrap setup. Such a spec must NOT then
+// quietly mint the default shape — a caller that asked for a different claim set
+// silently getting the old one is exactly what the registry exists to prevent.
+// TestResolveExchangeInputs_AWSProfile drives the real aws profile end to end
+// through the request path: the cache identity gains "\x00prof=aws" after every
+// other fragment, and the minted assertion carries the composite sub plus the role
+// and projected metadata as AWS session tags — and no warden_* claim, not even
+// warden_resource, which this spec would otherwise derive.
+func TestResolveExchangeInputs_AWSProfile(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-e2e", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name: "orders-reader", Type: "vault_token", Source: "aws-e2e",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource:      credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:       "sts.amazonaws.com",
+			credential.ConfigAssertionProfile:        profiles.AWSProfileName,
+			credential.ConfigAssertionMetadataClaims: "team,env",
+			"mint_method":                            "secrets_manager",
+			"secret_id":                              "prod/db", // derives a resource aws must not emit
+		}),
+	}))
+
+	te := &logical.TokenEntry{
+		CredentialSpec: "orders-reader", PrincipalID: "agent-checkout-7", NamespaceID: "ns-3f2a1b",
+		MountAccessor: "auth_jwt_9c1e", RoleName: "orders-reader",
+		Metadata: map[string]string{"team": "payments", "env": "prod", "unlisted": "never projected"},
+	}
+	inputs, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), te)
+	require.NoError(t, err)
+
+	assert.True(t, strings.HasSuffix(inputs.SubjectCacheIdentity, "\x00prof=aws"),
+		"the aws profile must key its own cache dimension, last: %q", inputs.SubjectCacheIdentity)
+
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+
+	assert.Equal(t, "wid:ns-3f2a1b:auth_jwt_9c1e:agent-checkout-7", claims["sub"])
+	assert.Equal(t, "sts.amazonaws.com", claims["aud"])
+	assert.Equal(t, map[string]any{
+		"principal_tags": map[string]any{
+			"warden_role": []any{"orders-reader"},
+			"team":        []any{"payments"},
+			"env":         []any{"prod"},
+		},
+	}, claims["https://aws.amazon.com/tags"], "only the listed metadata keys become tags")
+	for claim := range claims {
+		assert.False(t, strings.HasPrefix(claim, "warden_"), "aws must not emit %s", claim)
+	}
+
+	header := decodeAssertionHeader(t, tok)
+	assert.Equal(t, "JWT", header["typ"])
+}
+
+// TestResolveExchangeInputs_DefaultDelegation drives the default profile's
+// delegation shape through the real setup and issuer: the user at the top level by
+// raw id with its own namespace, the agent in act by its composite, and the user
+// token's own act chain nested beneath the agent.
+func TestResolveExchangeInputs_DefaultDelegation(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "as-user", map[string]string{
+		credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:   "https://orders.example/aud",
+		credential.ConfigAssertionUserClaims: "sub,username",
+	})
+
+	agentTE := &logical.TokenEntry{
+		CredentialSpec: "as-user", PrincipalID: "agent-checkout-7", NamespaceID: "ns1",
+		NamespacePath: "team-payments/", MountAccessor: "auth_jwt_1", RoleName: "orders-reader",
+	}
+	userTE := &logical.TokenEntry{
+		PrincipalID: "alice", NamespaceID: "ns1", NamespacePath: "team-payments/", MountAccessor: "auth_oidc_2",
+		Metadata: map[string]string{"username": "alice"},
+		Actors: []logical.ActorRef{
+			{Subject: "broker-beta", Issuer: "https://idp.example"},
+			{Subject: "agents/alpha"},
+		},
+	}
+
+	req := requestWith("s.opaque-session", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: userTE}
+	inputs, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
+	require.NoError(t, err)
+	assert.NotContains(t, inputs.SubjectCacheIdentity, "prof=", "default keys with no profile fragment")
+
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+
+	assert.Equal(t, "alice", claims["sub"], "sub is the USER's raw principal, with no Warden namespace or mount")
+	assert.Equal(t, "team-payments/", claims["warden_namespace"], "the user's namespace qualifies sub")
+	assert.NotContains(t, claims, "warden_role", "a user runs under no role; the agent's is in act")
+	assert.Contains(t, inputs.SubjectCacheIdentity, `user={"username":"alice"}`,
+		"the user's projected claims key the cache")
+	assert.Equal(t, map[string]any{"username": "alice"}, claims["warden_metadata"], "the user's claims, without sub")
+	assert.Equal(t, map[string]any{
+		"sub":         wardenSubject(agentTE),
+		"iss":         "https://warden-oidc.example",
+		"warden_role": "orders-reader",
+		"act": map[string]any{
+			"sub": "broker-beta",
+			"iss": "https://idp.example",
+			"act": map[string]any{"sub": "agents/alpha"},
+		},
+	}, claims["act"], "the agent by its composite, with no warden_namespace")
+	for _, gone := range []string{"warden_sub", "warden_user", "warden_auth_mount"} {
+		assert.NotContains(t, claims, gone)
+	}
+
+	// The token entry's chain was copied, not aliased, into the assertion request.
+	assert.Equal(t, "broker-beta", userTE.Actors[0].Subject)
+}
+
+// TestResolveExchangeInputs_DefaultWithholdsUser pins the two places the core does
+// NOT disclose a user to the profile although the spec lists assertion_user_claims:
+// the actor slot of a two-token exchange (the token service builds act from the
+// actor token's sub, so it must name the agent), and a source whose verifier binds
+// only iss/sub/aud (a raw user sub could not be tenant-qualified there). Both mint
+// the agent shape — composite sub, no act, no user claims — while the user's claims
+// still reach templating.
+func TestResolveExchangeInputs_DefaultWithholdsUser(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	userTE := &logical.TokenEntry{
+		PrincipalID: "alice", NamespaceID: "ns1", MountAccessor: "auth_oidc_2", RoleName: "users",
+		Metadata: map[string]string{"username": "alice"},
+	}
+	assertAgentShape := func(t *testing.T, tok string, agent *logical.TokenEntry) {
+		t.Helper()
+		claims := decodeAssertionClaims(t, tok)
+		assert.Equal(t, wardenSubject(agent), claims["sub"], "the agent, by its composite")
+		assert.NotContains(t, claims, "act")
+		assert.NotContains(t, claims, "warden_namespace")
+		assert.NotContains(t, claims, "warden_metadata", "the user's claims are not rendered")
+	}
+
+	t.Run("actor slot of a two-token exchange", func(t *testing.T) {
+		seedExchangeSpec(t, c, ctx, "delegate", map[string]string{
+			credential.ConfigSubjectTokenSource:  credential.SourceUserIdentity,
+			credential.ConfigActorTokenSource:    credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:   "https://sts.example/aud",
+			credential.ConfigAssertionUserClaims: "sub,username",
+		})
+		agentTE := &logical.TokenEntry{CredentialSpec: "delegate", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1", RoleName: "r"}
+		req := requestWith("s.opaque-session", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: userTE, RawToken: "user-raw-cred"}
+
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
+		require.NoError(t, err)
+		assert.Equal(t, "alice", inputs.UserClaims["username"], "templating still sees the user")
+		tok, err := inputs.ResolveActorToken(ctx)
+		require.NoError(t, err)
+		assertAgentShape(t, tok, agentTE)
+
+		// An agent carrying its own act chain is not refused here: no user is
+		// disclosed, so the actor token makes no delegation claim to misstate.
+		acted := agentTE.Copy()
+		acted.Actors = []logical.ActorRef{{Subject: "orchestrator"}}
+		_, err = resolveExchangeInputsForTest(c, ctx, req, acted)
+		require.NoError(t, err)
+	})
+
+	t.Run("source whose verifier binds only sub", func(t *testing.T) {
+		require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+			Name: "aws-fed", Type: credential.SourceTypeAWS,
+			Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+		}))
+		require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+			Name: "aws-as-user", Type: "vault_token", Source: "aws-fed",
+			Config: credential.NewConfig(map[string]string{
+				credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+				credential.ConfigAssertionAudience:   "sts.amazonaws.com",
+				credential.ConfigAssertionProfile:    credential.DefaultAssertionProfileName,
+				credential.ConfigAssertionUserClaims: "sub,username",
+				"mint_method":                        "secrets_manager",
+				"secret_id":                          "users/{{user.username}}",
+			}),
+		}))
+		agentTE := &logical.TokenEntry{CredentialSpec: "aws-as-user", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1", RoleName: "r"}
+		req := requestWith("s.opaque-session", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: userTE}
+
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
+		require.NoError(t, err)
+		assert.Equal(t, "alice", inputs.UserClaims["username"], "templating still sees the user")
+		tok, err := inputs.ResolveSubjectToken(ctx)
+		require.NoError(t, err)
+		assertAgentShape(t, tok, agentTE)
+	})
+}
+
+// TestResolveExchangeInputs_OpenAIDisclosesUser pins that openai is not a sub-only
+// verifier: its service account mappings can bind warden_namespace beside sub (a
+// CEL attribute over the assertion), so a delegation spec on an openai source gets
+// the delegation shape — the user as subject, the agent as act.
+func TestResolveExchangeInputs_OpenAIDisclosesUser(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "openai-wif", Type: credential.SourceTypeOpenAI,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name: "openai-as-user", Type: "vault_token", Source: "openai-wif",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:   "https://warden.example.com/openai",
+			credential.ConfigAssertionUserClaims: "sub,username",
+		}),
+	}))
+	userTE := &logical.TokenEntry{
+		PrincipalID: "alice", NamespaceID: "ns1", MountAccessor: "auth_oidc_2", RoleName: "users",
+		Metadata: map[string]string{"username": "alice"},
+	}
+	agentTE := &logical.TokenEntry{CredentialSpec: "openai-as-user", PrincipalID: "agent-bot", NamespaceID: "ns1", MountAccessor: "auth_jwt_1", RoleName: "r"}
+	req := requestWith("s.opaque-session", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: userTE}
+
+	inputs, err := resolveExchangeInputsForTest(c, ctx, req, agentTE)
+	require.NoError(t, err)
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+	assert.Equal(t, "alice", claims["sub"], "the user, by her raw id")
+	assert.Contains(t, claims, "warden_namespace", "the namespace that qualifies the raw id")
+	act, ok := claims["act"].(map[string]interface{})
+	require.True(t, ok, "act missing: %v", claims["act"])
+	assert.Equal(t, wardenSubject(agentTE), act["sub"], "the agent, by its composite")
+}
+
+// TestResolveExchangeInputs_DefaultRefusesActedAgentBeforeCache pins where the
+// agent-chain refusal happens: in setup, so resolveExchangeInputs returns no inputs,
+// and with no inputs there is no fingerprint to key a cache with. The other half —
+// that the manager resolves inputs before touching the shared chained-secret cache,
+// so a refused session is refused even when another session of the same agent has
+// filled the entry — is TestChaining_RefusedInputsNeverReachSharedCache.
+func TestResolveExchangeInputs_DefaultRefusesActedAgentBeforeCache(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "as-user", map[string]string{
+		credential.ConfigSubjectTokenSource:  credential.SourceWardenIdentity,
+		credential.ConfigAssertionAudience:   "https://orders.example/aud",
+		credential.ConfigAssertionUserClaims: "sub",
+	})
+	userTE := &logical.TokenEntry{PrincipalID: "alice", NamespaceID: "ns1", MountAccessor: "auth_oidc_2"}
+	agent := func(actors []logical.ActorRef) *logical.TokenEntry {
+		return &logical.TokenEntry{
+			CredentialSpec: "as-user", PrincipalID: "agent-checkout-7", NamespaceID: "ns1",
+			MountAccessor: "auth_jwt_1", RoleName: "orders-reader", Actors: actors,
+		}
+	}
+	withUser := func() *logical.Request {
+		req := requestWith("s.opaque-session", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: userTE}
+		return req
+	}
+
+	t.Run("act-free agent session resolves", func(t *testing.T) {
+		_, err := resolveExchangeInputsForTest(c, ctx, withUser(), agent(nil))
+		require.NoError(t, err)
+	})
+
+	t.Run("same agent carrying act is refused before any cache key exists", func(t *testing.T) {
+		inputs, err := resolveExchangeInputsForTest(c, ctx, withUser(), agent([]logical.ActorRef{{Subject: "broker-x"}}))
+		require.Error(t, err)
+		assert.Nil(t, inputs, "no inputs means no fingerprint, so no cache lookup can happen")
+		assert.Contains(t, err.Error(), "act chain")
+		assert.Contains(t, err.Error(), `"default"`)
+	})
+
+	t.Run("user principal with the reserved agent prefix is refused before any cache key exists", func(t *testing.T) {
+		req := requestWith("s.opaque-session", nil)
+		req.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{
+			PrincipalID: "wid:root:auth_jwt_1:victim", NamespaceID: "ns1", MountAccessor: "auth_oidc_2",
+		}}
+		inputs, err := resolveExchangeInputsForTest(c, ctx, req, agent(nil))
+		assert.ErrorIs(t, err, credential.ErrReservedPrincipal)
+		assert.Nil(t, inputs, "no inputs means no fingerprint, so no cache lookup can happen")
+		assert.Equal(t, http.StatusForbidden, logical.GetErrorCode(exchangeInputError(err)))
+	})
+
+	t.Run("no user principal fails closed", func(t *testing.T) {
+		_, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque-session", nil), agent(nil))
+		assert.ErrorIs(t, err, credential.ErrUserRequired)
+	})
+}
+
+// TestResolveExchangeInputs_LegacyAWSSpecMintsDefault is the upgrade guarantee at
+// mint: an AWS federated spec stored before the create-time default existed carries
+// no assertion_profile, and unset still means default at mint — so it keeps emitting
+// exactly the claims its trust policy was written against, with no session tags (a
+// tagged token would be refused by any role lacking sts:TagSession).
+func TestResolveExchangeInputs_LegacyAWSSpecMintsDefault(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-legacy", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	createSpecAsLegacy(t, c.credConfigStore, ctx, &credential.CredSpec{
+		Name: "legacy", Type: "vault_token", Source: "aws-legacy",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+			"mint_method":                       "secrets_manager",
+			"secret_id":                         "prod/db",
+		}),
+	})
+
+	te := &logical.TokenEntry{CredentialSpec: "legacy", PrincipalID: "p", NamespaceID: "n", MountAccessor: "m", RoleName: "reader"}
+	inputs, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), te)
+	require.NoError(t, err)
+	assert.NotContains(t, inputs.SubjectCacheIdentity, "prof=", "a legacy spec keys as default")
+
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+	assert.Equal(t, wardenSubject(te), claims["sub"], "the agent's composite sub, byte-identical to before the upgrade")
+	assert.Equal(t, "reader", claims["warden_role"])
+	assert.NotContains(t, claims, "https://aws.amazon.com/tags", "no session tags on a legacy spec")
+}
+
+func TestResolveAssertionProfile_NilRegistry(t *testing.T) {
+	c := &Core{}
+	require.Nil(t, c.assertionProfileRegistry)
+
+	// Unset (which resolves to "default") and an explicit "default" both work.
+	got, err := c.resolveAssertionProfile(credential.DefaultAssertionProfileName)
+	require.NoError(t, err)
+	assert.Equal(t, profiles.Default().Name(), got.Name())
+
+	// Any other name fails closed.
+	_, err = c.resolveAssertionProfile("x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unavailable")
+	assert.Contains(t, err.Error(), "x")
+}
+
+func TestResolveAssertionProfile_UnknownName(t *testing.T) {
+	c, _ := exchangeResolveEnv(t)
+	require.NotNil(t, c.assertionProfileRegistry)
+
+	got, err := c.resolveAssertionProfile(credential.DefaultAssertionProfileName)
+	require.NoError(t, err)
+	assert.Equal(t, credential.DefaultAssertionProfileName, got.Name())
+
+	_, err = c.resolveAssertionProfile("nope")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown assertion profile: nope")
+	// Every builtin, sorted.
+	assert.Contains(t, err.Error(), "available profiles: [aws default minimal]")
+}
+
+// A spec naming a profile this build lacks must fail BEFORE any cache interaction,
+// in buildAssertionSetup rather than at signing time.
+func TestResolveExchangeInputs_UnknownProfileFailsClosed(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-gone", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	// Register the profile, create the spec, then drop the registry entry — the
+	// shape of "a profile removed from a later build".
+	require.NoError(t, c.assertionProfileRegistry.Register(shapeProfile{name: "retired"}))
+	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name: "prof-gone", Type: "vault_token", Source: "aws-gone",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+			credential.ConfigAssertionProfile:   "retired",
+			"mint_method":                       "secrets_manager",
+			"secret_id":                         "prod/db",
+		}),
+	}))
+	c.assertionProfileRegistry = credential.NewAssertionProfileRegistry()
+	require.NoError(t, profiles.RegisterBuiltinProfiles(c.assertionProfileRegistry))
+
+	te := &logical.TokenEntry{
+		CredentialSpec: "prof-gone", PrincipalID: "p", NamespaceID: "n", MountAccessor: "m",
+	}
+	_, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), te)
+	require.Error(t, err, "a spec naming an absent profile must fail closed, not mint the default shape")
+	assert.Contains(t, err.Error(), "unknown assertion profile: retired")
 }

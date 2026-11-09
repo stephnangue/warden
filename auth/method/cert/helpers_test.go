@@ -1,13 +1,28 @@
 package cert
 
 import (
+	"context"
 	"crypto/x509"
-	"github.com/stephnangue/warden/logical"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"net/url"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/stephnangue/warden/logical"
 )
+
+// createTestBackend creates a cert backend for testing.
+func createTestBackend(t *testing.T) (*certAuthBackend, context.Context) {
+	t.Helper()
+	ctx := context.Background()
+	backend, err := Factory(ctx, &logical.BackendConfig{
+		Logger:      testLogger(),
+		StorageView: newInmemStorage(),
+	})
+	require.NoError(t, err)
+	return backend.(*certAuthBackend), ctx
+}
 
 func TestIsValidPrincipalClaim(t *testing.T) {
 	tests := []struct {
@@ -73,7 +88,7 @@ func TestPrincipalClaimAllowedValues(t *testing.T) {
 }
 
 // =============================================================================
-// CertRole.ParseTokenTTL Tests
+// extractPrincipal with empty fields
 // =============================================================================
 
 func TestExtractPrincipal_EmptyDNSSAN(t *testing.T) {
@@ -95,16 +110,6 @@ func TestExtractPrincipal_EmptyURISAN(t *testing.T) {
 		URIs: []*url.URL{},
 	}
 	assert.Equal(t, "", extractPrincipal(cert, "uri_san"))
-}
-
-// =============================================================================
-// handleLogin edge cases
-// =============================================================================
-
-func TestMatchesAnyGlob(t *testing.T) {
-	assert.True(t, matchesAnyGlob([]string{"a.example.com", "b.example.com"}, []string{"*.example.com"}))
-	assert.False(t, matchesAnyGlob([]string{"a.other.com"}, []string{"*.example.com"}))
-	assert.False(t, matchesAnyGlob([]string{}, []string{"*"}))
 }
 
 // =============================================================================

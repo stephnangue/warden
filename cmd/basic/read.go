@@ -2,6 +2,7 @@ package basic
 
 import (
 	"fmt"
+	"maps"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -77,7 +78,19 @@ func runRead(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// A response's warnings (a configuration read that names a removed
+	// setting, an auth path naming a mount of the wrong kind) go to stderr.
+	// They stay in the structured output; the table leaves them out, having
+	// shown them already.
+	warnings := helpers.WarningsFromData(resource.Data)
+	helpers.PrintWarnings(warnings)
+
 	return helpers.RenderMap(resource.Data, func() {
-		helpers.PrintMapAsTable(resource.Data)
+		table := resource.Data
+		if len(warnings) > 0 {
+			table = maps.Clone(resource.Data)
+			delete(table, "warnings")
+		}
+		helpers.PrintMapAsTable(table)
 	})
 }

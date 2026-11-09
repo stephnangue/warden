@@ -25,21 +25,16 @@ cares about *one* of the two modes per task.
 ## Configure the CLI/SDK
 
 You need two values:
-- `<gateway-url>` is the gateway URL for the role you chose, embedded in
-  the role's `description` returned by the `list_roles` MCP tool. It is a
-  **relative** path `/v1/<namespace>/<mount>/role/<role>/gateway/`
-  (e.g. `/v1/scaleway/role/cloud-reader/gateway/`,
-  `/v1/team-data/scaleway-prod/role/cloud-reader/gateway/`) — prepend
-  `$WARDEN_ADDR`. REST mode appends the Scaleway API path after it; S3
-  mode uses it as the endpoint.
+- `<gateway-url>` is the `url` of the role you chose, as returned by the
+  `list_roles` discovery tool — prepend `$WARDEN_ADDR`. REST mode appends
+  the Scaleway API path after it; S3 mode uses it as the endpoint.
 - `<role>` is the same role name. S3 mode also puts it in
   `AWS_ACCESS_KEY_ID` (Warden reads it from the SigV4 header).
 
-**Choosing a role.** The role rides in the URL path (the `role/<role>` segment
-of `<gateway-url>`, or `AWS_ACCESS_KEY_ID` for S3). To act as a different role,
-use that role's `<gateway-url>` from `list_roles` — each role provides its own
-role-bearing URL in its description. If the operator has set a mount
-`default_role`, a request with no role at all falls back to it.
+**Choosing a role.** The role rides in `<gateway-url>` (or in
+`AWS_ACCESS_KEY_ID` for S3). To act as a different role, use that role's `url`
+from `list_roles`. If the operator has set a mount `default_role`, a request
+with no role at all falls back to it.
 
 Present identity as `Authorization: Bearer <jwt>` for REST, or as the JWT
 in the SigV4 secret slots for S3 (below); an mTLS client cert also works.

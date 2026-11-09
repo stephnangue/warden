@@ -32,7 +32,7 @@ func BearerAPIKeyExtractor(req *logical.Request) (map[string]string, error) {
 }
 
 // HeaderAPIKeyExtractor creates an extractor that injects api_key into a custom header.
-// Used by: Anthropic (x-api-key header).
+// Used by: New Relic (Api-Key header).
 func HeaderAPIKeyExtractor(headerName string) CredentialExtractor {
 	return func(req *logical.Request) (map[string]string, error) {
 		if req.Credential == nil {

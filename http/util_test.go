@@ -451,3 +451,78 @@ func TestRespondError_StatusCodes(t *testing.T) {
 		})
 	}
 }
+
+// =============================================================================
+// Header-mismatch responses
+// =============================================================================
+
+// A header mismatch is a protocol fault, not an authorization decision, and
+// gets a real JSON-RPC envelope rather than the OAuth-shaped 403 a policy
+// denial gets. Returning the error the modern spec defines is what stops a
+// dual-era client reading the refusal as "not permitted" and downgrading to
+// initialize instead of correcting its headers.
+func TestRespondMCPHeaderMismatch_JSONRPCEnvelope(t *testing.T) {
+	w := httptest.NewRecorder()
+
+	respondMCPHeaderMismatch(w, json.RawMessage(`42`), true)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Empty(t, w.Header().Get("WWW-Authenticate"), "this is not an auth failure")
+
+	var got struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Error   struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, "2.0", got.JSONRPC)
+	assert.Equal(t, "42", string(got.ID), "the request id must be echoed")
+	assert.Equal(t, -32020, got.Error.Code)
+	assert.NotEmpty(t, got.Error.Message)
+}
+
+// The id is echoed verbatim, whatever JSON-RPC type it carries.
+func TestRespondMCPHeaderMismatch_EchoesIDShapes(t *testing.T) {
+	for _, raw := range []string{`42`, `"req-1"`, `null`} {
+		w := httptest.NewRecorder()
+		respondMCPHeaderMismatch(w, json.RawMessage(raw), true)
+
+		var got struct {
+			ID json.RawMessage `json:"id"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+		assert.Equal(t, raw, string(got.ID))
+	}
+}
+
+// A notification carries no id, so the envelope renders null rather than
+// omitting the field — a JSON-RPC error response always has one.
+func TestRespondMCPHeaderMismatch_NotificationRendersNullID(t *testing.T) {
+	w := httptest.NewRecorder()
+
+	respondMCPHeaderMismatch(w, nil, false)
+
+	var got struct {
+		ID json.RawMessage `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, "null", string(got.ID))
+}
+
+// The message must not name the header, the value, or which half of the
+// check fired: the client already knows what it sent, and an attacker should
+// not be handed a probe for the shape of the validation.
+func TestRespondMCPHeaderMismatch_LeaksNothing(t *testing.T) {
+	w := httptest.NewRecorder()
+
+	respondMCPHeaderMismatch(w, json.RawMessage(`"id"`), true)
+
+	body := w.Body.String()
+	for _, leak := range []string{"Mcp-Method", "Mcp-Name", "MCP-Protocol-Version", "tools/call"} {
+		assert.NotContains(t, body, leak)
+	}
+}

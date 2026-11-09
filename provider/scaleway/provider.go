@@ -66,12 +66,11 @@ S3 Object Storage:
 
   Supported S3 regions: fr-par, nl-ams, pl-waw, it-mil
 
-Three credential source types are supported:
+Two credential source types are supported:
 - scaleway (static_keys): Static API keys stored on the spec
 - scaleway (dynamic_keys): Ephemeral API keys minted via the IAM API
   (POST /iam/v1alpha1/api-keys) with automatic revocation on lease expiry.
   The management key supports automatic rotation.
-- hvault (static_scaleway): Keys fetched from a Vault/OpenBao KV v2 secret
 
 Configuration:
 - scaleway_url: Scaleway API base URL (default: https://api.scaleway.com)

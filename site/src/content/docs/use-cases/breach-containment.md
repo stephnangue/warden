@@ -1,5 +1,7 @@
 ---
 title: "Breach containment"
+sidebar:
+  order: 3
 ---
 
 _When an agent is compromised, keep the damage small._
@@ -42,7 +44,7 @@ bounded event rather than a catastrophic one:
   from an external vault per request — so there is no key-trove to compromise, the very
   honeypot a central broker would otherwise become.
 - **Every call is still bounded.** Authority rides on each request and is checked
-  at runtime against the agent's [policy](/concepts/policies/), which is
+  at runtime against the agent's [policy](/identity/policies/), which is
   **default-deny**. A request that exceeds what the agent is allowed is refused
   before it reaches the upstream — no matter what the prompt, the memory, or the
   chat history says. There is no ambient, pre-granted access sitting on the
@@ -51,9 +53,14 @@ bounded event rather than a catastrophic one:
   [lease](/concepts/credentials/#lifetime-and-revocation), so even an allowed
   call buys only a brief window; where the upstream supports it, Warden also
   revokes early. And because [roles are
-  per-request](/concepts/roles/#roles-are-per-request), an agent that needs
+  per-request](/identity/roles/), an agent that needs
   elevated access for one step names a higher-privilege role only for that call,
   rather than carrying the elevation through everything else it does.
+
+A registered agent can also be stopped in one place. Suspending its
+[entity](/identity/entities/#lifecycle) refuses its next request, through every
+mount and every upstream, with no token to revoke — and the members of its
+[sponsor](/identity/sponsors/) group can do it themselves.
 
 The same mechanics turn ordinary mistakes into **recoverable** ones. A hallucinated
 request that overruns the agent's scope is denied and recorded, with no state
@@ -74,7 +81,8 @@ of an incident to clean up.
 An incident-response agent reaching a `grafana` mount is prompt-injected by a
 malicious annotation in a dashboard it reads: the embedded text tells it to delete
 every dashboard and copy an API key to an external host. Neither lands. There is no
-Grafana API key in the agent's environment to copy — Warden holds it — and the
+Grafana API key in the agent's environment to copy — Warden fetches it from the team's
+secret store per request and injects it upstream — and the
 agent's role grants only `read` on the mount, so the `DELETE` calls are refused
 before they reach Grafana, each recorded as a denied attempt with no state change.
 The injection becomes a logged non-event the on-call engineer reviews later, not an
@@ -88,7 +96,7 @@ outage to recover from.
   refuses an out-of-scope request.
 - [Credentials](/concepts/credentials/#lifetime-and-revocation) — lease,
   expiry, and revocation that cap even an allowed call.
-- [Roles](/concepts/roles/#roles-are-per-request) — per-request role binding
+- [Roles](/identity/roles/) — the role each request names, granted per request,
   that narrows each step.
 - [Audit & attribution](/use-cases/audit-attribution/) — where the contained attempt is
   recorded.

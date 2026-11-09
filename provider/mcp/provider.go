@@ -3,20 +3,28 @@ package mcp
 import (
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/httpproxy"
 )
 
-// DefaultMCPTimeout caps a single MCP session. MCP responses can stream over
-// SSE for many tool calls, so the default sits well above the per-request
-// shapes that govern REST providers; operators raise this for longer sessions.
-// The value matches mcp_aws (the other MCP provider) so operators learn one
-// timeout knob across every MCP mount.
-const DefaultMCPTimeout = 10 * time.Minute
+// DefaultMCPTimeout caps a single call other than subscriptions/listen —
+// a tool call, a listing, a resource read. Open-ended streaming is no longer
+// its job: listen_timeout took that over, so this is a unary ceiling and
+// nothing more, and it dropped from ten minutes to sixty seconds when it
+// stopped having to cover a subscription.
+//
+// A ceiling is not a delay, but a long one multiplies how long a stalled
+// call holds its goroutine and both connections, and the transport caps
+// neither the number of upstream connections nor a peer that sends headers
+// and then dribbles. A tool that genuinely runs for minutes is meant to
+// report progress and be polled, not to hold a request open; mounts that
+// front one anyway raise timeout explicitly. The value matches mcp_aws so
+// operators learn one timeout knob across every MCP mount.
+const DefaultMCPTimeout = 60 * time.Second
 
 // Spec defines the generic mcp provider configuration for the httpproxy
 // framework.
@@ -54,6 +62,32 @@ var Spec = &httpproxy.ProviderSpec{
 	// here would break one-shot JSON clients.
 
 	ShouldEnforceMCPPolicy: shouldEnforceMCPPolicy,
+
+	// A call Warden fails — a policy refusal above all — is answered as a
+	// JSON-RPC error for that call, so the client keeps its session.
+	RenderGatewayError: httpproxy.RenderMCPGatewayError,
+
+	// A subscriptions/listen stream is open-ended by design and answers to
+	// listen_timeout; every other call keeps the unary ceiling above.
+	SelectTimeout: httpproxy.SelectListenTimeout,
+	ExtraConfigFields: map[string]*framework.FieldSchema{
+		httpproxy.ListenTimeoutKey: httpproxy.ListenTimeoutField(),
+	},
+	OnConfigRead: func(state map[string]any) map[string]any {
+		return map[string]any{
+			httpproxy.ListenTimeoutKey: httpproxy.ReadListenTimeout(state).String(),
+		}
+	},
+	OnConfigWrite: func(d *framework.FieldData, state map[string]any) (map[string]any, error) {
+		if err := httpproxy.WriteListenTimeout(d, state); err != nil {
+			return nil, err
+		}
+		return state, nil
+	},
+	OnInitialize: func(config map[string]any, state map[string]any) map[string]any {
+		httpproxy.InitializeListenTimeout(config, state)
+		return state
+	},
 }
 
 // extractBearerToken injects the minted credential as Authorization: Bearer.
@@ -90,30 +124,22 @@ func extractBearerToken(req *logical.Request) (map[string]string, error) {
 	return map[string]string{"Authorization": "Bearer " + token}, nil
 }
 
-// shouldEnforceMCPPolicy opts the generic mcp provider into CBP
-// body-authoritative mcp { } enforcement for the subset of traffic where it is
-// meaningful: JSON-RPC POSTs. GET (SSE reconnect) and DELETE (session close),
-// and any non-JSON Content-Type, decline and pass through under
-// token-scope-only enforcement.
+// shouldEnforceMCPPolicy opts the generic mcp provider into body-authoritative
+// MCP policy enforcement for every POST, the only verb that carries JSON-RPC.
+// GET (SSE reconnect) and DELETE (session close) carry no method to authorise
+// and pass through under token-scope-only enforcement.
+//
+// The Content-Type is deliberately not consulted. Deciding by the label let a
+// caller relabel a tools/call (text/plain, no type at all) past every MCP rule
+// and on to an upstream that parses JSON whatever the header says. Enforcing
+// every POST hands the body to the strict JSON-RPC parser, so a body that is
+// not JSON-RPC is refused as malformed, and one that is is judged on what it
+// asks for.
 func shouldEnforceMCPPolicy(req *logical.Request) bool {
 	if req == nil || req.HTTPRequest == nil {
 		return false
 	}
-	r := req.HTTPRequest
-	if r.Method != http.MethodPost {
-		return false
-	}
-	ct := r.Header.Get("Content-Type")
-	if ct == "" {
-		return false
-	}
-	// Trim a charset / boundary parameter (e.g. "application/json; charset=utf-8")
-	// before comparing to the bare media type.
-	if i := strings.IndexByte(ct, ';'); i >= 0 {
-		ct = ct[:i]
-	}
-	ct = strings.TrimSpace(strings.ToLower(ct))
-	return ct == "application/json"
+	return req.HTTPRequest.Method == http.MethodPost
 }
 
 // Factory creates a new generic mcp provider backend.
@@ -147,6 +173,12 @@ canonical server URL. JSON-RPC bodies, the Accept header, and the
 Mcp-Session-Id header pass through unchanged. Streamable HTTP responses
 (JSON or SSE) are streamed without buffering.
 
+Mcp-Session-Id is legacy-era and is forwarded for the upstreams that still
+use it; a server speaking 2026-07-28 holds no session and ignores it. The
+transport headers that revision introduced — MCP-Protocol-Version, Mcp-Method
+and Mcp-Name — are validated against the parsed body when a client sends
+them, and required of a client that announces the revision.
+
 The role can be provided via the X-Warden-Role header, or embedded in
 the URL path:
   /mcp/role/{role}/gateway/
@@ -170,33 +202,80 @@ check the upstream's MCP auth before assuming a credspec can be reused.
 Policy:
 Two layers of authorization apply to MCP traffic. The minted bearer token is
 the security boundary — its scopes bound what the agent can actually do at the
-upstream regardless of what Warden lets through. On top of that, Warden's CBP
-policies support an mcp { } block for governance-style restrictions enforced at
-the gateway: allow- and deny-lists for JSON-RPC methods, tool names, resource
-URIs, prompt names, and selected tool arguments. Enforcement is
+upstream regardless of what Warden lets through. On top of that, Warden supports
+MCP policies for governance-style restrictions enforced at the gateway: a
+document of its own, written to sys/policies/mcp/<name> and attached to the
+token alongside the capability policy that grants the path, whose stanzas group
+allow- and deny-lists by what they govern — methods, tools, resources, prompts —
+plus a CEL condition over the call arguments. An MCP policy only ever narrows:
+the request must already be allowed by a capability policy. Enforcement is
 body-authoritative — Warden strict-parses the JSON-RPC request body and matches
 against the parsed body, never against client-supplied request headers. The
 parser rejects malformed bodies, duplicate keys at any depth, empty batches, and
 oversized payloads; on any structural failure the request denies with a specific
 rule_type (malformed_jsonrpc, duplicate_key, oversized_body, batch_empty,
-missing_body, malformed_params). Denied requests return HTTP 403 with an RFC
-6750 WWW-Authenticate header and a small JSON body the agent SDK surfaces as a
-structured tool-call failure.
+missing_body, malformed_params, batch_unsupported, header_mismatch). Denied
+requests return HTTP 403 with an RFC 6750 WWW-Authenticate header and a
+JSON-RPC error (code -32090) carrying the call's id, which the agent SDK
+surfaces as that one call failing; the session stays open. Every other failure
+Warden raises itself is answered as a JSON-RPC error the same way.
 
-Body parsing runs only for POST requests carrying Content-Type
-application/json. Other request shapes do not produce a parsed body descriptor:
-when a policy in scope binds an mcp { } block to a path that also receives
-non-POST or non-JSON traffic, those requests deny with rule_type missing_body.
-Operators scope mcp { } blocks to paths they expect to carry JSON-RPC POSTs.
+Two refusals are protocol faults rather than authorization decisions and are
+answered differently. A request whose transport headers contradict its body
+gets HTTP 400 and a JSON-RPC -32020 with the request id echoed, so a client
+that speaks both eras corrects its headers instead of reading a 403 as "not
+permitted" and downgrading to initialize. A batch from a client announcing
+2026-07-28 is refused as batch_unsupported — batching left the spec in
+2025-06-18 — while a legacy client's batch is still accepted and every element
+policy-checked.
 
-Policies without an mcp { } block in scope skip the strict parser entirely
-— no body buffering or parsing is performed on those paths.
+The methods a contract governs span both eras. server/discover joins
+initialize, ping and notifications/* as exempt from the method allow-list:
+a modern client sends it as the first request of every connection, and it
+discloses protocol versions, coarse capabilities and serverInfo, never tool or
+resource names. Naming it in denied_methods still blocks it. Subscribing to a
+resource's updates answers to the resources family exactly as reading it does,
+whether the caller subscribes with the modern subscriptions/listen or the
+legacy resources/subscribe — the content never arrives either way, but the
+resource's existence and the timing of every change would.
+
+Body parsing runs for every POST, whatever its Content-Type: a POST whose body
+is not well-formed JSON-RPC is refused, so a relabelled call cannot slip past the
+rules. GET (SSE reconnect) and DELETE (session close) carry no body to parse and
+are judged by capability policy alone.
+
+Paths with no MCP stanza in scope skip the strict parser entirely — no body
+buffering or parsing is performed on them.
+
+Deadlines:
+Two knobs, chosen by what the request is rather than by how it responds.
+subscriptions/listen — and the legacy SSE GET it replaced — take
+listen_timeout, because a subscription is open-ended by design. Everything
+else takes timeout.
+
+The boundary surprises people, so state it plainly: a long-running tool call
+that streams progress notifications is still capped by timeout, not by
+listen_timeout. Raising listen_timeout will not save it. That is the intended
+split — a unary call should be bounded more tightly than an open-ended
+subscription — and the alternative is worse: raising timeout far enough to
+hold a stream open would hand every hung call on the mount the same ceiling,
+each one holding a goroutine and two connections for the duration.
+
+A severed stream is survivable. The spec treats an abrupt drop as a reconnect
+trigger, and a modern server holds no cross-connection subscription state, so
+the client reconnects with a fresh subscription. Notifications that would have
+arrived in the gap are lost.
 
 Configuration:
 - mcp_url: MCP server base URL (required; no default)
 - max_body_size: Maximum request body size (default: 10MB, max: 100MB)
-- timeout: Session timeout (default: 10m). Raise for long agent sessions
-    that keep an SSE stream open across many tool calls.
+- timeout: Deadline for a single call — a tool call, a listing, a resource
+    read (default: 60s). Raise it for a mount fronting a genuinely slow tool;
+    it is also how long a hung call on this mount keeps its goroutine and its
+    two connections alive.
+- listen_timeout: Deadline for a subscriptions/listen stream (default: 10m).
+    Raise it for long-lived subscriptions. It governs that method only: a
+    long-running tool call streaming progress is still capped by timeout.
 - auto_auth_path: Auth mount path for implicit authentication (e.g.,
     'auth/jwt/')
 - default_role: Fallback role when not specified by header or URL path

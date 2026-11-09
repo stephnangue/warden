@@ -138,55 +138,40 @@ func TestBuildBundleSet_SkipsUnprimedFederated(t *testing.T) {
 }
 
 // =============================================================================
-// VerifyX509SVID
+// VerifyX509SVIDChain
 // =============================================================================
 
-func TestVerifyX509SVID_ValidSVID(t *testing.T) {
+func TestVerifyX509SVIDChain_ValidSVID(t *testing.T) {
 	caCert, caKey, caPEM := testCA(t)
 	set, err := BuildBundleSet([]*TrustDomain{{Name: "example.org", BundlePEM: caPEM}})
 	require.NoError(t, err)
 
 	svid := testSVID(t, caCert, caKey, "spiffe://example.org/ns/default/sa/foo")
 
-	id, chains, err := VerifyX509SVID(set, []*x509.Certificate{svid}, mustTD(t, "example.org"), nil)
+	id, chains, err := VerifyX509SVIDChain(set, []*x509.Certificate{svid})
 	require.NoError(t, err)
 	assert.Equal(t, "spiffe://example.org/ns/default/sa/foo", id.String())
 	assert.NotEmpty(t, chains)
 }
 
-func TestVerifyX509SVID_NilSet(t *testing.T) {
+func TestVerifyX509SVIDChain_NilSet(t *testing.T) {
 	caCert, caKey, _ := testCA(t)
 	svid := testSVID(t, caCert, caKey, "spiffe://example.org/foo")
-	_, _, err := VerifyX509SVID(nil, []*x509.Certificate{svid}, mustTD(t, "example.org"), nil)
+	_, _, err := VerifyX509SVIDChain(nil, []*x509.Certificate{svid})
 	require.Error(t, err)
 }
 
-func TestVerifyX509SVID_UnknownTrustDomain(t *testing.T) {
+func TestVerifyX509SVIDChain_UnknownTrustDomain(t *testing.T) {
 	caCert, caKey, caPEM := testCA(t)
 	set, err := BuildBundleSet([]*TrustDomain{{Name: "example.org", BundlePEM: caPEM}})
 	require.NoError(t, err)
 
 	svid := testSVID(t, caCert, caKey, "spiffe://other.org/foo")
-	_, _, err = VerifyX509SVID(set, []*x509.Certificate{svid}, mustTD(t, "other.org"), nil)
+	_, _, err = VerifyX509SVIDChain(set, []*x509.Certificate{svid})
 	require.Error(t, err)
 }
 
-func TestVerifyX509SVID_TrustDomainMismatch(t *testing.T) {
-	_, _, pemA := testCA(t)
-	caB, keyB, pemB := testCA(t)
-	set, err := BuildBundleSet([]*TrustDomain{
-		{Name: "example.org", BundlePEM: pemA},
-		{Name: "other.org", BundlePEM: pemB},
-	})
-	require.NoError(t, err)
-
-	svid := testSVID(t, caB, keyB, "spiffe://other.org/foo")
-	_, _, err = VerifyX509SVID(set, []*x509.Certificate{svid}, mustTD(t, "example.org"), nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not match role trust domain")
-}
-
-func TestVerifyX509SVID_TwoURISANs(t *testing.T) {
+func TestVerifyX509SVIDChain_TwoURISANs(t *testing.T) {
 	caCert, caKey, caPEM := testCA(t)
 	set, err := BuildBundleSet([]*TrustDomain{{Name: "example.org", BundlePEM: caPEM}})
 	require.NoError(t, err)
@@ -195,12 +180,12 @@ func TestVerifyX509SVID_TwoURISANs(t *testing.T) {
 		extra, _ := url.Parse("spiffe://example.org/bar")
 		tmpl.URIs = append(tmpl.URIs, extra)
 	})
-	_, _, err = VerifyX509SVID(set, []*x509.Certificate{svid}, mustTD(t, "example.org"), nil)
+	_, _, err = VerifyX509SVIDChain(set, []*x509.Certificate{svid})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "more than one URI SAN")
 }
 
-func TestVerifyX509SVID_CALeafRejected(t *testing.T) {
+func TestVerifyX509SVIDChain_CALeafRejected(t *testing.T) {
 	caCert, caKey, caPEM := testCA(t)
 	set, err := BuildBundleSet([]*TrustDomain{{Name: "example.org", BundlePEM: caPEM}})
 	require.NoError(t, err)
@@ -209,48 +194,28 @@ func TestVerifyX509SVID_CALeafRejected(t *testing.T) {
 		tmpl.IsCA = true
 		tmpl.BasicConstraintsValid = true
 	})
-	_, _, err = VerifyX509SVID(set, []*x509.Certificate{svid}, mustTD(t, "example.org"), nil)
+	_, _, err = VerifyX509SVIDChain(set, []*x509.Certificate{svid})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "CA flag")
 }
 
-func TestVerifyX509SVID_WrongCA(t *testing.T) {
+func TestVerifyX509SVIDChain_WrongCA(t *testing.T) {
 	_, _, pemA := testCA(t)
 	caB, keyB, _ := testCA(t)
 	set, err := BuildBundleSet([]*TrustDomain{{Name: "example.org", BundlePEM: pemA}})
 	require.NoError(t, err)
 
 	svid := testSVID(t, caB, keyB, "spiffe://example.org/foo")
-	_, _, err = VerifyX509SVID(set, []*x509.Certificate{svid}, mustTD(t, "example.org"), nil)
+	_, _, err = VerifyX509SVIDChain(set, []*x509.Certificate{svid})
 	require.Error(t, err)
 }
 
-func TestVerifyX509SVID_NonSpiffeURIRejected(t *testing.T) {
+func TestVerifyX509SVIDChain_NonSpiffeURIRejected(t *testing.T) {
 	caCert, caKey, caPEM := testCA(t)
 	set, err := BuildBundleSet([]*TrustDomain{{Name: "example.org", BundlePEM: caPEM}})
 	require.NoError(t, err)
 
 	svid := testSVID(t, caCert, caKey, "https://example.org/not-spiffe")
-	_, _, err = VerifyX509SVID(set, []*x509.Certificate{svid}, mustTD(t, "example.org"), nil)
+	_, _, err = VerifyX509SVIDChain(set, []*x509.Certificate{svid})
 	require.Error(t, err)
-}
-
-func TestVerifyX509SVID_AllowedSPIFFEIDs(t *testing.T) {
-	caCert, caKey, caPEM := testCA(t)
-	set, err := BuildBundleSet([]*TrustDomain{{Name: "example.org", BundlePEM: caPEM}})
-	require.NoError(t, err)
-
-	svid := testSVID(t, caCert, caKey, "spiffe://example.org/ns/default/sa/api")
-	td := mustTD(t, "example.org")
-
-	t.Run("match", func(t *testing.T) {
-		id, _, err := VerifyX509SVID(set, []*x509.Certificate{svid}, td, []string{"spiffe://example.org/ns/+/sa/*"})
-		require.NoError(t, err)
-		assert.Equal(t, "spiffe://example.org/ns/default/sa/api", id.String())
-	})
-	t.Run("mismatch", func(t *testing.T) {
-		_, _, err := VerifyX509SVID(set, []*x509.Certificate{svid}, td, []string{"spiffe://example.org/ns/other/*"})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not allowed by role")
-	})
 }

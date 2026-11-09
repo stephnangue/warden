@@ -36,7 +36,6 @@ const (
 	nsSource   = "ns-openai-src"
 	nsSpec     = "ns-openai-cred"
 	nsUserAuth = "auth/ns-user-jwt/"
-	nsUserRole = "ns-user"
 	nsAgentCN  = "agent-ns"
 )
 
@@ -154,10 +153,9 @@ func setupNamespaceEnv(t *testing.T, port int, upstreamURL string) nsEnv {
 
 	nsMust(t, port, "POST", "sys/auth/ns-user-jwt", `{"type":"jwt"}`, "mount user jwt in namespace")
 	nsMust(t, port, "PUT", "auth/ns-user-jwt/config",
-		fmt.Sprintf(`{"mode":"oidc","oidc_discovery_url":%q,"bound_issuer":%q}`, h.HydraIssuer, h.HydraIssuer),
+		fmt.Sprintf(`{"mode":"oidc","oidc_discovery_url":%q,"bound_issuer":%q,"bound_audiences":[%q],"user_claim":"sub","entity_kind":"human"}`,
+			h.HydraIssuer, h.HydraIssuer, h.HydraAudience),
 		"configure namespace user jwt")
-	nsMust(t, port, "POST", "auth/ns-user-jwt/role/"+nsUserRole,
-		`{"user_claim":"sub","token_ttl":3600}`, "create namespace user role")
 
 	nsMust(t, port, "POST", "sys/providers/"+nsMount,
 		`{"type":"openai","description":"e2e namespaced openai"}`, "mount provider in namespace")
@@ -168,7 +166,6 @@ func setupNamespaceEnv(t *testing.T, port int, upstreamURL string) nsEnv {
 			"tls_skip_verify": true,
 			"auto_auth_path":  "auth/cert/",
 			"user_auth_path":  nsUserAuth,
-			"user_auth_role":  nsUserRole,
 		}), "configure namespaced provider")
 
 	nsMust(t, port, "POST", "sys/cred/sources/"+nsSource, `{"type":"local"}`,
@@ -186,13 +183,10 @@ func setupNamespaceEnv(t *testing.T, port int, upstreamURL string) nsEnv {
 				nsMount+"/gateway*"),
 		}), "create namespaced policy")
 
-	nsMust(t, port, "POST", "auth/cert/role/"+nsCertRole,
-		nsJSON(t, map[string]any{
-			"allowed_common_names": []string{nsAgentCN},
-			"token_policies":       []string{nsPolicy},
-			"cred_spec_name":       nsSpec,
-			"token_ttl":            3600,
-		}), "create namespaced cert role")
+	// The role and its group live in the namespace too: the group's mount
+	// selector names the namespace's own auth/cert/, relative to it.
+	h.GrantRoleInNS(t, port, nsPath, "auth/cert/", nsCertRole,
+		h.Role{Policies: []string{nsPolicy}, CredSpec: nsSpec}, h.Rule{"cn": {nsAgentCN}})
 
 	return nsEnv{caPEM: caPEM, caKey: caKey}
 }
@@ -279,14 +273,13 @@ func TestNamespace_RootCertificateIsNotAccepted(t *testing.T) {
 	ensureNamespaceEnv(t)
 
 	// Signed by the ROOT suite's CA but carrying the common name the NAMESPACE's
-	// role allows. Every other attribute matches what the namespace expects, so
-	// the CA is the only thing that can refuse it.
+	// group grants the role to. Every other attribute matches what the namespace
+	// expects, so the CA is the only thing that can refuse it.
 	//
 	// Using the root suite's own certificate instead would prove nothing: its
-	// common name is the root's, which the namespace role does not allow, and cert
-	// auth answers the same 401 for a rejected common name as for an untrusted
-	// CA. It would fail identically whether or not the namespace inherited the
-	// root's trust — which is the possibility this row exists to exclude.
+	// common name is the root's, which the namespace's group does not grant, so
+	// it would be refused whether or not the namespace inherited the root's
+	// trust — which is the possibility this row exists to exclude.
 	rootCAButNamespaceCN, _ := h.GenerateClientCert(t, agentCAPEM, agentCAKey, nsAgentCN)
 	status, body := nsRequest(t, leaderPort, rootCAButNamespaceCN, h.FullChainUserJWT(t), "probe")
 

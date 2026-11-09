@@ -25,6 +25,7 @@ const (
 	ExitServer       ExitCode = 8
 	ExitConflict     ExitCode = 9
 	ExitSealed       ExitCode = 10
+	ExitGone         ExitCode = 11
 )
 
 // ErrorCode is the stable string identifier surfaced in JSON envelopes.
@@ -42,6 +43,7 @@ const (
 	CodeServer       ErrorCode = "server"
 	CodeConflict     ErrorCode = "conflict"
 	CodeSealed       ErrorCode = "sealed"
+	CodeGone         ErrorCode = "gone"
 )
 
 // Sentinel errors. Wrap with fmt.Errorf("context: %w", helpers.ErrXxx) so the
@@ -56,6 +58,7 @@ var (
 	ErrServer       = errors.New("server error")
 	ErrConflict     = errors.New("conflict")
 	ErrSealed       = errors.New("warden is sealed or uninitialized")
+	ErrGone         = errors.New("gone")
 )
 
 // WardenError is the JSON envelope emitted on stderr when -output is json or
@@ -76,13 +79,24 @@ func RenderError(err error) ExitCode {
 		return ExitOK
 	}
 	code, exit := classify(err)
+	var he *hintedError
+	if !errors.As(err, &he) {
+		if hint := ProofRefusal(err); hint != "" {
+			err = WithHint(err, hint)
+		}
+	}
 
 	format := ResolveFormat()
 	switch format {
 	case FormatJSON, FormatNDJSON:
 		emitJSONError(code, err, format == FormatJSON)
 	default:
-		fmt.Fprintln(errWriter, err.Error())
+		msg := err.Error()
+		var he *hintedError
+		if errors.As(err, &he) {
+			msg += " (" + he.hint + ")"
+		}
+		fmt.Fprintln(errWriter, msg)
 	}
 	return exit
 }
@@ -115,6 +129,8 @@ func classify(err error) (ErrorCode, ExitCode) {
 		return CodeConflict, ExitConflict
 	case errors.Is(err, ErrSealed):
 		return CodeSealed, ExitSealed
+	case errors.Is(err, ErrGone):
+		return CodeGone, ExitGone
 	}
 
 	// 3. Network/transport errors (DNS, connection refused, timeout, TLS).
@@ -140,6 +156,10 @@ func classifyHTTPStatus(status int) (ErrorCode, ExitCode) {
 		return CodeNotFound, ExitNotFound
 	case status == 409:
 		return CodeConflict, ExitConflict
+	case status == 410:
+		// Removed, not malformed: the same request will never succeed, and
+		// the server's message names what replaced it.
+		return CodeGone, ExitGone
 	case status >= 500:
 		return CodeServer, ExitServer
 	case status >= 400:
@@ -187,11 +207,31 @@ func isCobraUsageError(err error) bool {
 	return false
 }
 
+// WithHint returns err with a recovery hint for this command: it replaces the
+// category's default hint in the JSON envelope and follows the message in
+// text output. err keeps its message and its classification.
+func WithHint(err error, hint string) error {
+	return &hintedError{err: err, hint: hint}
+}
+
+type hintedError struct {
+	err  error
+	hint string
+}
+
+func (e *hintedError) Error() string { return e.err.Error() }
+func (e *hintedError) Unwrap() error { return e.err }
+
 func emitJSONError(code ErrorCode, err error, pretty bool) {
+	hint := DefaultHint(code)
+	var he *hintedError
+	if errors.As(err, &he) {
+		hint = he.hint
+	}
 	we := WardenError{
 		Code:    code,
 		Message: humanMessage(err),
-		Hint:    DefaultHint(code),
+		Hint:    hint,
 	}
 	envelope := map[string]any{"error": we}
 	var b []byte
@@ -220,7 +260,7 @@ func humanMessage(err error) string {
 func DefaultHint(code ErrorCode) string {
 	switch code {
 	case CodeAuth:
-		return "Set WARDEN_TOKEN, configure WARDEN_CLIENT_CERT/WARDEN_CLIENT_KEY for mTLS, or pass an Authorization: Bearer JWT"
+		return "Run warden login, set WARDEN_TOKEN, configure WARDEN_CLIENT_CERT/WARDEN_CLIENT_KEY for mTLS, or pass an Authorization: Bearer JWT"
 	case CodeForbidden:
 		return "Your identity does not have permission for this operation; check your role or policy"
 	case CodeNetwork:
@@ -229,6 +269,8 @@ func DefaultHint(code ErrorCode) string {
 		return "The warden server returned an internal error; check server logs"
 	case CodeConflict:
 		return "The resource already exists or has been modified concurrently"
+	case CodeGone:
+		return "This endpoint was removed; the message names what replaces it"
 	case CodeSealed:
 		return "Unseal warden with `warden operator unseal` (or initialize it with `warden operator init`)"
 	case CodeUsage:

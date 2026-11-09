@@ -3,12 +3,17 @@
 
 package logical
 
-// MCPPolicyEnforced is implemented by backends that participate in CBP
-// `mcp { }` body-authoritative policy enforcement. The core handler
-// calls ShouldEnforceMCPPolicy on every matched backend; when it
-// returns enforce=true the handler buffers the request body (up to
-// cap bytes), strict-parses it as JSON-RPC, and stashes the resulting
+// MCPPolicyEnforced is implemented by backends that participate in
+// body-authoritative MCP policy enforcement. The core handler calls
+// ShouldEnforceMCPPolicy on every matched backend; when it returns
+// enforce=true the handler buffers the request body (up to cap bytes),
+// strict-parses it as JSON-RPC, and stashes the resulting
 // MCPRequestDescriptor on the request before policy evaluation runs.
+//
+// The rules themselves live in an MCP policy — a document of their own,
+// attached to the token alongside the capability policy that grants the
+// path. They only ever narrow: the request must already be allowed by a
+// capability-based policy before any of this is consulted.
 //
 // This interface is the per-backend opt-in. The marker pattern mirrors
 // StreamBodyParser so reviewers can pattern-match the shape, and lets
@@ -23,7 +28,7 @@ package logical
 // hook by request shape so their domains do not overlap.
 type MCPPolicyEnforced interface {
 	// ShouldEnforceMCPPolicy reports whether this request on this
-	// backend is subject to `mcp { }` body-based enforcement, and the
+	// backend is subject to body-based MCP enforcement, and the
 	// maximum body size in bytes the policy extractor may buffer.
 	//
 	// cap <= 0 falls back to framework.DefaultMaxBodySize at the
@@ -37,4 +42,18 @@ type MCPPolicyEnforced interface {
 	// so GET (SSE reconnect) and DELETE (session close) traffic should
 	// return enforce=false.
 	ShouldEnforceMCPPolicy(req *Request) (enforce bool, cap int64)
+}
+
+// MCPInProcessServer is implemented by an MCPPolicyEnforced backend that
+// serves MCP itself, answering every call of a body on its own, rather than
+// proxying the body to an upstream. Two things follow, both from the policy
+// layer seeing each call's answer before the client does:
+//
+//   - a list call is filtered per call, inside a batch too, through
+//     Request.MCPListFilters, where an upstream's batched answer could only
+//     be refused whole;
+//   - a batch of more than MaxMCPBatch messages is refused before any call
+//     runs (MCPParseKindBatchTooLarge), since each is answered in full.
+type MCPInProcessServer interface {
+	MaxMCPBatch() int
 }

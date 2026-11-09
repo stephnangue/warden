@@ -43,8 +43,9 @@ func newTransport() *http.Transport {
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 
+		// No ResponseHeaderTimeout: the mount's timeout is the deadline of
+		// every forwarded request, headers included.
 		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 20 * time.Second,
 		ForceAttemptHTTP2:     true,
 	}
 

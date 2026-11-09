@@ -194,6 +194,48 @@ func TestNamespaceFailover(t *testing.T) {
 	h.CleanupNamespaces(t, h.GetLeaderPort(t), "e2e-ci-ha-ns/child", "e2e-ci-ha-ns")
 }
 
+// TestNestedNamespaceFromRootSurvivesFailover writes nested namespaces by their
+// full path from root, then fails over: the new leader loads them all, keeps
+// the update, and does not bring back the deleted one.
+func TestNestedNamespaceFromRootSurvivesFailover(t *testing.T) {
+	leader := h.GetLeaderPort(t)
+	nodeNum := h.NodeNumberForPort(leader)
+	h.CleanupNamespaces(t, leader, "e2e-ci-nest/child", "e2e-ci-nest/gone", "e2e-ci-nest")
+
+	for _, p := range []string{"e2e-ci-nest", "e2e-ci-nest/child", "e2e-ci-nest/gone"} {
+		if status, body := h.APIRequest(t, "POST", "sys/namespaces/"+p, leader, ""); status != 201 {
+			t.Fatalf("create %s: expected 201, got %d: %s", p, status, body)
+		}
+	}
+	if status, body := h.APIRequest(t, "PUT", "sys/namespaces/e2e-ci-nest/child", leader,
+		`{"custom_metadata":{"env":"staging"}}`); status != 200 {
+		t.Fatalf("update child: expected 200, got %d: %s", status, body)
+	}
+	if status, body := h.APIRequest(t, "DELETE", "sys/namespaces/e2e-ci-nest/gone", leader, ""); status != 200 {
+		t.Fatalf("delete gone: expected 200, got %d: %s", status, body)
+	}
+	time.Sleep(2 * time.Second)
+
+	h.KillNode(t, nodeNum, "TERM")
+	time.Sleep(8 * time.Second)
+	newLeader := h.WaitForLeader(t, 10, 2*time.Second)
+
+	childStatus, childBody := h.APIRequest(t, "GET", "sys/namespaces/e2e-ci-nest/child", newLeader, "")
+	if childStatus != 200 {
+		t.Fatalf("child read on new leader: expected 200, got %d", childStatus)
+	}
+	if env := h.JSONString(t, childBody, "data.custom_metadata.env"); env != "staging" {
+		t.Fatalf("child metadata env: expected %q, got %q", "staging", env)
+	}
+	if goneStatus, _ := h.APIRequest(t, "GET", "sys/namespaces/e2e-ci-nest/gone", newLeader, ""); goneStatus != 404 {
+		t.Fatalf("deleted namespace on new leader: expected 404, got %d", goneStatus)
+	}
+
+	h.RestartNode(t, nodeNum)
+	h.WaitForCluster(t, 15, 2*time.Second)
+	h.CleanupNamespaces(t, h.GetLeaderPort(t), "e2e-ci-nest/child", "e2e-ci-nest")
+}
+
 // TestNamespaceDeletionOrder verifies parent can't be deleted before children (T27).
 func TestNamespaceDeletionOrder(t *testing.T) {
 	port := h.GetLeaderPort(t)

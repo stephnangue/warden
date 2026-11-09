@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ristretto "github.com/dgraph-io/ristretto/v2"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
+	"github.com/stephnangue/warden/credential/profiles"
+	"github.com/stephnangue/warden/internal/cachesize"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -33,20 +36,31 @@ var (
 	ErrSourceInUse           = errors.New("credential source is referenced by specs")
 	ErrSpecInUse             = errors.New("credential spec is referenced via secret_spec")
 	ErrNamespaceNotInContext = errors.New("namespace not found in context")
+
+	// ErrConfigChanged is returned by UpdateSource and UpdateSpec when the caller
+	// passed ExpectedConfigHash and the stored config no longer matches it: some
+	// other writer got there first, and applying this write would undo theirs.
+	ErrConfigChanged = errors.New("credential config changed concurrently")
 )
 
 // CredentialConfigStoreConfig holds configuration for the credential config store
 type CredentialConfigStoreConfig struct {
-	CacheMaxCost         int64 // Maximum cache cost in bytes (default: 50 MB)
-	CacheNumCounters     int64 // Number of counters for Ristretto (default: 1 million)
-	SkipSpecVerification bool  // Skip SpecVerifier validation (for testing only)
+	// CacheMaxEntries is how many specs, and how many sources, the store's
+	// caches each hold (default: 100,000, across every namespace). A spec or
+	// source evicted from a full cache is read from storage on its next use,
+	// and a gateway request reads its spec and source on every credential
+	// mint, cache hit or not.
+	CacheMaxEntries int64
+	// CacheNumCounters overrides the number of keys each cache tracks to decide
+	// what to evict; 0 derives it from CacheMaxEntries.
+	CacheNumCounters     int64
+	SkipSpecVerification bool // Skip SpecVerifier validation (for testing only)
 }
 
 // DefaultCredConfigStoreConfig returns the default configuration
 func DefaultCredConfigStoreConfig() *CredentialConfigStoreConfig {
 	return &CredentialConfigStoreConfig{
-		CacheMaxCost:     50 << 20, // 50 MB
-		CacheNumCounters: 1e6,      // 1 million
+		CacheMaxEntries: 100_000,
 	}
 }
 
@@ -66,6 +80,14 @@ type CredentialConfigStore struct {
 	// Rotation manager for periodic credential source rotation
 	rotationManager *RotationManager
 
+	// specRevisions maps "{ns-uuid}:{spec}" to a *atomic.Uint64 advanced on every
+	// committed write that can change what the spec mints (see bumpSpecRevision).
+	// The credential manager keys its cache by it, so an edit misses credentials
+	// minted under the old config. It is node-local, as that cache is, and entries
+	// are never removed: a spec deleted and created again under the same name must
+	// not return to a revision its old credentials are cached under.
+	specRevisions sync.Map
+
 	mu     sync.RWMutex
 	closed bool
 }
@@ -82,23 +104,21 @@ func NewCredentialConfigStore(c *Core, config *CredentialConfigStoreConfig) (*Cr
 		config: config,
 	}
 
-	// Create Ristretto cache for specs
-	specsCache, err := ristretto.NewCache(&ristretto.Config[string, *credential.CredSpec]{
-		NumCounters: config.CacheNumCounters,
-		MaxCost:     config.CacheMaxCost / 2, // Split cache budget
-		BufferItems: 64,
-	})
+	// Each spec and source is charged 1: the caches hold CacheMaxEntries each.
+	specsConfig := cachesize.Entries[string, *credential.CredSpec](config.CacheMaxEntries)
+	sourcesConfig := cachesize.Entries[string, *credential.CredSource](config.CacheMaxEntries)
+	if config.CacheNumCounters > 0 {
+		specsConfig.NumCounters = config.CacheNumCounters
+		sourcesConfig.NumCounters = config.CacheNumCounters
+	}
+
+	specsCache, err := ristretto.NewCache(specsConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create specs cache: %w", err)
 	}
 	s.specsByID = specsCache
 
-	// Create Ristretto cache for sources
-	sourcesCache, err := ristretto.NewCache(&ristretto.Config[string, *credential.CredSource]{
-		NumCounters: config.CacheNumCounters,
-		MaxCost:     config.CacheMaxCost / 2, // Split cache budget
-		BufferItems: 64,
-	})
+	sourcesCache, err := ristretto.NewCache(sourcesConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sources cache: %w", err)
 	}
@@ -166,6 +186,37 @@ func (s *CredentialConfigStore) buildSpecCacheKey(namespaceID, specName string) 
 	return fmt.Sprintf("%s:spec:%s", namespaceID, specName)
 }
 
+// SpecRevision returns the revision of a spec in the namespace in ctx, zero for a
+// spec never written on this node. It takes no lock: it is read on every gateway
+// request, and must not queue behind writers, which hold s.mu across storage
+// round trips.
+func (s *CredentialConfigStore) SpecRevision(ctx context.Context, name string) uint64 {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return 0
+	}
+	if rev, ok := s.specRevisions.Load(specRevisionKey(ns.UUID, name)); ok {
+		return rev.(*atomic.Uint64).Load()
+	}
+	return 0
+}
+
+// bumpSpecRevision advances a spec's revision. Writers call it after the write is
+// durable and the spec cache holds the new value, so a request that reads the new
+// revision also reads the new config.
+func (s *CredentialConfigStore) bumpSpecRevision(namespaceID, name string) {
+	key := specRevisionKey(namespaceID, name)
+	rev, ok := s.specRevisions.Load(key)
+	if !ok {
+		rev, _ = s.specRevisions.LoadOrStore(key, new(atomic.Uint64))
+	}
+	rev.(*atomic.Uint64).Add(1)
+}
+
+func specRevisionKey(namespaceID, name string) string {
+	return namespaceID + ":" + name
+}
+
 // buildSourceCacheKey creates a cache key for a source
 func (s *CredentialConfigStore) buildSourceCacheKey(namespaceID, sourceName string) string {
 	return fmt.Sprintf("%s:source:%s", namespaceID, sourceName)
@@ -186,7 +237,7 @@ func (s *CredentialConfigStore) getBuiltinLocalSource() *credential.CredSource {
 	return &credential.CredSource{
 		Name:   builtinLocalSourceName,
 		Type:   "local",
-		Config: make(map[string]string), // Local driver needs no config
+		Config: credential.Config{}, // Local driver needs no config
 	}
 }
 
@@ -196,15 +247,311 @@ func (s *CredentialConfigStore) isBuiltinSource(name string) bool {
 }
 
 // ============================================================================
+// Lock discipline
+// ============================================================================
+//
+// Every mutator runs in three phases:
+//
+//  1. Validate, holding no store lock. Validation reaches back into the store's
+//     own getters, and it talks to the provider — a spec write mints and revokes a
+//     real credential, and a source write builds a driver, which for some types
+//     authenticates. Running that under the write lock would block every read on
+//     the issuance path for as long as the provider takes to answer, and a hung
+//     provider would stall all credential issuance. Doing it before the lock is
+//     also what removes the re-entrancy: the validators call the public getters
+//     while the caller holds nothing.
+//
+//  2. Commit, under s.mu.Lock. Existence checks, the cheap invariant re-checks
+//     that close the gap opened by validating outside the lock, the storage write
+//     and the cache update. No I/O beyond the storage write.
+//
+//  3. Everything else, after the unlock: rotation reconciliation and driver
+//     teardown. CloseDriver takes the driver registry's lock and runs the driver's
+//     Cleanup, which can do network I/O, so it must not run inside the critical
+//     section.
+//
+// The lock stays an RWMutex: readers are the hot path, and the critical section is
+// short once validation and driver teardown sit outside it.
+//
+// Helpers named *Locked take no lock and fill no cache. They exist so phase 2 can
+// re-run a check that phase 1 already performed.
+
+// isClosed reports whether the store has been torn down.
+func (s *CredentialConfigStore) isClosed() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.closed
+}
+
+// specExists reports whether a spec is present, distinguishing "absent" from
+// "could not tell". A storage read that fails for any reason other than a genuine
+// not-found is returned as an error: treating it as absent lets a create overwrite
+// a spec that exists but is momentarily unreadable.
+func (s *CredentialConfigStore) specExists(namespaceID, name string) (bool, error) {
+	if _, found := s.specsByID.Get(s.buildSpecCacheKey(namespaceID, name)); found {
+		return true, nil
+	}
+	if _, err := s.loadSpec(namespaceID, name); err != nil {
+		if errors.Is(err, ErrSpecNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to determine whether spec %q exists: %w", name, err)
+	}
+	return true, nil
+}
+
+// sourceExists is specExists for sources.
+func (s *CredentialConfigStore) sourceExists(namespaceID, name string) (bool, error) {
+	if _, found := s.sourcesByID.Get(s.buildSourceCacheKey(namespaceID, name)); found {
+		return true, nil
+	}
+	if _, err := s.loadSource(namespaceID, name); err != nil {
+		if errors.Is(err, ErrSourceNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to determine whether source %q exists: %w", name, err)
+	}
+	return true, nil
+}
+
+// checkSourceReferencesLocked returns the specs bound to a source, reading storage
+// directly rather than through the caching list helpers.
+func (s *CredentialConfigStore) checkSourceReferencesLocked(namespaceID, sourceName string) ([]*credential.CredSpec, error) {
+	specs, err := s.loadAllSpecs(namespaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	var refs []*credential.CredSpec
+	for _, spec := range specs {
+		if spec.Source == sourceName {
+			refs = append(refs, spec)
+		}
+	}
+	return refs, nil
+}
+
+// chainGraph is a namespace's specs and sources, read from storage in one pass for
+// the checks and re-keying that follow credential-chaining references. Writers
+// load it under s.mu, so it cannot change while they act on it.
+type chainGraph struct {
+	specs   []*credential.CredSpec
+	sources []*credential.CredSource
+}
+
+// loadChainGraphLocked reads every spec and source in the namespace from storage,
+// rather than through the caching list helpers.
+func (s *CredentialConfigStore) loadChainGraphLocked(namespaceID string) (chainGraph, error) {
+	sources, err := s.loadAllSources(namespaceID)
+	if err != nil {
+		return chainGraph{}, err
+	}
+	specs, err := s.loadAllSpecs(namespaceID)
+	if err != nil {
+		return chainGraph{}, err
+	}
+	return chainGraph{specs: specs, sources: sources}, nil
+}
+
+// boundTo returns the specs bound to a source.
+func (g chainGraph) boundTo(sourceName string) []*credential.CredSpec {
+	var bound []*credential.CredSpec
+	for _, spec := range g.specs {
+		if spec.Source == sourceName {
+			bound = append(bound, spec)
+		}
+	}
+	return bound
+}
+
+// source returns the stored source of that name, nil if there is none.
+func (g chainGraph) source(name string) *credential.CredSource {
+	for _, src := range g.sources {
+		if src.Name == name {
+			return src
+		}
+	}
+	return nil
+}
+
+// referrers returns the sources and specs that name specName as their secret_spec,
+// as "source/<name>" and "spec/<name>".
+func (g chainGraph) referrers(specName string) []string {
+	var refs []string
+	for _, src := range g.sources {
+		if src.Config.Get(credential.ConfigSecretSpec) == specName {
+			refs = append(refs, "source/"+src.Name)
+		}
+	}
+	for _, spec := range g.specs {
+		if spec.Name == specName {
+			continue // a spec never references itself
+		}
+		if spec.Config.Get(credential.ConfigSecretSpec) == specName {
+			refs = append(refs, "spec/"+spec.Name)
+		}
+	}
+	return refs
+}
+
+// consumers returns the names of the specs that mint from any of names: a spec
+// whose own secret_spec names one, or a spec setting no reference of its own on a
+// source whose secret_spec names one (a spec-level reference wins). Chaining is
+// one hop, so these are all of them. A write that changes what a referenced spec
+// yields changes what they mint too, so their revisions advance with its.
+func (g chainGraph) consumers(names []string) []string {
+	referenced := make(map[string]bool, len(names))
+	for _, name := range names {
+		referenced[name] = true
+	}
+	viaSource := make(map[string]bool)
+	for _, src := range g.sources {
+		if referenced[src.Config.Get(credential.ConfigSecretSpec)] {
+			viaSource[src.Name] = true
+		}
+	}
+	var consumers []string
+	for _, spec := range g.specs {
+		ref := spec.Config.Get(credential.ConfigSecretSpec)
+		if referenced[ref] || (ref == "" && viaSource[spec.Source]) {
+			consumers = append(consumers, spec.Name)
+		}
+	}
+	return consumers
+}
+
+// chainingShapeChanged reports whether an edit touches anything secretSpecRefRules
+// reads: the spec's own secret_spec, its subject_token_source, or its source.
+func chainingShapeChanged(old, updated *credential.CredSpec) bool {
+	return old.Source != updated.Source ||
+		old.Config.Get(credential.ConfigSecretSpec) != updated.Config.Get(credential.ConfigSecretSpec) ||
+		old.Config.Get(credential.ConfigSubjectTokenSource) != updated.Config.Get(credential.ConfigSubjectTokenSource)
+}
+
+// checkStillReferenceableLocked refuses an edit to a spec that something references
+// as its secret_spec, when the edited spec would no longer satisfy
+// secretSpecRefRules. The consumer is named, so the operator knows what to change.
+func (s *CredentialConfigStore) checkStillReferenceableLocked(g chainGraph, spec *credential.CredSpec) error {
+	refs := g.referrers(spec.Name)
+	if len(refs) == 0 {
+		return nil
+	}
+	src, err := s.graphSource(g, spec.Source)
+	if err != nil {
+		return fmt.Errorf("spec %q: failed to load its source %q: %w", spec.Name, spec.Source, err)
+	}
+	if err := secretSpecRefRules(spec.Name, spec, src); err != nil {
+		return logical.ErrBadRequestf("spec %q is the secret_spec of %s, and this update would break it: %s; update or delete the consumer first",
+			spec.Name, strings.Join(refs, ", "), err.Error())
+	}
+	return nil
+}
+
+// graphSource returns the named source as g holds it, or the built-in source,
+// which is never stored. It reads no store, so it is safe under s.mu.
+func (s *CredentialConfigStore) graphSource(g chainGraph, name string) (*credential.CredSource, error) {
+	if s.isBuiltinSource(name) {
+		return s.getBuiltinLocalSource(), nil
+	}
+	if src := g.source(name); src != nil {
+		return src, nil
+	}
+	return nil, ErrSourceNotFound
+}
+
+// checkSpecReferencesLocked returns the sources and specs that name this spec as
+// their credential-chaining secret source.
+func (s *CredentialConfigStore) checkSpecReferencesLocked(namespaceID, specName string) ([]string, error) {
+	g, err := s.loadChainGraphLocked(namespaceID)
+	if err != nil {
+		return nil, err
+	}
+	return g.referrers(specName), nil
+}
+
+// ============================================================================
 // CredSpec Operations
 // ============================================================================
 
+// createTimeAssertionProfiles names, per source type, the assertion profile a NEW spec
+// gets when it mints a Warden assertion and names no assertion_profile itself.
+//
+// Each entry is the shape the source's verifier can actually bind: AWS STS reads the
+// role and metadata as session tags (aws); Entra ID matches iss/sub/aud exactly and
+// reads nothing else, so it gets the registered claims alone (minimal).
+var createTimeAssertionProfiles = map[string]string{
+	credential.SourceTypeAWS:   profiles.AWSProfileName,
+	credential.SourceTypeAzure: profiles.MinimalProfileName,
+}
+
+// subOnlyVerifierSources are the source types whose verifier can bind only iss, sub
+// and aud: AWS STS for a custom issuer (plus session tags), Entra ID federated
+// credentials, and Alibaba Cloud RAM (oidc:iss, oidc:aud, oidc:sub). An assertion
+// minted for one of them is never given a disclosed user: the delegation shape would
+// put the user's raw id in sub, and such a verifier cannot also bind the
+// warden_namespace that qualifies it, so any namespace could mint that id. The
+// assertion keeps the agent's composite sub instead, which carries the tenant
+// boundary itself; assertion_user_claims still drives request templating.
+var subOnlyVerifierSources = map[string]bool{
+	credential.SourceTypeAWS:      true,
+	credential.SourceTypeAzure:    true,
+	credential.SourceTypeAlicloud: true,
+}
+
+// applyCreateTimeAssertionProfile writes the source type's default assertion profile
+// into a new spec's config when the spec mints a Warden assertion and sets none.
+//
+// It runs at CREATE only — never from validateSpec, which also runs on updates and on
+// the rotation and connect write-backs. A spec stored before this default existed
+// has no assertion_profile and keeps minting the default shape its upstream trust
+// policies were written against; applying the default anywhere else would flip it on
+// its next write-back. For the same reason an unset key is never reinterpreted at
+// mint: unset still means "default" for every spec that reaches the issuer without
+// one. Writing the value into the config makes the choice explicit and visible on
+// spec read, and an operator opts out by naming another profile (e.g. "default").
+//
+// The defaulted value is validated here, against the profile it defaults to, so a
+// spec that is valid under default but not under the defaulted profile is refused
+// with an error that says the profile was defaulted and how to opt out — instead of
+// a message about a profile the operator never wrote.
+//
+// A nil registry, one without the profile, or a missing source leaves the spec
+// untouched: the first two would only fail every mint, and validateSpec reports the
+// missing source.
+func (s *CredentialConfigStore) applyCreateTimeAssertionProfile(ctx context.Context, spec *credential.CredSpec) error {
+	if spec.Config.Get(credential.ConfigAssertionProfile) != "" {
+		return nil
+	}
+	mintsAssertion := spec.Config.Get(credential.ConfigSubjectTokenSource) == credential.SourceWardenIdentity ||
+		spec.Config.Get(credential.ConfigActorTokenSource) == credential.SourceWardenIdentity
+	if !mintsAssertion {
+		return nil
+	}
+	reg := s.core.assertionProfileRegistry
+	if reg == nil {
+		return nil
+	}
+	source, err := s.GetSource(ctx, spec.Source)
+	if err != nil || source == nil {
+		return nil
+	}
+	name, ok := createTimeAssertionProfiles[source.Type]
+	if !ok || !reg.HasProfile(name) {
+		return nil
+	}
+
+	defaulted := spec.Config.With(credential.ConfigAssertionProfile, name)
+	if err := credential.ValidateAssertionProfileConfig(reg, defaulted, source.Type); err != nil {
+		return logical.ErrBadRequestf("%s (assertion_profile defaulted to '%s' for a spec that mints a Warden assertion on a '%s' source; set assertion_profile explicitly, e.g. to '%s', to choose another shape)",
+			err, name, source.Type, credential.DefaultAssertionProfileName)
+	}
+	spec.Config = defaulted
+	return nil
+}
+
 // CreateSpec creates a new credential spec in the namespace from context
 func (s *CredentialConfigStore) CreateSpec(ctx context.Context, spec *credential.CredSpec) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
@@ -213,31 +560,72 @@ func (s *CredentialConfigStore) CreateSpec(ctx context.Context, spec *credential
 		return err
 	}
 
-	// Validate spec
+	// Phase 1: validate, holding no lock.
+
+	// The duplicate check comes first because validation mints and revokes a real
+	// credential at the provider. Running it before this meant every duplicate
+	// create paid for an upstream mint to then be rejected on a name clash.
+	exists, err := s.specExists(ns.UUID, spec.Name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return ErrSpecAlreadyExists
+	}
+
+	if err := s.applyCreateTimeAssertionProfile(ctx, spec); err != nil {
+		return err
+	}
+
 	if err := s.ValidateSpec(ctx, spec); err != nil {
 		return err
 	}
 
-	// Check if spec already exists (check both cache and storage)
-	cacheKey := s.buildSpecCacheKey(ns.UUID, spec.Name)
-	if _, found := s.specsByID.Get(cacheKey); found {
-		return ErrSpecAlreadyExists
-	}
-	// Also check storage in case cache was evicted or server restarted
-	if _, err := s.loadSpec(ns.UUID, spec.Name); err == nil {
-		return ErrSpecAlreadyExists
+	// Phase 2: commit.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrConfigStoreClosed
 	}
 
-	// Persist to storage
+	// Re-check what validation established, now that nothing can move underneath
+	// us. Another create of this name, or a delete of the source this spec binds
+	// to, may have landed while validation was talking to the provider.
+	exists, err = s.specExists(ns.UUID, spec.Name)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if exists {
+		s.mu.Unlock()
+		return ErrSpecAlreadyExists
+	}
+	if !s.isBuiltinSource(spec.Source) {
+		sourceExists, err := s.sourceExists(ns.UUID, spec.Source)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if !sourceExists {
+			s.mu.Unlock()
+			return logical.ErrBadRequestf("source '%s' not found in namespace", spec.Source)
+		}
+	}
+
 	if err := s.persistSpec(ns.UUID, spec); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("failed to persist spec: %w", err)
 	}
 
-	// Cache the spec
-	s.specsByID.Set(cacheKey, spec, 1)
+	s.specsByID.Set(s.buildSpecCacheKey(ns.UUID, spec.Name), spec, 1)
 	s.specsByID.Wait()
+	s.mu.Unlock()
 
-	// Register with rotation manager if RotationPeriod is configured
+	// Phase 3: rotation registration, outside the lock.
+
+	// Register with rotation manager if RotationPeriod is configured. A chained
+	// spec never gets this far: the check above rejects that combination, and
+	// re-deriving it here would cost another source read for no new protection.
 	if spec.RotationPeriod > 0 {
 		if s.rotationManager != nil {
 			if err := s.rotationManager.RegisterSpec(ctx, spec.Name, spec.Source, spec.RotationPeriod); err != nil {
@@ -304,13 +692,28 @@ type UpdateSpecOptions struct {
 	// Used by the connect seal and refresh-token write-back, which persist a
 	// known-good token and must not re-mint (which would consume/rotate it).
 	SkipVerification bool
+
+	// ExpectedConfigHash, when set, makes the write conditional: it is refused
+	// with ErrConfigChanged unless the stored config still hashes to this value
+	// (credential.Config.Hash). A writer that computed its config from an
+	// earlier read passes that read's hash, so it cannot overwrite a change made
+	// since.
+	ExpectedConfigHash string
+
+	// PreservesMintedOutput declares that the write cannot change what the spec
+	// mints, so credentials already cached for it stay served. Without it the
+	// spec's revision advances and the next request mints again: a write left
+	// unclassified costs a mint, never a stale credential.
+	PreservesMintedOutput bool
 }
 
 // PersistRotatedSpec persists a spec without re-running verification, satisfying
 // credential.ConfigStoreAccessor for the refresh-token write-back. Verification
 // is skipped because re-minting would consume the just-rotated refresh token.
+// The write-back stores the refresh token the upstream just rotated; the access
+// token minted alongside it is still the one to serve.
 func (s *CredentialConfigStore) PersistRotatedSpec(ctx context.Context, spec *credential.CredSpec) error {
-	return s.UpdateSpec(ctx, spec, UpdateSpecOptions{SkipVerification: true})
+	return s.UpdateSpec(ctx, spec, UpdateSpecOptions{SkipVerification: true, PreservesMintedOutput: true})
 }
 
 // ReloadSpec evicts the node-local cache entry for a spec and re-reads it,
@@ -326,12 +729,20 @@ func (s *CredentialConfigStore) ReloadSpec(ctx context.Context, name string) (*c
 	return s.GetSpec(ctx, name)
 }
 
+// ReloadSource is ReloadSpec for sources: it evicts the node-local cache entry
+// and re-reads the source from shared storage.
+func (s *CredentialConfigStore) ReloadSource(ctx context.Context, name string) (*credential.CredSource, error) {
+	ns, err := s.getNamespaceFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.sourcesByID.Del(s.buildSourceCacheKey(ns.UUID, name))
+	return s.GetSource(ctx, name)
+}
+
 // UpdateSpec updates an existing spec
 func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential.CredSpec, opts ...UpdateSpecOptions) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
@@ -340,29 +751,97 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 		return err
 	}
 
-	// Validate spec
-	var skipVerification bool
+	// Phase 1: validate, holding no lock.
+	var opt UpdateSpecOptions
 	if len(opts) > 0 {
-		skipVerification = opts[0].SkipVerification
+		opt = opts[0]
 	}
+	skipVerification, expectedHash := opt.SkipVerification, opt.ExpectedConfigHash
 	if err := s.validateSpec(ctx, spec, skipVerification); err != nil {
 		return err
 	}
 
-	// Check if spec exists
-	cacheKey := s.buildSpecCacheKey(ns.UUID, spec.Name)
-	if _, err := s.loadSpec(ns.UUID, spec.Name); err != nil {
-		return ErrSpecNotFound
+	// Phase 2: commit.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrConfigStoreClosed
 	}
 
-	// Persist to storage
+	// A read that fails for any reason other than a genuine not-found is reported
+	// as such, rather than told to the operator as "spec not found".
+	existing, err := s.loadSpec(ns.UUID, spec.Name)
+	if err != nil {
+		s.mu.Unlock()
+		if errors.Is(err, ErrSpecNotFound) {
+			return ErrSpecNotFound
+		}
+		return fmt.Errorf("failed to read spec %q: %w", spec.Name, err)
+	}
+
+	if expectedHash != "" && existing.Config.Hash() != expectedHash {
+		// Refresh the cache from what storage holds, so the caller's re-read
+		// sees the change it lost to rather than the stale entry.
+		s.specsByID.Set(s.buildSpecCacheKey(ns.UUID, spec.Name), existing, 1)
+		s.specsByID.Wait()
+		s.mu.Unlock()
+		return ErrConfigChanged
+	}
+
+	// Two things read the namespace's chaining references, both before the write so
+	// a listing that fails refuses the update: whether this spec may still be
+	// referenced, when the edit touches what the rules read, and the specs that mint
+	// from it, which change with it. A write that preserves the output and keeps its
+	// chaining shape — the refresh-token write-back — reads nothing.
+	shapeChanged := chainingShapeChanged(existing, spec)
+	var consumers []string
+	if shapeChanged || !opt.PreservesMintedOutput {
+		g, err := s.loadChainGraphLocked(ns.UUID)
+		if err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("failed to list the credential-chaining references to spec %q: %w", spec.Name, err)
+		}
+		// Moving the spec to another source: that source was checked before the lock,
+		// and could have been deleted since; the graph says whether it still exists.
+		if existing.Source != spec.Source {
+			if _, err := s.graphSource(g, spec.Source); err != nil {
+				s.mu.Unlock()
+				return logical.ErrBadRequestf("source %q not found", spec.Source)
+			}
+		}
+		if shapeChanged {
+			if err := s.checkStillReferenceableLocked(g, spec); err != nil {
+				s.mu.Unlock()
+				return err
+			}
+		}
+		if !opt.PreservesMintedOutput {
+			consumers = g.consumers([]string{spec.Name})
+		}
+	}
+
 	if err := s.persistSpec(ns.UUID, spec); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("failed to persist spec: %w", err)
 	}
 
-	// Update cache
-	s.specsByID.Set(cacheKey, spec, 1)
+	s.specsByID.Set(s.buildSpecCacheKey(ns.UUID, spec.Name), spec, 1)
 	s.specsByID.Wait()
+	if !opt.PreservesMintedOutput {
+		s.bumpSpecRevision(ns.UUID, spec.Name)
+		for _, consumer := range consumers {
+			s.bumpSpecRevision(ns.UUID, consumer)
+		}
+	}
+	s.mu.Unlock()
+
+	// Phase 3: rotation reconciliation, outside the lock.
+
+	// Same reconciliation the source path does, for the same reason: the spec
+	// update API has always carried rotation_period, so a period could be changed
+	// or cleared in place while the manager kept the schedule it was given at
+	// create.
+	s.reconcileSpecRotation(ctx, spec, existing.RotationPeriod)
 
 	s.logger.Debug("updated credential spec",
 		logger.String("namespace", ns.UUID),
@@ -372,12 +851,42 @@ func (s *CredentialConfigStore) UpdateSpec(ctx context.Context, spec *credential
 	return nil
 }
 
+// reconcileSpecRotation brings the rotation manager in line with a spec's
+// persisted rotation period.
+//
+// A changed period re-registers rather than editing in place: RotationManager's
+// UpdateRotationPeriod addresses entries by the source key, so it cannot reach a
+// spec entry at all, and register replaces an existing entry outright — which
+// reschedules the next action from now, so a shortened period does not wait out
+// the old one.
+//
+// Failures are logged, not returned: the spec is already persisted.
+func (s *CredentialConfigStore) reconcileSpecRotation(ctx context.Context, spec *credential.CredSpec, oldPeriod time.Duration) {
+	if s.rotationManager == nil {
+		return
+	}
+
+	switch {
+	case spec.RotationPeriod <= 0 && oldPeriod > 0:
+		if err := s.rotationManager.UnregisterSpec(ctx, spec.Name); err != nil {
+			s.logger.Warn("failed to unregister spec from rotation after update",
+				logger.String("spec_name", spec.Name), logger.Err(err))
+		} else {
+			s.logger.Info("rotation disabled for spec",
+				logger.String("spec_name", spec.Name))
+		}
+
+	case spec.RotationPeriod > 0 && spec.RotationPeriod != oldPeriod:
+		if err := s.rotationManager.RegisterSpec(ctx, spec.Name, spec.Source, spec.RotationPeriod); err != nil {
+			s.logger.Warn("failed to re-register spec for rotation after update",
+				logger.String("spec_name", spec.Name), logger.Err(err))
+		}
+	}
+}
+
 // DeleteSpec removes a spec by name
 func (s *CredentialConfigStore) DeleteSpec(ctx context.Context, name string) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
@@ -386,17 +895,51 @@ func (s *CredentialConfigStore) DeleteSpec(ctx context.Context, name string) err
 		return err
 	}
 
-	// Prevent deleting a spec still referenced as a chaining secret source
-	// (secret_spec) by another source or spec.
-	refs, err := s.CheckSpecReferences(ctx, name)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrConfigStoreClosed
+	}
+
+	// Deleting something that is not there used to report success: storage Delete
+	// is idempotent and nothing checked first, so the handler's not-found branch
+	// was unreachable and DELETE of a missing spec answered 200.
+	exists, err := s.specExists(ns.UUID, name)
 	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if !exists {
+		s.mu.Unlock()
+		return ErrSpecNotFound
+	}
+
+	// Prevent deleting a spec still referenced as a chaining secret source
+	// (secret_spec) by another source or spec. Checked inside the critical section
+	// so a consumer created concurrently cannot be left pointing at nothing.
+	refs, err := s.checkSpecReferencesLocked(ns.UUID, name)
+	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	if len(refs) > 0 {
+		s.mu.Unlock()
 		return ErrSpecInUse
 	}
 
-	// Unregister from rotation manager first (if registered)
+	if err := s.deleteSpec(ns.UUID, name); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+
+	s.specsByID.Del(s.buildSpecCacheKey(ns.UUID, name))
+	// A spec created again under this name starts past every credential cached
+	// for this one.
+	s.bumpSpecRevision(ns.UUID, name)
+	s.mu.Unlock()
+
+	// Unregister from rotation after the delete is durable: an unregister followed
+	// by a failed delete would leave a spec that no longer rotates.
 	if s.rotationManager != nil {
 		if err := s.rotationManager.UnregisterSpec(ctx, name); err != nil {
 			s.logger.Debug("spec was not registered for rotation (or already unregistered)",
@@ -404,15 +947,6 @@ func (s *CredentialConfigStore) DeleteSpec(ctx context.Context, name string) err
 			)
 		}
 	}
-
-	// Delete from storage
-	if err := s.deleteSpec(ns.UUID, name); err != nil {
-		return err
-	}
-
-	// Remove from cache
-	cacheKey := s.buildSpecCacheKey(ns.UUID, name)
-	s.specsByID.Del(cacheKey)
 
 	s.logger.Info("deleted credential spec",
 		logger.String("namespace", ns.UUID),
@@ -458,10 +992,7 @@ func (s *CredentialConfigStore) ListSpecs(ctx context.Context) ([]*credential.Cr
 
 // CreateSource creates a new credential source in the namespace from context
 func (s *CredentialConfigStore) CreateSource(ctx context.Context, source *credential.CredSource) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
@@ -475,32 +1006,54 @@ func (s *CredentialConfigStore) CreateSource(ctx context.Context, source *creden
 		return err
 	}
 
-	// Validate source
+	// Phase 1: validate, holding no lock. Validation builds a driver, which for
+	// several source types authenticates against the provider.
+
+	// Cheap check first, so a duplicate create does not pay for that round trip.
+	exists, err := s.sourceExists(ns.UUID, source.Name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return ErrSourceAlreadyExists
+	}
+
 	if err := s.ValidateSource(ctx, source); err != nil {
 		return err
 	}
 
-	// Check if source already exists (check both cache and storage)
-	cacheKey := s.buildSourceCacheKey(ns.UUID, source.Name)
-	if _, found := s.sourcesByID.Get(cacheKey); found {
-		return ErrSourceAlreadyExists
+	// Phase 2: commit.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrConfigStoreClosed
 	}
-	// Also check storage in case cache was evicted or server restarted
-	if _, err := s.loadSource(ns.UUID, source.Name); err == nil {
+
+	exists, err = s.sourceExists(ns.UUID, source.Name)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if exists {
+		s.mu.Unlock()
 		return ErrSourceAlreadyExists
 	}
 
-	// Persist to storage
 	if err := s.persistSource(ns.UUID, source); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("failed to persist source: %w", err)
 	}
 
-	// Cache the source
-	s.sourcesByID.Set(cacheKey, source, 1)
+	s.sourcesByID.Set(s.buildSourceCacheKey(ns.UUID, source.Name), source, 1)
 	s.sourcesByID.Wait()
+	s.mu.Unlock()
 
-	// Register with rotation manager if RotationPeriod is configured
-	if source.RotationPeriod > 0 {
+	// Phase 3: rotation registration, outside the lock.
+
+	// Register with rotation manager if RotationPeriod is configured. A federated
+	// source is never enrolled: CreateSource rejects the combination outright, so
+	// this only guards a caller that reaches here another way.
+	if source.RotationPeriod > 0 && !isFederationSource(source.Config) {
 		if s.rotationManager != nil {
 			if err := s.rotationManager.RegisterSource(ctx, source.Name, source.Type, source.RotationPeriod); err != nil {
 				s.logger.Warn("failed to register source for rotation",
@@ -571,14 +1124,25 @@ type UpdateSourceOptions struct {
 	// Used by the rotation manager where new credentials are known-good but may
 	// not yet be propagated at the provider (e.g., AWS IAM key propagation delay).
 	SkipConnectionTest bool
+
+	// ExpectedConfigHash, when set, makes the write conditional: it is refused
+	// with ErrConfigChanged unless the stored config still hashes to this value
+	// (credential.Config.Hash). Rotation passes the hash of the config it
+	// prepared against, and the operator update the hash of the config it read,
+	// so neither can overwrite a change the other made in between.
+	ExpectedConfigHash string
+
+	// PreservesMintedOutput declares that the write cannot change what the specs
+	// bound to the source mint — rotating the source's own authenticator, say,
+	// which credentials already minted do not depend on. Without it every bound
+	// spec's revision advances when the config changes, and their next requests
+	// mint again.
+	PreservesMintedOutput bool
 }
 
 // UpdateSource updates an existing source
 func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *credential.CredSource, opts ...UpdateSourceOptions) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
@@ -592,11 +1156,13 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 		return err
 	}
 
-	// Validate source
-	var skipConnectionTest bool
+	// Phase 1: validate, holding no lock. Unless the caller skips it, this opens a
+	// connection to the provider.
+	var opt UpdateSourceOptions
 	if len(opts) > 0 {
-		skipConnectionTest = opts[0].SkipConnectionTest
+		opt = opts[0]
 	}
+	skipConnectionTest, expectedHash := opt.SkipConnectionTest, opt.ExpectedConfigHash
 	if err := s.validateSource(ctx, source, skipConnectionTest); err != nil {
 		return err
 	}
@@ -607,13 +1173,33 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	// so letting Type change in place would silently invalidate those guards for
 	// already-bound specs. The API handler already forces the type; this defends the
 	// invariant at the store layer for any other caller.
-	cacheKey := s.buildSourceCacheKey(ns.UUID, source.Name)
+	//
+	// Phase 2: commit.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrConfigStoreClosed
+	}
+
 	existing, err := s.loadSource(ns.UUID, source.Name)
 	if err != nil {
-		return ErrSourceNotFound
+		s.mu.Unlock()
+		if errors.Is(err, ErrSourceNotFound) {
+			return ErrSourceNotFound
+		}
+		return fmt.Errorf("failed to read source %q: %w", source.Name, err)
 	}
 	if source.Type != existing.Type {
+		s.mu.Unlock()
 		return logical.ErrBadRequestf("cannot change the type of source %q (%s → %s); source type is immutable", source.Name, existing.Type, source.Type)
+	}
+	if expectedHash != "" && existing.Config.Hash() != expectedHash {
+		// Refresh the cache from what storage holds, so the caller's re-read
+		// sees the change it lost to rather than the stale entry.
+		s.sourcesByID.Set(s.buildSourceCacheKey(ns.UUID, source.Name), existing, 1)
+		s.sourcesByID.Wait()
+		s.mu.Unlock()
+		return ErrConfigChanged
 	}
 
 	// Narrowing credential_fields strands the specs that relied on it. The
@@ -621,27 +1207,108 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	// the specs are untouched — they simply start minting without a field, and the
 	// provider takes its fallback branch. Reject rather than let a source edit
 	// silently narrow credentials bound to it.
-	if err := s.checkBoundSpecsStillCarried(ctx, source); err != nil {
+	//
+	// The same listing is what a config change re-keys below, so one that fails
+	// fails the update: going ahead would leave every bound spec serving
+	// credentials minted under the old config.
+	//
+	// Whether the driver has to be rebuilt is decided here too, while the previous
+	// config is still known, but acted on after the unlock.
+	//
+	// Config is the only field a driver reads: Name keys it, Type is immutable
+	// (refused above), and RotationPeriod is the manager's state, not the driver's.
+	// So an update that touches only the rotation period leaves every driver input
+	// identical, and tearing the instance down would discard live state — cached
+	// tokens, discovered identity, pooled connections — to rebuild something byte
+	// for byte the same. That case stopped being hypothetical when the update path
+	// began accepting a rotation period on its own.
+	driverInputsChanged := !existing.Config.Equal(source.Config)
+	rekey := driverInputsChanged && !opt.PreservesMintedOutput
+	chainRef := source.Config.Get(credential.ConfigSecretSpec)
+
+	// Sources are read only when something below follows a reference: a rotation
+	// write lists the bound specs alone.
+	var g chainGraph
+	if rekey || chainRef != "" {
+		g, err = s.loadChainGraphLocked(ns.UUID)
+	} else {
+		g.specs, err = s.loadAllSpecs(ns.UUID)
+	}
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("failed to list the specs bound to source %q: %w", source.Name, err)
+	}
+	bound := g.boundTo(source.Name)
+	if err := s.checkBoundSpecsStillCarriedLocked(source, bound); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 
-	// Close old driver instance since config has changed
-	// This ensures the driver will be recreated with the new config on next use
-	if err := s.core.credentialManager.CloseDriver(ctx, source.Name); err != nil {
-		s.logger.Warn("failed to close driver during source update",
-			logger.String("source_name", source.Name),
-			logger.Err(err))
-		// Continue with update even if driver cleanup fails
+	// A source with a secret_spec breaks chaining's one hop for a spec on it that
+	// something references — itself included, which would chain the spec from
+	// itself. (Becoming a consumer is otherwise validated above, with the source;
+	// that check reads the source as stored, so it cannot see this update.)
+	if chainRef != "" {
+		gaining := existing.Config.Get(credential.ConfigSecretSpec) == ""
+		for _, spec := range bound {
+			if spec.Name == chainRef {
+				s.mu.Unlock()
+				return logical.ErrBadRequestf("source %q cannot take its secret_spec from spec %q, which is bound to it; chaining is limited to one hop", source.Name, spec.Name)
+			}
+			if !gaining {
+				continue // the specs on a source that already chains cannot be referenced
+			}
+			if refs := g.referrers(spec.Name); len(refs) > 0 {
+				s.mu.Unlock()
+				return logical.ErrBadRequestf("spec %q on this source is the secret_spec of %s, and chaining is limited to one hop: a source with secret_spec cannot hold a referenced spec; move the spec or update its consumers first",
+					spec.Name, strings.Join(refs, ", "))
+			}
+		}
 	}
 
-	// Persist to storage
+	// A config change re-keys the bound specs and the specs that mint from them.
+	var rekeyed []string
+	if rekey {
+		for _, spec := range bound {
+			rekeyed = append(rekeyed, spec.Name)
+		}
+		rekeyed = append(rekeyed, g.consumers(rekeyed)...)
+	}
+
 	if err := s.persistSource(ns.UUID, source); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("failed to persist source: %w", err)
 	}
 
-	// Update cache
-	s.sourcesByID.Set(cacheKey, source, 1)
+	s.sourcesByID.Set(s.buildSourceCacheKey(ns.UUID, source.Name), source, 1)
 	s.sourcesByID.Wait()
+	for _, name := range rekeyed {
+		s.bumpSpecRevision(ns.UUID, name)
+	}
+	s.mu.Unlock()
+
+	// Phase 3: outside the lock.
+
+	// Close the old driver instance so it is rebuilt from the new config on next
+	// use. This runs after the cache carries the new config, so a mint racing the
+	// teardown rebuilds from the new config rather than the old — and after the
+	// unlock, because CloseDriver takes the registry's lock and runs the driver's
+	// Cleanup, which can do network I/O.
+	if driverInputsChanged && s.core != nil && s.core.credentialManager != nil {
+		if err := s.core.credentialManager.CloseDriver(ctx, source.Name); err != nil {
+			s.logger.Warn("failed to close driver during source update",
+				logger.String("source_name", source.Name),
+				logger.Err(err))
+			// Continue with update even if driver cleanup fails
+		}
+	}
+
+	// Reconcile the rotation schedule with what was just persisted. Until this
+	// existed the manager was told about a source only at create and delete, so a
+	// period changed in place kept firing on the old schedule and a period cleared
+	// in place kept firing at all — the config said one thing and the manager did
+	// another, with nothing to reveal the disagreement.
+	s.reconcileSourceRotation(ctx, source, existing.RotationPeriod)
 
 	s.logger.Debug("updated credential source",
 		logger.String("namespace", ns.UUID),
@@ -651,12 +1318,61 @@ func (s *CredentialConfigStore) UpdateSource(ctx context.Context, source *creden
 	return nil
 }
 
+// reconcileSourceRotation brings the rotation manager in line with a source's
+// persisted rotation period.
+//
+// Enrolment eligibility is re-evaluated, not assumed: a source that gains a
+// secret_spec, or is otherwise converted to holding no secret of its own, must
+// leave the schedule even if its period were somehow still set — validateSource
+// refuses that combination, so in practice the period arrives as zero and the
+// unregister below is what actually removes the entry.
+//
+// Failures are logged, not returned: the source is already persisted, and failing
+// the update here would report an error for a write that happened.
+func (s *CredentialConfigStore) reconcileSourceRotation(ctx context.Context, source *credential.CredSource, oldPeriod time.Duration) {
+	if s.rotationManager == nil {
+		return
+	}
+
+	eligible := sourceRotationEligible(source)
+
+	switch {
+	case !eligible && oldPeriod > 0:
+		if err := s.rotationManager.UnregisterSource(ctx, source.Name); err != nil {
+			s.logger.Warn("failed to unregister source from rotation after update",
+				logger.String("source_name", source.Name), logger.Err(err))
+		} else {
+			s.logger.Info("rotation disabled for source",
+				logger.String("source_name", source.Name))
+		}
+
+	case eligible && oldPeriod <= 0:
+		if err := s.rotationManager.RegisterSource(ctx, source.Name, source.Type, source.RotationPeriod); err != nil {
+			s.logger.Warn("failed to register source for rotation after update",
+				logger.String("source_name", source.Name), logger.Err(err))
+		}
+
+	case eligible && source.RotationPeriod != oldPeriod:
+		// Reschedules from now, so a shortened period does not wait out the old one.
+		if err := s.rotationManager.UpdateRotationPeriod(ctx, source.Name, source.RotationPeriod); err != nil {
+			s.logger.Warn("failed to update rotation period after source update",
+				logger.String("source_name", source.Name), logger.Err(err))
+		}
+	}
+}
+
+// sourceRotationEligible reports whether a source belongs on the rotation
+// schedule: it has a period, and it holds a secret of its own to rotate —
+// neither a federated nor a chained source does.
+func sourceRotationEligible(source *credential.CredSource) bool {
+	return source.RotationPeriod > 0 &&
+		!isFederationSource(source.Config) &&
+		source.Config.Get(credential.ConfigSecretSpec) == ""
+}
+
 // DeleteSource removes a source by name
 func (s *CredentialConfigStore) DeleteSource(ctx context.Context, name string) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
@@ -670,16 +1386,46 @@ func (s *CredentialConfigStore) DeleteSource(ctx context.Context, name string) e
 		return err
 	}
 
-	// Check if source is in use
-	refs, err := s.CheckSourceReferences(ctx, name)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrConfigStoreClosed
+	}
+
+	// Deleting something absent used to report success — see DeleteSpec.
+	exists, err := s.sourceExists(ns.UUID, name)
 	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if !exists {
+		s.mu.Unlock()
+		return ErrSourceNotFound
+	}
+
+	// Check if source is in use, inside the critical section so a spec created
+	// concurrently cannot be left bound to a source that is being removed.
+	refs, err := s.checkSourceReferencesLocked(ns.UUID, name)
+	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	if len(refs) > 0 {
+		s.mu.Unlock()
 		return ErrSourceInUse
 	}
 
-	// Unregister from rotation manager first (if registered)
+	if err := s.deleteSource(ns.UUID, name); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+
+	s.sourcesByID.Del(s.buildSourceCacheKey(ns.UUID, name))
+	s.mu.Unlock()
+
+	// Outside the lock: unregister rotation and release the driver's resources.
+	// Both run after the delete is durable, so a failure here cannot leave a
+	// deleted source still rotating or a live source without its driver.
 	if s.rotationManager != nil {
 		if err := s.rotationManager.UnregisterSource(ctx, name); err != nil {
 			s.logger.Debug("source was not registered for rotation (or already unregistered)",
@@ -688,9 +1434,7 @@ func (s *CredentialConfigStore) DeleteSource(ctx context.Context, name string) e
 		}
 	}
 
-	// Close driver instance to prevent resource leaks
-	// This releases any connections, HTTP clients, or other resources held by the driver
-	if s.core.credentialManager != nil {
+	if s.core != nil && s.core.credentialManager != nil {
 		if err := s.core.credentialManager.CloseDriver(ctx, name); err != nil {
 			s.logger.Warn("failed to close driver during source deletion",
 				logger.String("source_name", name),
@@ -698,15 +1442,6 @@ func (s *CredentialConfigStore) DeleteSource(ctx context.Context, name string) e
 			// Continue with deletion even if driver cleanup fails
 		}
 	}
-
-	// Delete from storage
-	if err := s.deleteSource(ns.UUID, name); err != nil {
-		return err
-	}
-
-	// Remove from cache
-	cacheKey := s.buildSourceCacheKey(ns.UUID, name)
-	s.sourcesByID.Del(cacheKey)
 
 	s.logger.Info("deleted credential source",
 		logger.String("namespace", ns.UUID),
@@ -758,16 +1493,22 @@ func (s *CredentialConfigStore) ListSources(ctx context.Context) ([]*credential.
 // Rotation unregistration is handled for each entry.
 // This is called during namespace deletion.
 func (s *CredentialConfigStore) ClearNamespace(ctx context.Context) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	if s.isClosed() {
 		return ErrConfigStoreClosed
 	}
 
 	ns, err := s.getNamespaceFromContext(ctx)
 	if err != nil {
 		return err
+	}
+
+	// One critical section for the whole sweep: a create landing part-way through
+	// would otherwise survive a namespace deletion.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return ErrConfigStoreClosed
 	}
 
 	// Delete all specs first (removes references to sources)
@@ -787,6 +1528,7 @@ func (s *CredentialConfigStore) ClearNamespace(ctx context.Context) error {
 
 		cacheKey := s.buildSpecCacheKey(ns.UUID, spec.Name)
 		s.specsByID.Del(cacheKey)
+		s.bumpSpecRevision(ns.UUID, spec.Name)
 	}
 
 	// Delete all sources (no reference check needed since specs are already deleted)
@@ -831,6 +1573,33 @@ func (s *CredentialConfigStore) ValidateSpec(ctx context.Context, spec *credenti
 	return s.validateSpec(ctx, spec, false)
 }
 
+// revokeValidationLease releases the credential a create-time test-mint produced
+// at the source.
+//
+// Best effort, and deliberately not fatal: a spec that validated should not be
+// refused because the cleanup call failed. But the attempt has to be made and its
+// failure has to be visible, because nothing else in the system knows this lease
+// exists — it never reaches the expiration manager, so this is its only chance to
+// go back.
+//
+// Runs on a fresh context: the request's own may already be cancelled by the time
+// the deferred call fires.
+func (s *CredentialConfigStore) revokeValidationLease(driver credential.SourceDriver, leaseID, sourceName string) {
+	revokeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := credential.RevokeLease(revokeCtx, driver, leaseID); err != nil {
+		s.logger.Warn("failed to release the credential minted to validate a spec; it may still exist at the source",
+			logger.String("lease_id", leaseID),
+			logger.String("source", sourceName),
+			logger.Err(err))
+		return
+	}
+	s.logger.Debug("released the credential minted to validate a spec",
+		logger.String("lease_id", leaseID),
+		logger.String("source", sourceName))
+}
+
 // validateSpec validates a spec. When skipVerification is true the test-mint and
 // SpecVerifier checks are skipped — used by the connect seal and refresh-token
 // write-back, which already hold a known-good token and must not re-mint it.
@@ -856,9 +1625,26 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		return fmt.Errorf("failed to validate source reference: %w", err)
 	}
 
+	return s.validateSpecWithSource(ctx, spec, source, skipVerification)
+}
+
+// validateSpecWithSource is validateSpec against a given source rather than the
+// stored one. A keyless plan validates each spec it proposes against the
+// keyless source it proposes, neither of which exists yet.
+func (s *CredentialConfigStore) validateSpecWithSource(ctx context.Context, spec *credential.CredSpec, source *credential.CredSource, skipVerification bool) error {
 	// Validate TTL constraints
 	if spec.MinTTL > spec.MaxTTL && spec.MaxTTL != 0 {
 		return logical.ErrBadRequest("min_ttl cannot be greater than max_ttl")
+	}
+
+	// An azure source that signs with a KMS-held certificate key serves secret_read
+	// and on_behalf_of only. Refused here, ahead of the type and rotation rules that
+	// would otherwise answer a bearer_token spec with a demand for rotation_period it
+	// can never meet.
+	if source.Type == credential.SourceTypeAzure {
+		if err := drivers.AzureKMSCertificateSpecError(spec.Type, spec.Config, source.Config); err != nil {
+			return logical.ErrBadRequestf("%s", err.Error())
+		}
 	}
 
 	// Validate credential type exists
@@ -881,6 +1667,14 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				return logical.ErrBadRequestf("invalid config for type '%s': %s", spec.Type, err.Error())
 			}
 
+			// The stored-secret selection keys span several credential types but
+			// hinge on the mint method, so they are checked once here rather than
+			// repeated per type. Both fail open where they are ignored, which is
+			// what makes silence the wrong answer.
+			if err := credential.ValidateSecretSelection(spec.Config, source.Type); err != nil {
+				return logical.ErrBadRequestf("invalid config for type '%s': %s", spec.Type, err.Error())
+			}
+
 			// A credential field the source will not carry is dead config: the
 			// spec mints without it and the provider takes its fallback branch,
 			// which looks like a working mount rather than a misconfigured one.
@@ -894,7 +1688,7 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				}
 				return logical.ErrBadRequestf(
 					"spec sets credential field(s) %s that source '%s' does not carry: add them to the source's credential_fields (currently %q)",
-					strings.Join(missing, ", "), spec.Source, source.Config["credential_fields"])
+					strings.Join(missing, ", "), spec.Source, source.Config.Get("credential_fields"))
 			}
 
 			// A token-exchange spec (subject_token_source set) is minted fresh per
@@ -927,15 +1721,26 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		return logical.ErrBadRequestf("invalid token-exchange config: %s", err.Error())
 	}
 
+	// An azure on_behalf_of spec is the one other consumer of the delegation shape:
+	// the user's Entra token is the OBO assertion and the actor (a Warden assertion)
+	// authenticates the app. Its rules replace the token_exchange pins below.
+	azureOBO := source.Type == credential.SourceTypeAzure && drivers.AzureOnBehalfOf(spec.Type, spec.Config)
+	if azureOBO {
+		if err := drivers.AzureOnBehalfOfSpecError(spec.Config, source.Config); err != nil {
+			return logical.ErrBadRequestf("%s", err.Error())
+		}
+	}
+
 	// Any actor token source (agent_identity, warden_identity) is consumed only by
-	// the token_exchange driver, which forwards the actor to an RFC 8693 STS; every
-	// other driver ignores ActorToken entirely. Pin any actor source to a
-	// token_exchange source so a delegation spec can't be bound to a source that
+	// the token_exchange driver, which forwards the actor to an RFC 8693 STS, and by
+	// an azure on_behalf_of spec, which presents it as the app's client assertion;
+	// every other driver ignores ActorToken entirely. Pin any other actor source to
+	// a token_exchange source so a delegation spec can't be bound to a source that
 	// would silently drop the actor (losing the delegation and its audit
 	// attribution), and reject a grant with no actor slot — otherwise the spec is
 	// accepted but every request fails at mint time. These are source-aware, so
 	// they live here, not in the structural validator above.
-	if actorSrc := spec.Config[credential.ConfigActorTokenSource]; actorSrc != "" && actorSrc != credential.SourceNone {
+	if actorSrc := spec.Config.Get(credential.ConfigActorTokenSource); actorSrc != "" && actorSrc != credential.SourceNone && !azureOBO {
 		if source.Type != credential.SourceTypeTokenExchange {
 			return logical.ErrBadRequestf("field '%s': an actor token requires a '%s' source (only token exchange consumes an actor token)",
 				credential.ConfigActorTokenSource, credential.SourceTypeTokenExchange)
@@ -949,9 +1754,12 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 	// subject_token_source=user_identity forwards the raw user credential as the
 	// RFC 8693 subject_token, which only the token_exchange driver consumes. Pin it
 	// to a token_exchange source so a federation driver (gcp/aws/azure/vault) can
-	// never be handed the raw user JWT as its own federation login token.
-	if spec.Config[credential.ConfigSubjectTokenSource] == credential.SourceUserIdentity &&
-		source.Type != credential.SourceTypeTokenExchange {
+	// never be handed the raw user JWT as its own federation login token. An azure
+	// on_behalf_of spec keeps that invariant: the user's token is only ever the OBO
+	// assertion, and the app authenticates with the actor assertion or the source's
+	// secret, so it is the one exception.
+	if spec.Config.Get(credential.ConfigSubjectTokenSource) == credential.SourceUserIdentity &&
+		source.Type != credential.SourceTypeTokenExchange && !azureOBO {
 		return logical.ErrBadRequestf("field '%s': '%s' requires a '%s' source",
 			credential.ConfigSubjectTokenSource, credential.SourceUserIdentity, credential.SourceTypeTokenExchange)
 	}
@@ -962,12 +1770,66 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 	// otherwise it is required. This check is source-aware, so it lives here rather
 	// than in the source-agnostic structural validator above. Re-checked at mint
 	// time (defence in depth).
-	mintsAssertion := spec.Config[credential.ConfigSubjectTokenSource] == credential.SourceWardenIdentity ||
-		spec.Config[credential.ConfigActorTokenSource] == credential.SourceWardenIdentity
-	if mintsAssertion && spec.Config[credential.ConfigAssertionAudience] == "" {
+	mintsAssertion := spec.Config.Get(credential.ConfigSubjectTokenSource) == credential.SourceWardenIdentity ||
+		spec.Config.Get(credential.ConfigActorTokenSource) == credential.SourceWardenIdentity
+	if mintsAssertion && spec.Config.Get(credential.ConfigAssertionAudience) == "" {
 		if _, ok := drivers.DeriveAssertionAudience(source.Type, source.Config, spec.Config); !ok {
 			return logical.ErrBadRequestf("field '%s': is required when the subject or actor is '%s'",
 				credential.ConfigAssertionAudience, credential.SourceWardenIdentity)
+		}
+	}
+
+	// The assertion profile — that the named claim shape exists, that a
+	// source-pinned profile is paired with a source type it supports, and that the
+	// profile accepts the spec's other assertion_* keys. Source-aware and
+	// registry-aware, so it lives here and not in the structural validator.
+	//
+	// This is MANDATORY, not belt-and-braces: nothing in the tree rejects an
+	// unknown spec-config VALUE on its own (ValidateSchema walks only declared
+	// validators), so without this call assertion_profile=aws2 would be stored
+	// happily and fail only at mint, on every request the spec ever served.
+	//
+	// It does not close the misspelled-KEY gap — assertion_profle=aws is still
+	// accepted silently and the spec mints the default shape. That gap is
+	// pre-existing and applies equally to every other assertion_* key; closing it
+	// means unknown-key rejection across all spec config.
+	if mintsAssertion {
+		if err := credential.ValidateAssertionProfileConfig(s.core.assertionProfileRegistry, spec.Config, source.Type); err != nil {
+			return logical.ErrBadRequestf("%s", err.Error())
+		}
+	}
+
+	// A grafana spec mints tokens on a service account the operator provisioned, so
+	// it must name one — its own, or the source's default. This is the layer that
+	// can see both: the credential type is handed the source's TYPE but never its
+	// config, so it validates the value's shape and cannot check that a value
+	// exists at all. Checked here rather than left to mint time because a spec
+	// naming no account fails every request it ever serves.
+	if source.Type == credential.SourceTypeGrafana {
+		if credential.GetString(spec.Config, "service_account_id", "") == "" &&
+			credential.GetString(source.Config, "service_account_id", "") == "" {
+			return logical.ErrBadRequestf("service_account_id is required for a grafana spec: set it on the spec, or on the source as a default; Warden mints tokens on an account you provision in Grafana, it does not create one")
+		}
+		// A chained grafana source cannot revoke — there is no caller at lease
+		// expiry to fetch its token as — so a token it mints stays live until its
+		// own expiry however the lease ended. The driver refuses an over-long one
+		// at mint; this is the same rule where an operator can act on it, at the
+		// write that introduces it. Only this layer can apply it: the credential
+		// type is handed the source's TYPE but never its config, so it cannot tell
+		// a chained source from an inline one.
+		if source.Config.Get(credential.ConfigSecretSpec) != "" {
+			if raw := credential.GetString(spec.Config, "token_expiry", ""); raw != "" {
+				if d, err := time.ParseDuration(raw); err == nil && d > drivers.GrafanaChainedMaxTokenExpiry {
+					return logical.ErrBadRequestf("'token_expiry' %s exceeds the %s ceiling for a chained grafana source: revocation cannot run without a caller to fetch the token as, so a minted token stays live until it expires",
+						raw, drivers.GrafanaChainedMaxTokenExpiry)
+				}
+			}
+		}
+	}
+
+	if source.Type == credential.SourceTypeOAuth2 {
+		if err := oauth2SpecClientAuthError(spec.Config, source.Config); err != nil {
+			return logical.ErrBadRequestf("%s", err.Error())
 		}
 	}
 
@@ -978,25 +1840,133 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 	// fail-fast; that block is skipped when verification is disabled or the source is
 	// local, so the authoritative eligibility guard is at mint time
 	// (MintFromSecretWithCleanup fails closed if the driver isn't a ChainedSecretMinter).
-	chainedRef := spec.Config[credential.ConfigSecretSpec]
+	chainedRef := spec.Config.Get(credential.ConfigSecretSpec)
 	if chainedRef == "" {
-		chainedRef = source.Config[credential.ConfigSecretSpec]
+		chainedRef = source.Config.Get(credential.ConfigSecretSpec)
 	}
 	if chainedRef != "" {
-		// For token_exchange, client-secret chaining is a SOURCE concern (client auth
-		// lives on the source, and the factory only sees source config). A spec-level
-		// secret_spec would leave the source's inline client_secret as dead config at
-		// mint — reject it with clear guidance.
-		if source.Type == credential.SourceTypeTokenExchange && spec.Config[credential.ConfigSecretSpec] != "" {
-			return logical.ErrBadRequestf("for a token_exchange source, set secret_spec on the source (client authentication is a source concern), not on the spec")
+		// A chained spec mints from material fetched at request time, so it embeds no
+		// secret of its own and a rotation_period schedules a rotation that can never
+		// succeed — the same reasoning that rejects one on a token-exchange spec and
+		// on a chained source. Whoever owns the referenced spec rotates it there.
+		if spec.RotationPeriod > 0 {
+			return logical.ErrBadRequestf("rotation_period does not apply to a chained credential spec (secret_spec %q); the referenced spec's owner rotates the secret", chainedRef)
+		}
+
+		// For token_exchange, gitlab and oauth2, chaining is a SOURCE concern: the secret
+		// being chained authenticates the source itself (client auth, a personal access
+		// token), and the factory only sees source config. A spec-level secret_spec
+		// would leave the source's inline secret as dead config at mint, and would
+		// slip past the source-level validation that gates which auth methods may
+		// chain at all — so reject it with clear guidance.
+		if spec.Config.Get(credential.ConfigSecretSpec) != "" {
+			switch source.Type {
+			case credential.SourceTypeTokenExchange:
+				return logical.ErrBadRequestf("for a token_exchange source, set secret_spec on the source (client authentication is a source concern), not on the spec")
+			case credential.SourceTypeGitLab:
+				return logical.ErrBadRequestf("for a gitlab source, set secret_spec on the source (the chained secret — a personal access token, or an OAuth application secret — authenticates the source), not on the spec")
+			case credential.SourceTypeOAuth2:
+				return logical.ErrBadRequestf("for an oauth2 source, set secret_spec on the source (the chained client credential authenticates the source), not on the spec")
+			case credential.SourceTypeOVH:
+				// ovh chains at both levels, and the level says which secret is
+				// meant: an access_keys spec's own reference is the key pair it
+				// serves, while the client credential the grant is made with is a
+				// source concern like the others above.
+				if credential.GetString(spec.Config, "mint_method", "") != "access_keys" {
+					return logical.ErrBadRequestf("for an ovh source, set secret_spec on the source (the chained client credential authenticates the source's own OAuth2 calls), not on the spec; a spec-level reference is for access_keys, whose credential is the referenced pair itself")
+				}
+			case credential.SourceTypeIBM:
+				// ibm chains at both levels too: an access_keys spec's own reference
+				// is the COS pair it serves, while the api key the IAM token grant is
+				// made with is a source concern like the others above.
+				if credential.GetString(spec.Config, "mint_method", "") != "access_keys" {
+					return logical.ErrBadRequestf("for an ibm source, set secret_spec on the source (the chained api key authenticates the source's own IAM token grant), not on the spec; a spec-level reference is for access_keys, whose credential is the referenced pair itself")
+				}
+			case credential.SourceTypeElastic:
+				// elastic chains only at the source: the fetched key authenticates
+				// its own Security API calls, and every spec on it creates a fresh
+				// cluster key rather than serving a stored one.
+				//
+				// The api_key type refuses this first and with the same guidance, so
+				// this is the layer that holds when the type registry is unavailable
+				// and credType is nil — the same reason the ovh arm below exists.
+				return logical.ErrBadRequestf("for an elastic source, set secret_spec on the source (the chained api key authenticates the source's own Security API calls), not on the spec")
+			case credential.SourceTypeGrafana:
+				// Same shape as elastic: the fetched token authenticates the source's
+				// own service-account calls, and every spec on it mints a fresh token
+				// rather than serving a stored one.
+				return logical.ErrBadRequestf("for a grafana source, set secret_spec on the source (the chained token authenticates the source's own service-account calls), not on the spec")
+			case credential.SourceTypeAzure:
+				// The chained signing capability authenticates the source's own app
+				// with its certificate: a source concern, like client auth above.
+				return logical.ErrBadRequestf("for an azure source, set secret_spec on the source (the chained signing capability authenticates the source's app with its certificate), not on the spec")
+			}
+		}
+		// An oauth2 source that chains its client credential resolves the pair per mint,
+		// as the calling agent. Two spec-level settings cannot survive that.
+		if source.Type == credential.SourceTypeOAuth2 && source.Config.Get(credential.ConfigSecretSpec) != "" {
+			// The consent steps that seal an authorization_code grant run on the system
+			// backend with no caller, so they have no identity to fetch the chained pair
+			// as and would fall back to a client credential the source does not hold.
+			// Read from config rather than through ConnectGated: credType is nil when the
+			// type registry is unavailable, and this guard must not be the one that skips.
+			if credential.GetString(spec.Config, "auth_method", "") == "authorization_code" {
+				return logical.ErrBadRequestf("a chained oauth2 source (secret_spec %q) supports auth_method=client_credentials only; the consent flow runs without a caller and cannot fetch the chained client credential", chainedRef)
+			}
+			// The client credential resolves spec-over-source, so a half left here would
+			// be presented against the other half fetched from the chain.
+			for _, key := range []string{"client_id", "client_secret", "private_key", "client_assertion_kid"} {
+				if credential.GetString(spec.Config, key, "") != "" {
+					return logical.ErrBadRequestf("%s must be omitted when the source sets secret_spec (%q); the referenced spec supplies the whole client credential", key, chainedRef)
+				}
+			}
+		}
+		// A scaleway source chains the management key that authorises creating fresh
+		// pairs, which is a dynamic_keys concern. A static_keys spec on it does not
+		// use that key at all — its credential is a pair of its own — so source-level
+		// routing would hand it the management payload and mint from the wrong secret.
+		// Such a spec must name its own reference. (A spec that already does is not
+		// here: chainedRef would be its own, and the type validator has already
+		// refused it any inline pair.)
+		if source.Type == credential.SourceTypeScaleway &&
+			source.Config.Get(credential.ConfigSecretSpec) != "" &&
+			spec.Config.Get(credential.ConfigSecretSpec) == "" &&
+			credential.GetString(spec.Config, "mint_method", "") == "static_keys" {
+			return logical.ErrBadRequestf("a static_keys spec on a chained scaleway source (secret_spec %q) must set its own secret_spec naming a spec that yields its access_key and secret_key; the source's chained secret is a management key, not this credential", chainedRef)
+		}
+		// An access_keys spec's credential is the key pair the referenced spec
+		// yields, so the reference has to be its own. Reached by a source-level one
+		// it would be handed whatever that source authenticates with — a client
+		// credential, not this pair.
+		//
+		// The type validator refuses this shape first, since it requires every
+		// access_keys spec to name a reference. This is the layer that holds when
+		// the type registry is unavailable and credType is nil, which is also why
+		// the store's own tests are what exercise it.
+		if source.Type == credential.SourceTypeOVH &&
+			spec.Config.Get(credential.ConfigSecretSpec) == "" &&
+			credential.GetString(spec.Config, "mint_method", "") == "access_keys" {
+			return logical.ErrBadRequestf("an access_keys spec must set its own secret_spec naming a spec that yields its access_key and secret_key; the source's chained secret (%q) is a client credential, not this pair", chainedRef)
+		}
+		// The same rule for ibm, whose access_keys spec serves a COS HMAC pair. A
+		// source-level reference on an ibm source describes the api key its own IAM
+		// token grant is made with, so routing this spec by it would mint from the
+		// wrong secret entirely.
+		if source.Type == credential.SourceTypeIBM &&
+			spec.Config.Get(credential.ConfigSecretSpec) == "" &&
+			credential.GetString(spec.Config, "mint_method", "") == "access_keys" {
+			return logical.ErrBadRequestf("an access_keys spec must set its own secret_spec naming a spec that yields its access_key_id and secret_access_key; the source's chained secret (%q) is its IAM api key, not this pair", chainedRef)
 		}
 		// A chained consumer's identity normally flows through the referenced secret-spec,
 		// so its own subject/actor exchange config would be dead — reject that confusing
 		// combination. The token_exchange driver is the exception: it is itself an
 		// exchange spec whose *client secret* is chained (ChainedExchangeMinter), so it
-		// legitimately sets both. (Driver-free type gate; the ChainedExchangeMinter
-		// capability is asserted in the test-mint block and at mint time.)
-		if credential.SpecRequestsExchange(spec.Config) && source.Type != credential.SourceTypeTokenExchange {
+		// legitimately sets both. So is an azure on_behalf_of spec over a source whose
+		// certificate key is chained: it exchanges the user's token, and the chained
+		// signing capability authenticates the app. (Driver-free type gate; the
+		// ChainedExchangeMinter capability is asserted in the test-mint block and at
+		// mint time.)
+		if credential.SpecRequestsExchange(spec.Config) && source.Type != credential.SourceTypeTokenExchange && !azureOBO {
 			return logical.ErrBadRequestf("a chained spec (secret_spec set) must not also set its own subject_token_source/actor_token_source; the caller identity is carried by the referenced secret_spec %q", chainedRef)
 		}
 		// Conversely, a token_exchange spec whose client secret is chained still needs a
@@ -1012,8 +1982,8 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 		// secret_cache_ttl (spec or source) must parse as a duration; otherwise a typo
 		// (e.g. "30min") would silently disable caching, so an operator who meant to opt
 		// in gets no signal. GetDuration swallows the parse error at mint, so reject here.
-		for _, cfg := range []map[string]string{spec.Config, source.Config} {
-			if raw, ok := cfg[credential.ConfigSecretCacheTTL]; ok && raw != "" {
+		for _, cfg := range []credential.Config{spec.Config, source.Config} {
+			if raw, ok := cfg.Lookup(credential.ConfigSecretCacheTTL); ok && raw != "" {
 				if _, perr := time.ParseDuration(raw); perr != nil {
 					return logical.ErrBadRequestf("field '%s': %q is not a valid duration: %v", credential.ConfigSecretCacheTTL, raw, perr)
 				}
@@ -1075,8 +2045,23 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 				}
 
 				if runTestMint {
-					if _, _, _, _, err := driver.MintCredential(ctx, testSpec); err != nil {
-						return logical.ErrBadRequestf("credential test failed for spec type '%s': %s", spec.Type, err.Error())
+					_, _, _, leaseID, mintErr := driver.MintCredential(ctx, testSpec)
+					// A test-mint that reaches the source creates a real credential
+					// there. Nothing downstream registers this lease with the expiration
+					// manager — it is not cached, not leased, never revoked — so without
+					// this release it is abandoned at the source. Where the source's
+					// credentials carry no expiry of their own, that is a permanent,
+					// fully privileged credential nobody tracks, one per spec write.
+					//
+					// Deferred rather than released inline: verification below can fail
+					// too, and this lease must go back either way. Registered after the
+					// Cleanup above so it runs first, while the client still has
+					// connections to use.
+					if leaseID != "" {
+						defer s.revokeValidationLease(driver, leaseID, spec.Source)
+					}
+					if mintErr != nil {
+						return logical.ErrBadRequestf("credential test failed for spec type '%s': %s", spec.Type, mintErr.Error())
 					}
 
 					// Run additional verification if the driver supports it.
@@ -1108,6 +2093,30 @@ func (s *CredentialConfigStore) validateSpec(ctx context.Context, spec *credenti
 	return nil
 }
 
+// authMethodOIDCFederation is the auth_method every federation-capable source type
+// sets. The drivers each define their own copy for their config schema; this is
+// core's, for the rules that hold across types regardless of the provider behind
+// them.
+const authMethodOIDCFederation = "oidc_federation"
+
+// isFederationSource reports whether a source authenticates by presenting a
+// caller's identity assertion. Every such driver — aws, azure, gcp, hvault,
+// kubernetes, alicloud, anthropic, openai — spells it the same way, so one predicate covers
+// them all and covers a new one the day it lands.
+//
+// Not every keyless source federates: ibm, ovh, scaleway and cloudflare have no
+// assertion grant to exchange against, so they remove their stored secret by
+// chaining instead and are gated by the secret_spec rules rather than by this
+// predicate.
+//
+// This is narrower than "holds no secret", which also describes a chained source
+// or spec (secret_spec), whose secret lives in the spec it references. Those are
+// gated separately, by the chained-source rule in validateSource and the
+// chained-spec rule in CreateSpec.
+func isFederationSource(config credential.Config) bool {
+	return credential.GetString(config, "auth_method", "") == authMethodOIDCFederation
+}
+
 // ValidateSource validates a source before creation/update
 func (s *CredentialConfigStore) ValidateSource(ctx context.Context, source *credential.CredSource) error {
 	return s.validateSource(ctx, source, false)
@@ -1127,9 +2136,16 @@ func (s *CredentialConfigStore) validateSource(ctx context.Context, source *cred
 
 	// Credential chaining: a source-level secret_spec makes every spec on this
 	// source draw its secret from the referenced spec. Validate that reference.
-	if ref := source.Config[credential.ConfigSecretSpec]; ref != "" {
+	if ref := source.Config.Get(credential.ConfigSecretSpec); ref != "" {
 		if err := s.validateSecretSpecRef(ctx, ref); err != nil {
 			return err
+		}
+		// A chained source holds no secret of its own, so there is nothing here to
+		// rotate — the referenced spec's owner rotates it at the source of truth.
+		// Accepting a rotation_period would schedule a rotation that either no-ops or
+		// invalidates someone else's secret.
+		if source.RotationPeriod > 0 {
+			return logical.ErrBadRequestf("rotation_period does not apply to a chained source (secret_spec %q); the referenced spec's owner rotates the secret", ref)
 		}
 	}
 
@@ -1140,6 +2156,17 @@ func (s *CredentialConfigStore) validateSource(ctx context.Context, source *cred
 	if source.Type == credential.SourceTypeVault && source.RotationPeriod <= 0 &&
 		credential.GetString(source.Config, "auth_method", "") != "oidc_federation" {
 		return logical.ErrBadRequest("rotation_period is required for hvault credential sources (except keyless auth_method=oidc_federation)")
+	}
+
+	// The other direction, and for every type rather than one: a federated source
+	// authenticates with a caller assertion and holds no secret, so its driver
+	// reports SupportsRotation false and the manager can never complete a cycle. It
+	// errors, retries to MaxRotateAttempts, parks the entry as failed, comes back
+	// after FailedMinAge, and repeats for the life of the source.
+	if isFederationSource(source.Config) && source.RotationPeriod > 0 {
+		return logical.ErrBadRequestf(
+			"rotation_period does not apply to a federated credential source (auth_method=%s); it holds no secret of its own to rotate",
+			authMethodOIDCFederation)
 	}
 
 	// Validate rotation_period is within configured bounds
@@ -1168,6 +2195,20 @@ func (s *CredentialConfigStore) validateSource(ctx context.Context, source *cred
 		if err == nil {
 			if err := factory.ValidateConfig(source.Config); err != nil {
 				return logical.ErrBadRequestf("invalid config for source type '%s': %s", source.Type, err.Error())
+			}
+
+			// A rotation_period the driver could never honour is worse than one
+			// that is refused: the manager retries, parks the entry as failed,
+			// comes back after FailedMinAge and repeats for the life of the
+			// source, all of it only in the server log. Factories opt in to this
+			// check; see credential.RotationConfigValidator for why
+			// SupportsRotation cannot be consulted here instead.
+			if source.RotationPeriod > 0 {
+				if rv, ok := factory.(credential.RotationConfigValidator); ok {
+					if err := rv.ValidateRotationConfig(source.Config); err != nil {
+						return logical.ErrBadRequestf("rotation_period cannot be honoured for source type '%s': %s", source.Type, err.Error())
+					}
+				}
 			}
 
 			// Test connection by creating a temporary driver instance
@@ -1208,6 +2249,43 @@ func (s *CredentialConfigStore) CheckSourceReferences(ctx context.Context, sourc
 	return refs, nil
 }
 
+// oauth2SpecClientAuthError reports an oauth2 spec whose client credential does not fit
+// its source's client_auth. The credential resolves spec-over-source, but the method it
+// is presented with is the source's alone, so only a layer that sees both configs can
+// tell. It runs when a spec is written and again when its source is, since either
+// write can introduce the mismatch.
+func oauth2SpecClientAuthError(specCfg, sourceCfg credential.Config) error {
+	// On a chained source the whole client credential comes from the payload, and the
+	// chaining guard refuses any of it on the spec, naming why. Answering here first
+	// would give a reason that is not the real one.
+	if credential.GetString(sourceCfg, credential.ConfigSecretSpec, "") != "" {
+		return nil
+	}
+	clientAuth := credential.GetString(sourceCfg, "client_auth", "client_secret_post")
+
+	// A spec holding the half another method uses would be stored, and reported as a
+	// stored secret, while never being sent.
+	unused := []string{"private_key", "client_assertion_kid"}
+	if clientAuth == "private_key_jwt" {
+		unused = []string{"client_secret"}
+	}
+	for _, key := range unused {
+		if credential.GetString(specCfg, key, "") != "" {
+			return fmt.Errorf("%s must be omitted from a spec on an oauth2 source with client_auth=%s; that method never sends it", key, clientAuth)
+		}
+	}
+
+	// A kid names the key it was stored beside. A spec without a key of its own signs
+	// with the source's, under the source's kid, so a kid of its own would be ignored —
+	// and an authorization server choosing keys by kid would be told about the wrong one.
+	if clientAuth == "private_key_jwt" &&
+		credential.GetString(specCfg, "client_assertion_kid", "") != "" &&
+		credential.GetString(specCfg, "private_key", "") == "" {
+		return fmt.Errorf("client_assertion_kid names the key stored beside it, and this spec has none: set private_key beside it, or drop it to sign with the source's key under the source's kid")
+	}
+	return nil
+}
+
 // checkBoundSpecsStillCarried rejects a source edit that would stop a bound spec's
 // credential fields from travelling.
 //
@@ -1218,21 +2296,46 @@ func (s *CredentialConfigStore) CheckSourceReferences(ctx context.Context, sourc
 // working mount. The operator is told which specs to fix.
 //
 // Widening is always fine; only a name that disappears can strand anything.
-func (s *CredentialConfigStore) checkBoundSpecsStillCarried(ctx context.Context, source *credential.CredSource) error {
-	if s.core == nil || s.core.credentialTypeRegistry == nil {
+//
+// Takes no lock and fills no cache: it runs inside UpdateSource's critical
+// section, where the bound specs, read there, must not be able to change
+// underneath it.
+//
+// It also re-applies oauth2SpecClientAuthError, since a changed client_auth strands a
+// spec as surely as a narrowed credential_fields does.
+func (s *CredentialConfigStore) checkBoundSpecsStillCarriedLocked(source *credential.CredSource, bound []*credential.CredSpec) error {
+	if s.core == nil {
 		return nil
 	}
 
-	refs, err := s.CheckSourceReferences(ctx, source.Name)
-	if err != nil {
-		// A listing failure must not block an unrelated source edit; the
-		// spec-level guard still covers every future write.
-		s.logger.Warn("could not check specs bound to this source for uncarried fields",
-			logger.String("source_name", source.Name), logger.Err(err))
-		return nil
-	}
+	for _, spec := range bound {
+		// A changed client_auth changes which half of a spec's client credential is
+		// sent. A spec still holding the other half would keep reporting a stored
+		// secret while every mint failed for want of the one it lacks. Needs no type
+		// registry: it reads the two configs alone.
+		if source.Type == credential.SourceTypeOAuth2 {
+			if err := oauth2SpecClientAuthError(spec.Config, source.Config); err != nil {
+				return logical.ErrBadRequestf("spec %q: %s; update the spec first", spec.Name, err.Error())
+			}
+		}
+		// What authenticates an on_behalf_of spec's app follows the source's
+		// auth_method, so switching a source between static and keyless strands the
+		// spec (an actor the static source cannot use, or no credential at all).
+		if source.Type == credential.SourceTypeAzure && drivers.AzureOnBehalfOf(spec.Type, spec.Config) {
+			if err := drivers.AzureOnBehalfOfSpecError(spec.Config, source.Config); err != nil {
+				return logical.ErrBadRequestf("spec %q: %s; update the spec first", spec.Name, err.Error())
+			}
+		}
+		// Moving a certificate source's key into a KMS strands a bearer_token spec.
+		if source.Type == credential.SourceTypeAzure {
+			if err := drivers.AzureKMSCertificateSpecError(spec.Type, spec.Config, source.Config); err != nil {
+				return logical.ErrBadRequestf("spec %q: %s; move or delete the spec first", spec.Name, err.Error())
+			}
+		}
 
-	for _, spec := range refs {
+		if s.core.credentialTypeRegistry == nil {
+			continue
+		}
 		credType, err := s.core.credentialTypeRegistry.GetByName(spec.Type)
 		if err != nil {
 			continue
@@ -1243,51 +2346,33 @@ func (s *CredentialConfigStore) checkBoundSpecsStillCarried(ctx context.Context,
 				"spec %q sets credential field(s) %s that this source would no longer carry: keep them in credential_fields, or remove them from the spec first",
 				spec.Name, strings.Join(missing, ", "))
 		}
+
+		// A grafana spec may take its service account from the source's default.
+		// Dropping that default is accepted by source validation on its own — the
+		// key is optional there — and would leave every silent spec failing at
+		// mint with nothing at write time having said so. The spec-level guard
+		// cannot catch it either: it runs when a SPEC is written, and nothing is
+		// being written here.
+		if source.Type == credential.SourceTypeGrafana &&
+			credential.GetString(source.Config, "service_account_id", "") == "" &&
+			credential.GetString(spec.Config, "service_account_id", "") == "" {
+			return logical.ErrBadRequestf(
+				"spec %q relies on this source's service_account_id default, which this update would remove: set service_account_id on the spec first, or keep the default",
+				spec.Name)
+		}
 	}
 	return nil
 }
 
-// CheckSpecReferences returns the names of sources and specs that reference the
-// given spec as their credential-chaining secret source (secret_spec). It scans
-// both sources (source-level secret_spec) and specs (spec-level secret_spec) so a
-// referenced secret-spec cannot be deleted while any consumer still points at it.
-func (s *CredentialConfigStore) CheckSpecReferences(ctx context.Context, specName string) ([]string, error) {
-	sources, err := s.ListSources(ctx)
-	if err != nil {
-		return nil, err
-	}
-	specs, err := s.ListSpecs(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var refs []string
-	for _, src := range sources {
-		if src.Config[credential.ConfigSecretSpec] == specName {
-			refs = append(refs, "source/"+src.Name)
-		}
-	}
-	for _, spec := range specs {
-		if spec.Name == specName {
-			continue // a spec never references itself
-		}
-		if spec.Config[credential.ConfigSecretSpec] == specName {
-			refs = append(refs, "spec/"+spec.Name)
-		}
-	}
-
-	return refs, nil
-}
-
-// validateSecretSpecRef validates a credential-chaining reference: the named
-// secret-spec must exist, must not itself chain (one hop only), and must be minted
-// as the caller (subject_token_source set) so it federates per request rather than
-// degrading to the non-exchange path and failing late with an opaque backend error.
+// validateSecretSpecRef validates a credential-chaining reference when a consumer
+// is written: the named secret-spec must exist and satisfy secretSpecRefRules.
 //
 // It deliberately does NOT assert the referenced spec is leaseless here: that would
 // need per-type mint-method introspection this layer lacks, and the authoritative
-// guard is at mint time — issueChained revokes and fails closed if a referenced spec
-// ever returns a lease (including after a config-drift edit this check couldn't see).
+// guard is at mint time — the chaining path revokes and fails closed if a referenced
+// spec ever returns a lease (including after a config-drift edit this check couldn't
+// see). A referenced credential with a lifetime but no lease is permitted; it orphans
+// nothing, and the chaining cache bounds its entry to that lifetime.
 func (s *CredentialConfigStore) validateSecretSpecRef(ctx context.Context, ref string) error {
 	refSpec, err := s.GetSpec(ctx, ref)
 	if err != nil {
@@ -1296,15 +2381,28 @@ func (s *CredentialConfigStore) validateSecretSpecRef(ctx context.Context, ref s
 		}
 		return fmt.Errorf("failed to validate secret_spec %q: %w", ref, err)
 	}
-
-	if refSpec.Config[credential.ConfigSecretSpec] != "" {
-		return logical.ErrBadRequestf("secret_spec %q must not itself set secret_spec (chaining is limited to one hop)", ref)
-	}
 	refSource, err := s.GetSource(ctx, refSpec.Source)
 	if err != nil {
 		return fmt.Errorf("secret_spec %q: failed to load its source %q: %w", ref, refSpec.Source, err)
 	}
-	if refSource.Config[credential.ConfigSecretSpec] != "" {
+	return secretSpecRefRules(ref, refSpec, refSource)
+}
+
+// secretSpecRefRules holds what a spec must be to be referenced as a secret_spec.
+// It is checked where a reference is made (validateSecretSpecRef) and again where
+// a referenced spec, or its source, is edited, so an edit cannot break a reference
+// that was valid when made.
+//
+//   - It must not itself set secret_spec, nor its source: chaining is one hop.
+//   - It must be minted as the session-pinned caller.
+//
+// An on_behalf_of spec needs no exception: it requires subject_token_source
+// user_identity, which the last rule refuses.
+func secretSpecRefRules(ref string, refSpec *credential.CredSpec, refSource *credential.CredSource) error {
+	if refSpec.Config.Get(credential.ConfigSecretSpec) != "" {
+		return logical.ErrBadRequestf("secret_spec %q must not itself set secret_spec (chaining is limited to one hop)", ref)
+	}
+	if refSource.Config.Get(credential.ConfigSecretSpec) != "" {
 		return logical.ErrBadRequestf("secret_spec %q's source must not set secret_spec (chaining is limited to one hop)", ref)
 	}
 
@@ -1320,12 +2418,12 @@ func (s *CredentialConfigStore) validateSecretSpecRef(ctx context.Context, ref s
 	// session-pinned requirement is on the REFERENCED spec regardless.) Reject anything else
 	// (including an unset/"none" subject, which would otherwise degrade to the
 	// non-exchange path and fail late with an opaque backend error).
-	switch refSpec.Config[credential.ConfigSubjectTokenSource] {
+	switch refSpec.Config.Get(credential.ConfigSubjectTokenSource) {
 	case credential.SourceWardenIdentity, credential.SourceAgentIdentity:
 		// session-pinned — safe
 	default:
 		return logical.ErrBadRequestf("secret_spec %q must set subject_token_source=%s or %s (got %q); a chained secret must be minted as the session-pinned caller",
-			ref, credential.SourceWardenIdentity, credential.SourceAgentIdentity, refSpec.Config[credential.ConfigSubjectTokenSource])
+			ref, credential.SourceWardenIdentity, credential.SourceAgentIdentity, refSpec.Config.Get(credential.ConfigSubjectTokenSource))
 	}
 
 	return nil
@@ -1357,14 +2455,18 @@ func (c *Core) teardownCredentialConfigStore() error {
 
 // setupCredentialManager creates and initializes the global credential manager
 // This is called during unseal after setupCredentialConfigStore
-func (c *Core) setupCredentialManager(ctx context.Context) error {
+func (c *Core) setupCredentialManager(ctx context.Context, opts ...credential.ManagerOption) error {
 	// Create global Manager with CredentialConfigStore as ConfigStoreAccessor
 	// Note: Credentials are cache-only (not persisted) - ExpirationEntry handles lease revocation
+	// The configured cache budget comes first, so options the caller passes
+	// win; 0 keeps the manager's default.
+	opts = append([]credential.ManagerOption{credential.WithCacheMaxBytes(c.credentialCacheMaxBytes())}, opts...)
 	manager, err := credential.NewManager(
 		c.credentialTypeRegistry,
 		c.credentialDriverRegistry,
 		c.credConfigStore, // Implements ConfigStoreAccessor interface
 		c.logger.WithSystem("credential.manager"),
+		opts...,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create credential manager: %w", err)
@@ -1385,8 +2487,30 @@ func (c *Core) teardownCredentialManager() error {
 		c.credentialManager = nil
 	}
 
+	// The driver registry survives the manager: it is built once per process
+	// and handed to each new manager on promotion. Close its instances too, so
+	// a node that becomes active again rebuilds every driver from storage
+	// instead of minting with config another node has since replaced.
+	//
+	// No driver can be built from here on: the manager stopped above, and its
+	// coordinator refuses every later build, while a build already running is
+	// refused at install by the epoch CloseAll bumps. A mint already in flight
+	// keeps the driver it holds and finishes or fails on its own; a closed
+	// instance stays usable to it.
+	if c.credentialDriverRegistry != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), driverCloseTimeout)
+		defer cancel()
+		if closed := c.credentialDriverRegistry.CloseAll(ctx); closed > 0 {
+			c.logger.Info("credential drivers closed", logger.Int("count", closed))
+		}
+	}
+
 	return nil
 }
+
+// driverCloseTimeout bounds the driver cleanups run when the node stops being
+// active. Cleanup is best-effort; a hung one must not stall the step-down.
+const driverCloseTimeout = 10 * time.Second
 
 // GetCredentialManager returns the global credential manager
 // The manager uses namespace-aware cache keys and storage paths for isolation

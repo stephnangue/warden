@@ -3,6 +3,9 @@ package types
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
@@ -10,10 +13,10 @@ import (
 )
 
 // KeyValueCredType is a generic, structure-agnostic credential type: its Data is
-// the arbitrary key/value map returned by the source (e.g. a Vault KV v2 read via
-// mint_method=kv2_read), with no required primary field. It lets a referenced
-// "secret spec" (credential chaining) carry secret material under its natural key
-// names instead of being forced into a typed shape like api_key.
+// the arbitrary key/value map the source returned, with no required primary field.
+// It lets a referenced "secret spec" (credential chaining) carry secret material
+// under its natural key names instead of being forced into a typed shape like
+// api_key.
 //
 // It deliberately does NOT embed BaseTokenType: that base requires a primary field
 // and copies only the primary + listed optional fields, dropping every other key —
@@ -28,7 +31,7 @@ func (t *KeyValueCredType) Metadata() credential.TypeMetadata {
 	return credential.TypeMetadata{
 		Name:        credential.TypeKeyValue,
 		Category:    credential.CategoryAPI,
-		Description: "Generic key/value secret material with arbitrary fields (e.g. a Vault KV v2 read via mint_method=kv2_read)",
+		Description: "Generic key/value secret material with arbitrary fields, read from a store that holds it under its own key names",
 		DefaultTTL:  0, // static read, no default TTL
 	}
 }
@@ -39,41 +42,445 @@ func (t *KeyValueCredType) Metadata() credential.TypeMetadata {
 func (t *KeyValueCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
 		credential.StringField("mint_method").
-			OneOf("kv2_read").
-			Describe("Mint method (kv2_read reads a Vault KV v2 secret verbatim)").
+			OneOf("kv2_read", "transit_signer", "secret_read").
+			Describe("Mint method: kv2_read reads a KV v2 secret and transit_signer mints a scoped signing capability, both on an hvault source; secret_read reads a stored secret on an aws, gcp or azure source").
 			Example("kv2_read"),
 
+		credential.StringField("secret_name").
+			Describe("Secret to read: on a gcp source a bare id or a 'projects/<project>/secrets/<name>' resource, on an azure source a Key Vault secret name (required for secret_read on both). Supports {{user.<claim>}} and {{agent.<claim>}} templating").
+			Example("prod-datadog-keys"),
+
+		credential.StringField("vault_name").
+			Describe("Key Vault holding the secret (azure source, required for secret_read); the vault's host is https://<vault_name>.vault.azure.net").
+			Example("acme-prod-kv"),
+
+		credential.StringField("client_id").
+			Describe("Application (client) ID of the Entra app registration the read federates to (azure source; required when the spec sets subject_token_source, rejected otherwise)").
+			Example("11111111-1111-1111-1111-111111111111"),
+
+		credential.StringField("tenant_id").
+			Describe("Entra tenant of that app registration (azure source; required when the spec sets subject_token_source, rejected otherwise)").
+			Example("00000000-0000-0000-0000-000000000001"),
+
+		credential.StringField("project").
+			Describe("Project holding the secret (gcp source; required when 'secret_name' is a bare id, rejected when it is a fully qualified resource)").
+			Example("acme-prod"),
+
+		credential.StringField("target_service_account").
+			Describe("Service account to impersonate before reading (gcp source, keyless only); omit to read as the federated principal itself").
+			Example("secrets-reader@acme-prod.iam.gserviceaccount.com"),
+
 		credential.StringField("kv2_mount").
-			Describe("Vault KV v2 mount path").
+			Describe("KV v2 mount path (hvault source)").
 			Example("secret"),
 
 		credential.StringField("secret_path").
-			Describe("Path to the secret within the KV v2 mount").
+			Describe("Path to the secret within the KV v2 mount (hvault source). Supports {{user.<claim>}} and {{agent.<claim>}} templating").
 			Example("github/ci"),
+
+		credential.StringField("secret_id").
+			Describe("Stored secret to read, by name or ARN (aws source, required for secret_read). Supports {{user.<claim>}} and {{agent.<claim>}} templating").
+			Example("prod/datadog/keys"),
+
+		credential.StringField("version_stage").
+			Describe("Staging label of the revision to read (aws source; default AWSCURRENT)").
+			Example("AWSCURRENT"),
+
+		credential.StringField("version_id").
+			Describe("Pin an exact revision by id (aws source); omit to read the staged one").
+			Example("b3028f1a-1c2d-4e5f-8a9b-0c1d2e3f4a5b"),
+
+		credential.StringField("role_arn").
+			Describe("IAM role to assume via web identity (aws source, required when the spec sets subject_token_source)").
+			Example("arn:aws:iam::123456789012:role/WardenSecretsReader"),
+
+		credential.StringField("session_name").
+			Describe("Session name for the assumed role (aws source; defaults to warden-<spec name>)").
+			Example("warden-datadog-keys"),
+
+		credential.StringField("policy").
+			Describe("Inline IAM policy further restricting the assumed role (aws source)").
+			Example(""),
+
+		credential.StringField("json_key_map").
+			Describe("Comma-separated 'srcKey=destKey' selection of the stored secret's fields; unnamed keys are not vended. Omit to vend the payload verbatim").
+			Example("token=api_key"),
+
+		// A string, not an int: each store spells a revision its own way — a number on
+		// hvault and gcp, a 32-character identifier on Key Vault — so the per-source
+		// validators check the spelling.
+		credential.StringField("secret_version").
+			Describe("Pin a revision of the secret: a number on an hvault or gcp source, a 32-character version identifier on an azure source; omit to read the current one. A pinned spec does not follow rotation").
+			Example("3"),
 	}
 }
 
-// ValidateConfig validates the Config for a key/value credential spec. Only an
-// hvault source is supported (the KV v2 read lives on the Vault driver).
-func (t *KeyValueCredType) ValidateConfig(config map[string]string, sourceType string) error {
-	if sourceType != credential.SourceTypeVault {
-		return fmt.Errorf("key_value credentials require an hvault source, got: %s", sourceType)
+// Each source's mint methods read their own locator keys, and a spec carrying the
+// other source's is rejected by name. The schema ignores keys it does not know, so
+// such a key would be accepted and then never read — leaving a spec that reads as
+// configured for something it is not doing.
+//
+// secret_version is deliberately absent from the hvault list even though only that
+// source honours it: ValidateSecretSelection already rejects it everywhere else,
+// and one mistake with two error messages is two messages that drift.
+var (
+	vaultKeyValueLocators = []string{
+		"kv2_mount", "secret_path", // kv2_read
+		"transit_key", "transit_key_version", "transit_mount", "signing_alg", "jwt_role", // transit_signer
+	}
+	awsKeyValueLocators = []string{
+		"secret_id", "version_stage", "version_id", "role_arn", "session_name", "policy",
+	}
+	gcpKeyValueLocators = []string{
+		"secret_name", "project", "target_service_account",
+	}
+	// Keys that configure a gcp token mint rather than a stored-secret read. They
+	// belong to the gcp_access_token type, not this one.
+	gcpTokenMintFields = []string{"scopes", "lifetime"}
+	// secret_name is shared with gcp, so it is not listed here: the gcp keys an azure
+	// spec must not carry are the other two.
+	azureKeyValueLocators = []string{
+		"vault_name", "client_id", "tenant_id",
+	}
+	gcpOnlyKeyValueLocators = []string{"project", "target_service_account"}
+	// Keys that configure an azure token mint rather than a stored-secret read. They
+	// belong to the azure_bearer_token type, not this one.
+	azureTokenMintFields = []string{"resource_uri"}
+)
+
+// ValidateConfig validates the Config for a key/value credential spec. Four source
+// types produce this shape: an hvault source reading KV v2 or minting a signing
+// capability, and an aws, gcp or azure source reading a stored secret.
+func (t *KeyValueCredType) ValidateConfig(config credential.Config, sourceType string) error {
+	switch sourceType {
+	case credential.SourceTypeVault, credential.SourceTypeAWS, credential.SourceTypeGCP, credential.SourceTypeAzure:
+		// Supported
+	default:
+		return fmt.Errorf("key_value credentials require an hvault, aws, gcp or azure source, got: %s", sourceType)
 	}
 
 	if err := credential.ValidateSchema(config, t.ConfigSchema()...); err != nil {
 		return err
 	}
 
-	if config["mint_method"] != "kv2_read" {
-		return fmt.Errorf("'mint_method' must be 'kv2_read' for a key_value credential, got: %s", config["mint_method"])
+	// Each source names its own branch. The guard above already rejects anything not
+	// listed, so the default is unreachable — but it returns an error rather than
+	// falling through to one of the validators, because a source added to that guard
+	// and forgotten here would otherwise be checked against another store's rules.
+	switch sourceType {
+	case credential.SourceTypeVault:
+		return t.validateVaultConfig(config)
+	case credential.SourceTypeAWS:
+		return t.validateAWSConfig(config)
+	case credential.SourceTypeGCP:
+		return t.validateGCPConfig(config)
+	case credential.SourceTypeAzure:
+		return t.validateAzureConfig(config)
+	default:
+		return fmt.Errorf("key_value credentials have no validation rules for source type: %s", sourceType)
 	}
-	if config["kv2_mount"] == "" {
-		return fmt.Errorf("'kv2_mount' is required for mint_method=kv2_read")
+}
+
+// validateNumberedSecretVersion checks secret_version on a store that numbers its
+// revisions. The schema holds it as a string because Key Vault spells a revision
+// differently, so the number is checked here.
+func validateNumberedSecretVersion(config credential.Config) error {
+	v := config.Get("secret_version")
+	if v == "" {
+		return nil
 	}
-	if config["secret_path"] == "" {
-		return fmt.Errorf("'secret_path' is required for mint_method=kv2_read")
+	if n, err := strconv.Atoi(v); err != nil || n < 1 {
+		return fmt.Errorf("field 'secret_version': must be a positive integer, got: %s", v)
+	}
+	return nil
+}
+
+// validateVaultConfig checks the two mint methods an hvault source offers for this
+// type. Both produce a multi-field payload with no primary field, which is what this
+// type exists to carry. What they need from the config differs entirely, so each
+// states its own requirements; the driver checks the rest against the store, where a
+// locator can actually be resolved.
+func (t *KeyValueCredType) validateVaultConfig(config credential.Config) error {
+	switch config.Get("mint_method") {
+	case "kv2_read":
+		if config.Get("kv2_mount") == "" {
+			return fmt.Errorf("'kv2_mount' is required for mint_method=kv2_read")
+		}
+		if config.Get("secret_path") == "" {
+			return fmt.Errorf("'secret_path' is required for mint_method=kv2_read")
+		}
+	case "transit_signer":
+		if config.Get("transit_key") == "" {
+			return fmt.Errorf("'transit_key' is required for mint_method=transit_signer")
+		}
+		// Checked here as well as at mint time so the mistake surfaces when the spec is
+		// written, rather than on the first request that needs it. A spec without its
+		// own role would otherwise inherit the source's, which is the one thing this
+		// mint method must never do.
+		if config.Get("jwt_role") == "" {
+			return fmt.Errorf("'jwt_role' is required for mint_method=transit_signer: it must name a role whose policy grants only signing with the key, and inheriting the source's role would grant more")
+		}
+	default:
+		return fmt.Errorf("'mint_method' must be 'kv2_read' or 'transit_signer' for a key_value credential on an hvault source, got: %s", config.Get("mint_method"))
 	}
 
+	if err := rejectForeignLocators(config, awsKeyValueLocators, config.Get("mint_method")); err != nil {
+		return err
+	}
+	if err := rejectForeignLocators(config, gcpKeyValueLocators, config.Get("mint_method")); err != nil {
+		return err
+	}
+	if err := rejectForeignLocators(config, azureKeyValueLocators, config.Get("mint_method")); err != nil {
+		return err
+	}
+	return validateNumberedSecretVersion(config)
+}
+
+// validateAWSConfig checks the single mint method an aws source offers for this
+// type: a stored-secret read whose payload is vended under its own key names.
+func (t *KeyValueCredType) validateAWSConfig(config credential.Config) error {
+	if config.Get("mint_method") != "secret_read" {
+		return fmt.Errorf("'mint_method' must be 'secret_read' for a key_value credential on an aws source, got: %s", config.Get("mint_method"))
+	}
+	if err := rejectForeignLocators(config, vaultKeyValueLocators, "secret_read"); err != nil {
+		return err
+	}
+	if err := rejectForeignPrefixes(config, vaultKeyValuePrefixes, "secret_read"); err != nil {
+		return err
+	}
+	// credential_type selects which shape a stored secret is parsed into, which only
+	// the secrets_manager method offers. This one vends the payload verbatim, so
+	// there is nothing to select. The driver refuses it too, but only when the
+	// operator omits `type` and leaves it to be inferred.
+	if config.Get("credential_type") != "" {
+		return fmt.Errorf("'credential_type' does not apply to mint_method=secret_read: the payload is vended under its own key names")
+	}
+	if err := rejectForeignLocators(config, gcpKeyValueLocators, "secret_read"); err != nil {
+		return err
+	}
+	if err := rejectForeignLocators(config, azureKeyValueLocators, "secret_read"); err != nil {
+		return err
+	}
+	return validateAWSSecretsManagerSpecConfig(config, "secret_read")
+}
+
+// validateGCPConfig checks the single mint method a gcp source offers for this type:
+// a Secret Manager read whose payload is vended under its own key names.
+func (t *KeyValueCredType) validateGCPConfig(config credential.Config) error {
+	if config.Get("mint_method") != "secret_read" {
+		return fmt.Errorf("'mint_method' must be 'secret_read' for a key_value credential on a gcp source, got: %s", config.Get("mint_method"))
+	}
+	if err := rejectForeignLocators(config, vaultKeyValueLocators, "secret_read"); err != nil {
+		return err
+	}
+	if err := rejectForeignPrefixes(config, vaultKeyValuePrefixes, "secret_read"); err != nil {
+		return err
+	}
+	if err := rejectForeignLocators(config, awsKeyValueLocators, "secret_read"); err != nil {
+		return err
+	}
+	// credential_type selects which shape a stored secret is parsed into. This method
+	// vends the payload under its own key names, so there is nothing to select.
+	if config.Get("credential_type") != "" {
+		return fmt.Errorf("'credential_type' does not apply to mint_method=secret_read: the payload is vended under its own key names")
+	}
+	// These configure a token mint. Reading a stored secret uses a token it obtains
+	// and discards itself, so both would be accepted and never read — a spec that
+	// looks scoped or time-bounded while being neither.
+	if err := rejectForeignLocators(config, gcpTokenMintFields, "secret_read"); err != nil {
+		return err
+	}
+	if err := rejectForeignLocators(config, azureKeyValueLocators, "secret_read"); err != nil {
+		return err
+	}
+	if err := validateNumberedSecretVersion(config); err != nil {
+		return err
+	}
+	return validateGCPSecretManagerSpecConfig(config)
+}
+
+// validateAzureConfig checks the single mint method an azure source offers for this
+// type: a Key Vault read whose payload is vended under its own key names.
+//
+// Who reads depends on the spec. With subject_token_source set, the caller's token is
+// federated to the app registration the spec names (client_id, tenant_id), which must
+// hold read access on the vault. Without it the source's own service principal reads;
+// naming an app there would be accepted and then never used, so it is refused.
+func (t *KeyValueCredType) validateAzureConfig(config credential.Config) error {
+	if config.Get("mint_method") != "secret_read" {
+		return fmt.Errorf("'mint_method' must be 'secret_read' for a key_value credential on an azure source, got: %s", config.Get("mint_method"))
+	}
+	if err := rejectForeignLocators(config, vaultKeyValueLocators, "secret_read"); err != nil {
+		return err
+	}
+	if err := rejectForeignPrefixes(config, vaultKeyValuePrefixes, "secret_read"); err != nil {
+		return err
+	}
+	if err := rejectForeignLocators(config, awsKeyValueLocators, "secret_read"); err != nil {
+		return err
+	}
+	if err := rejectForeignLocators(config, gcpOnlyKeyValueLocators, "secret_read"); err != nil {
+		return err
+	}
+	if err := rejectForeignLocators(config, gcpTokenMintFields, "secret_read"); err != nil {
+		return err
+	}
+	if err := rejectForeignLocators(config, azureTokenMintFields, "secret_read"); err != nil {
+		return err
+	}
+	if config.Get("credential_type") != "" {
+		return fmt.Errorf("'credential_type' does not apply to mint_method=secret_read: the payload is vended under its own key names")
+	}
+	// This type masks nothing on read, and the read authenticates without one — as
+	// the source, or through federation — so a secret here would be stored in the
+	// clear and never used.
+	if config.Get("client_secret") != "" {
+		return fmt.Errorf("'client_secret' does not apply to mint_method=secret_read on an azure source: a static source reads as itself, and a federated spec presents the caller's token instead")
+	}
+
+	vaultName := config.Get("vault_name")
+	if vaultName == "" {
+		return fmt.Errorf("'vault_name' is required when mint_method is secret_read")
+	}
+	// The vault is a DNS label, not a per-caller coordinate: a template here would
+	// let a claim choose the host the Key Vault token is sent to.
+	if strings.Contains(vaultName, "{{") {
+		return fmt.Errorf("'vault_name' does not support claim templates; template 'secret_name' instead")
+	}
+	if err := credential.ValidateKeyVaultName(vaultName); err != nil {
+		return err
+	}
+
+	name := config.Get("secret_name")
+	if name == "" {
+		return fmt.Errorf("'secret_name' is required when mint_method is secret_read")
+	}
+	// A name may carry a claim template, whose resolved value the driver checks
+	// again; check only the parts outside the template.
+	if credential.ValidateKeyVaultSecretName(stripClaimTemplates(name)) != nil {
+		return fmt.Errorf("'secret_name' may contain only letters, digits and hyphens (at most 127), got: %s", name)
+	}
+
+	if v := config.Get("secret_version"); v != "" {
+		if err := credential.ValidateKeyVaultSecretVersion(v); err != nil {
+			return err
+		}
+	}
+
+	if credential.SpecRequestsExchange(config) {
+		for _, key := range []string{"client_id", "tenant_id"} {
+			v := config.Get(key)
+			if v == "" {
+				return fmt.Errorf("'%s' is required for a federated secret_read on an azure source: it names the app registration the caller's token is exchanged at", key)
+			}
+			if err := credential.ValidateUUID(key, v); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, key := range []string{"client_id", "tenant_id"} {
+		if config.Get(key) != "" {
+			return fmt.Errorf("'%s' applies to secret_read on an azure source only with subject_token_source; a static source reads as itself", key)
+		}
+	}
+	return nil
+}
+
+// validateGCPSecretManagerSpecConfig checks how a spec addresses its secret. The name
+// may be a bare id or a fully qualified resource; the two spell the project
+// differently, and accepting both spellings at once would leave two answers to the
+// same question with nothing to say which wins.
+func validateGCPSecretManagerSpecConfig(config credential.Config) error {
+	name := config.Get("secret_name")
+	if name == "" {
+		return fmt.Errorf("'secret_name' is required when mint_method is secret_read")
+	}
+
+	qualified := strings.HasPrefix(name, "projects/")
+	project := config.Get("project")
+
+	if qualified && project != "" {
+		return fmt.Errorf("'project' does not apply when 'secret_name' is a fully qualified resource: it already names its project")
+	}
+	if !qualified && project == "" {
+		return fmt.Errorf("'project' is required when 'secret_name' is a bare secret id")
+	}
+
+	// Both spellings end up as segments of the request path, so both are held to the
+	// charsets the service actually accepts. That is not only a typo check: a name
+	// carrying "#" or "?" would otherwise reshape the request — truncating it, or
+	// moving the version into a query string — so a spec could read a resource other
+	// than the one it appears to name, and other than the one recorded in audit.
+	if qualified {
+		m := gcpSecretResourcePattern.FindStringSubmatch(name)
+		if m == nil {
+			return fmt.Errorf("'secret_name' must read 'projects/<project>/secrets/<name>' when fully qualified, with each part a legal identifier, got: %s", name)
+		}
+		return nil
+	}
+
+	if !gcpProjectPattern.MatchString(project) {
+		return fmt.Errorf("'project' is not a legal project id or number: %s", project)
+	}
+	// A bare name may carry a claim template, whose values the driver allow-lists
+	// separately; check only the parts outside the template.
+	if !gcpSecretIDPattern.MatchString(stripClaimTemplates(name)) {
+		return fmt.Errorf("'secret_name' may contain only letters, digits, underscores and hyphens, got: %s", name)
+	}
+	return nil
+}
+
+var (
+	// A fully qualified secret, without the version suffix — the version is a
+	// separate key, so a name carrying one would be addressing two at once. The
+	// segments are held to the same charsets as the bare spelling.
+	gcpSecretResourcePattern = regexp.MustCompile(`^projects/([A-Za-z0-9][A-Za-z0-9-]{0,62})/secrets/([A-Za-z0-9_-]{1,255})$`)
+
+	// A project id (lowercase letters, digits, hyphens) or a bare project number.
+	gcpProjectPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,62}$`)
+
+	// Secret Manager restricts a secret id to letters, digits, underscores and
+	// hyphens.
+	gcpSecretIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
+
+	// claimTemplateSpan matches a {{user.x}} / {{agent.x}} placeholder, which is
+	// replaced at mint time by a value the driver's own allow-list constrains.
+	claimTemplateSpan = regexp.MustCompile(`\{\{(user|agent)\.[A-Za-z0-9_.-]+\}\}`)
+)
+
+// stripClaimTemplates removes the placeholders from a locator so the literal parts
+// around them can be checked against the store's charset. A placeholder itself cannot
+// be checked here — it has no value yet — and is constrained where it is resolved.
+func stripClaimTemplates(s string) string {
+	return claimTemplateSpan.ReplaceAllString(s, "x")
+}
+
+// vaultKeyValuePrefixes are whole families of keys one source's mint methods read,
+// which cannot be listed individually because the operator names them.
+var vaultKeyValuePrefixes = []string{"payload."}
+
+// rejectForeignLocators refuses config keys belonging to a different source's mint
+// methods, which would be accepted and then never read.
+func rejectForeignLocators(config credential.Config, foreign []string, mintMethod string) error {
+	for _, key := range foreign {
+		if config.Get(key) != "" {
+			return fmt.Errorf("'%s' does not apply to mint_method=%s", key, mintMethod)
+		}
+	}
+	return nil
+}
+
+// rejectForeignPrefixes is the same for a passthrough bag, whose keys are named by
+// the operator and so cannot be enumerated.
+func rejectForeignPrefixes(config credential.Config, prefixes []string, mintMethod string) error {
+	for key := range config.All() {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(key, prefix) {
+				return fmt.Errorf("'%s' does not apply to mint_method=%s", key, mintMethod)
+			}
+		}
+	}
 	return nil
 }
 
@@ -132,8 +539,13 @@ func (t *KeyValueCredType) Revoke(_ context.Context, _ *credential.Credential, _
 func (t *KeyValueCredType) RequiresSpecRotation() bool { return false }
 
 // SensitiveConfigFields returns nil — the secret lives only in minted Data, never
-// in persisted spec config (kv2_mount/secret_path are non-secret locators).
+// in persisted spec config (every key here is a non-secret locator).
 func (t *KeyValueCredType) SensitiveConfigFields() []string { return nil }
+
+// StoredSecrets reports nothing: every config key is a locator.
+func (t *KeyValueCredType) StoredSecrets(_ credential.Config) []string {
+	return nil
+}
 
 // FieldSchemas returns nil — the field set is arbitrary and unknown at type level.
 func (t *KeyValueCredType) FieldSchemas() map[string]*credential.CredentialFieldSchema { return nil }

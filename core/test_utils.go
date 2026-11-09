@@ -300,8 +300,8 @@ func (m *mockTokenStore) GenerateToken(ctx context.Context, tokenType string, au
 	return nil, nil
 }
 
-func (m *mockTokenStore) ResolveToken(ctx context.Context, tokenValue string) (string, string, error) {
-	return "", "", nil
+func (m *mockTokenStore) ResolveToken(ctx context.Context, tokenValue string) (string, error) {
+	return "", nil
 }
 
 func (m *mockTokenStore) GetToken(tokenValue string) *logical.TokenEntry {
@@ -512,8 +512,11 @@ func newMockProvider() *mockProvider {
 	return &mockProvider{}
 }
 
+// testCacheNumCounters is the number of keys a test core's caches track.
+const testCacheNumCounters = 10_000
+
 // Helper function to create a test core with all dependencies
-func createTestCore(t *testing.T) *Core {
+func createTestCore(t testing.TB) *Core {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	router := NewRouter(log)
 
@@ -549,17 +552,24 @@ func createTestCore(t *testing.T) *Core {
 		stateLock:     &locking.SyncRWMutex{},
 		rawConfig:     new(atomic.Value),
 	}
+	core.transparentAuthFlight = newTransparentAuthFlight(core)
 
 	// Initialize namespace store
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 	core.namespaceStore, _ = NewNamespaceStore(ctx, core, log)
 
-	// Initialize token store
-	core.tokenStore, _ = NewTokenStore(core, DefaultTokenStoreConfig())
+	// Initialize token store. The caches keep their production cost limits but
+	// track far fewer keys: their frequency counters are allocated up front
+	// (some 100 MB at the defaults), and they decide only which entry to evict
+	// from a full cache, which no test fills.
+	tokenConfig := DefaultTokenStoreConfig()
+	tokenConfig.CacheNumCounters = testCacheNumCounters
+	core.tokenStore, _ = NewTokenStore(core, tokenConfig)
 
 	// Initialize credential config store
 	credStorage := NewBarrierView(barrier, credentialConfigStorePath)
 	credConfig := DefaultCredConfigStoreConfig()
+	credConfig.CacheNumCounters = testCacheNumCounters
 	credConfig.SkipSpecVerification = true // Skip verification in tests (no real Vault/AWS/etc servers)
 	core.credConfigStore, _ = NewCredentialConfigStore(core, credConfig)
 	core.credConfigStore.storage = credStorage
@@ -572,8 +582,18 @@ func createTestCore(t *testing.T) *Core {
 	_ = types.RegisterBuiltinTypes(core.credentialTypeRegistry)
 	_ = drivers.RegisterBuiltinDrivers(core.credentialDriverRegistry)
 
-	// Initialize credential manager (required for source/spec operations)
-	_ = core.setupCredentialManager(ctx)
+	// Initialize credential manager (required for source/spec operations),
+	// its cache tracking as few keys as the stores'.
+	_ = core.setupCredentialManager(ctx, credential.WithCacheNumCounters(testCacheNumCounters))
+
+	// The core is never sealed, so release its caches when the test ends:
+	// each runs goroutines that would keep it, and some hundred MB of cache
+	// bookkeeping, alive for the rest of the run.
+	t.Cleanup(func() {
+		core.cancelNamespaceDeletion()
+		_ = core.teardownCredentialManager()
+		core.closeStores()
+	})
 
 	// Initialize skill store
 	core.skillStore = NewSkillStore(core)
@@ -589,15 +609,51 @@ func createTestCore(t *testing.T) *Core {
 	// Setup the mounts (this will create and mount the system backend)
 	_ = core.setupMounts(ctx)
 
+	// Seed the built-in policies, as the active node does at unseal.
+	if err := core.seedNamespacePolicies(ctx); err != nil {
+		t.Fatalf("seed built-in policies: %v", err)
+	}
+
+	// Initialize and load the role store, as the active node does at unseal.
+	core.roleStore = NewRoleStore(core)
+	_ = core.setupRoleStore(ctx, false)
+	core.identityStore = NewIdentityStore(core)
+	_ = core.setupIdentityStore(ctx, false)
+
 	return core
+}
+
+// stubCredentialFormats is the credential format each transparent auth method
+// type reports, for stub mounts of that type.
+var stubCredentialFormats = map[string]logical.CredentialFormat{
+	"jwt":        logical.CredentialFormatJWT,
+	"kubernetes": logical.CredentialFormatKubernetesJWT,
+	"cert":       logical.CredentialFormatCert,
+	"spiffe":     logical.CredentialFormatSPIFFE,
+}
+
+// stubTransparentAuth is the backend of a stub mount of a transparent auth
+// method type: it reports that type's credential format, as the real auth
+// method does, and handles no request (a login against it fails as a mount
+// without a backend does).
+type stubTransparentAuth struct {
+	*mockAuthMethod
+	format logical.CredentialFormat
+}
+
+func (s *stubTransparentAuth) CredentialFormat() logical.CredentialFormat { return s.format }
+
+func (s *stubTransparentAuth) HandleRequest(_ context.Context, req *logical.Request) (*logical.Response, error) {
+	return logical.ErrorResponse(logical.ErrNotFoundf("no handler for route %q: stub auth mount", req.Path)), fmt.Errorf("stub auth mount handles no request")
 }
 
 // mountStubAuthMethod registers a stub auth mount at the given mountPath
 // (e.g. "jwt/") with the given mountType (e.g. "jwt", "cert") in the root
 // namespace. See mountStubAuthMethodInNamespace for non-root mounts.
 //
-// The mount has no backend — it exists only so router lookups
-// (MatchingMountEntry) succeed and tests can exercise code paths that
+// The mount's backend does nothing but report the credential format of a
+// transparent auth method type (none for any other type) — the mount exists
+// only so router lookups succeed and tests can exercise code paths that
 // need a real MountEntry (mount accessor, entry.Type) without spinning
 // up the full auth-method factory. Returns the created MountEntry.
 //
@@ -633,8 +689,13 @@ func mountStubAuthMethodInNamespace(t *testing.T, c *Core, mountPath, mountType 
 		namespace:        ns,
 	}
 
+	var backend logical.Backend
+	if format, ok := stubCredentialFormats[mountType]; ok {
+		backend = &stubTransparentAuth{mockAuthMethod: newMockAuthMethod(), format: format}
+	}
+
 	view := NewBarrierView(c.barrier, "auth/"+entry.UUID+"/")
-	require.NoError(t, c.router.Mount(authRoutePrefix+mountPath, nil, entry, view))
+	require.NoError(t, c.router.Mount(authRoutePrefix+mountPath, backend, entry, view))
 
 	// Post-split: auth-class entries live in c.auth, NOT c.mounts.
 	c.authLock.Lock()

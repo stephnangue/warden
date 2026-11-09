@@ -67,83 +67,83 @@ func TestKubernetesTokenCredType_ValidateConfig(t *testing.T) {
 	ct := NewKubernetesTokenCredType()
 
 	t.Run("valid minimal config", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
 			"namespace":       "default",
-		}, credential.SourceTypeKubernetes)
+		}), credential.SourceTypeKubernetes)
 		require.NoError(t, err)
 	})
 
 	t.Run("valid full config", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
 			"namespace":       "production",
 			"audiences":       "https://my-app.example.com",
 			"ttl":             "2h",
-		}, credential.SourceTypeKubernetes)
+		}), credential.SourceTypeKubernetes)
 		require.NoError(t, err)
 	})
 
 	t.Run("missing service_account", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"namespace": "default",
-		}, credential.SourceTypeKubernetes)
+		}), credential.SourceTypeKubernetes)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "service_account")
 	})
 
 	t.Run("missing namespace", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
-		}, credential.SourceTypeKubernetes)
+		}), credential.SourceTypeKubernetes)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "namespace")
 	})
 
 	t.Run("unsupported source type", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
 			"namespace":       "default",
-		}, "aws")
+		}), "aws")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "require a kubernetes source")
 	})
 
 	t.Run("ttl too short", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
 			"namespace":       "default",
 			"ttl":             "5m",
-		}, credential.SourceTypeKubernetes)
+		}), credential.SourceTypeKubernetes)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "at least 10m")
 	})
 
 	t.Run("ttl too long", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
 			"namespace":       "default",
 			"ttl":             "100h",
-		}, credential.SourceTypeKubernetes)
+		}), credential.SourceTypeKubernetes)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "must not exceed 48h")
 	})
 
 	t.Run("ttl at min boundary", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
 			"namespace":       "default",
 			"ttl":             "10m",
-		}, credential.SourceTypeKubernetes)
+		}), credential.SourceTypeKubernetes)
 		require.NoError(t, err)
 	})
 
 	t.Run("ttl at max boundary", func(t *testing.T) {
-		err := ct.ValidateConfig(map[string]string{
+		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
 			"namespace":       "default",
 			"ttl":             "48h",
-		}, credential.SourceTypeKubernetes)
+		}), credential.SourceTypeKubernetes)
 		require.NoError(t, err)
 	})
 }

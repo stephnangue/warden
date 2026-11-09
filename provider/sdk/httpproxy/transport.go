@@ -31,9 +31,11 @@ func newBaseTransport() *http.Transport {
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 
-		// Timeout settings — higher for AI inference (streaming responses can be slow)
+		// No ResponseHeaderTimeout: the mount's timeout (or the deadline
+		// SelectTimeout picks) bounds every forwarded request, headers
+		// included. A fixed one here would fail a non-streaming generation
+		// that outlasts it, whatever the mount's timeout is set to.
 		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 120 * time.Second,
 
 		// HTTP/2 optimization
 		ForceAttemptHTTP2: true,
@@ -70,8 +72,10 @@ func NewTransportWithTLS(caData string, skipVerify bool) (*http.Transport, error
 
 	t.TLSClientConfig = tlsConfig
 
-	// Configure HTTP/2 after TLSClientConfig is set so the h2 wiring
-	// (NextProtos, internal state) binds to the correct tls.Config.
+	// Configure HTTP/2 after TLSClientConfig is set so the h2 wiring binds to the
+	// correct tls.Config. How that wiring is recorded depends on the compiling
+	// toolchain — a protocol set on the transport, or an ALPN entry on the TLS
+	// config — so read it back through a helper rather than by field.
 	if err := http2.ConfigureTransport(t); err != nil {
 		log.Printf("Failed to configure HTTP/2 for httpproxy TLS transport: %v", err)
 	}

@@ -29,10 +29,9 @@ runtime: an MCP client sends a fixed set of headers, and the role cannot be
 passed in a tool call. This attached server *is* that role.
 
 To act under a **different** role, call the MCP server the operator attached for
-*that* role. The operator attaches **one server per role** — each at its own
-`…/role/<role>/gateway/` URL, named or described so you can match it to a role
-from the `list_roles` discovery tool. Pick the attached server whose role fits
-the task.
+*that* role. The operator attaches **one server per role**, each at that role's
+`url` from the `list_roles` discovery tool — match an attached server to a role
+by its URL. Pick the attached server whose role fits the task.
 
 ## Attaching the client
 
@@ -68,20 +67,47 @@ JWT expired (typical TTL 5–60 min) — refresh it in the client config.
   lacks the scope/grant — ask the operator to widen it rather than switching
   roles, unless one with broader reach exists.
 - **Warden policy can gate tools too — body-authoritative.** An operator may bind
-  a policy with an `mcp { }` block restricting JSON-RPC methods, tool names,
-  resource URIs, prompt names, and `tools/call` arguments; Warden strict-parses
-  the request body and matches against it. A deny is HTTP 403 with an RFC 6750
+  an MCP policy restricting JSON-RPC methods, tool names, resource URIs, prompt
+  names, and `tools/call` arguments; Warden strict-parses the request body and
+  matches against it. Such a policy is required: on an MCP mount with none in
+  scope every call is denied. A deny is HTTP 403 with an RFC 6750
   `WWW-Authenticate: Bearer error="insufficient_permissions",
-  error_description="..."` header naming the offending method/tool/parameter.
-  Read the `error_description` to tell a Warden policy deny from an upstream
-  scope error. Structural problems (malformed JSON-RPC, duplicate keys, oversized
+  error_description="..."` header naming the offending method/tool/parameter,
+  and a JSON-RPC error for that call (code `-32090`, message starting
+  `Warden:`); the session stays open, so carry on with other calls. Read the
+  `error_description` to tell a Warden policy deny from an upstream scope
+  error. Structural problems (malformed JSON-RPC, duplicate keys, oversized
   body) also fail closed.
 - **Streamable HTTP / SSE flows through transparently.** The server's framing
   comes back unchanged, and the `Mcp-Session-Id` response header round-trips
   automatically so follow-up requests reach the same upstream session.
-- **Session timeout is mount-wide.** The mount's `timeout` config caps an entire
-  SSE session (default 10 minutes). For longer sessions, ask the operator to
-  raise it.
+  `Mcp-Session-Id` is legacy-era; an upstream speaking 2026-07-28 holds no
+  session and ignores it.
+- **Both protocol eras are served.** `server/discover` needs no allow-list
+  entry — it is exempt like `initialize`, `ping` and `notifications/*` — so a
+  modern client's opening request works under any contract, though an operator
+  can still block it by name. If you send the 2026-07-28 transport headers
+  (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`), they must match the body
+  you send: a contradiction is refused with HTTP 400 and a JSON-RPC `-32020`,
+  which means fix the headers, not the policy. Announce that revision and your
+  JSON-RPC batches are refused too — batching left the spec in 2025-06-18.
+- **Upstream skills are resources.** If the server publishes skills
+  (`skills/list`, `skills/get`, `resources/directory/read`), they answer to
+  the same `resources` grant as `resources/read`, by URI: `skills/list` lists
+  only the skills you may fetch, and a `skills/get` outside the grant is
+  refused. A missing skill in the listing is the policy, not a bug.
+- **Subscribing to a resource needs the same grant as reading it.** A
+  `subscriptions/listen` naming resource URIs — and the legacy
+  `resources/subscribe` — answer to the `resources` allow-list, because a
+  subscription leaks a resource's existence and the timing of every change
+  even though its content never arrives. A listen that only asks for
+  list-changed events names no resource and needs no such grant.
+- **Two mount-wide deadlines, picked by method.** `timeout` caps a single call —
+  a tool call, a listing, a resource read (default 60 seconds).
+  `listen_timeout` caps a `subscriptions/listen` stream (default 10 minutes),
+  and only that method: a long-running tool call streaming progress is still
+  bounded by `timeout`. Ask the operator to raise whichever one your workload
+  actually hits.
 - **Static-key upstreams that expect a non-`Authorization` header** (e.g.
   `x-api-key`) are not served by this provider — they need a dedicated one.
 - **Not in scope:** client-initiated OAuth (Dynamic Client Registration, PRM

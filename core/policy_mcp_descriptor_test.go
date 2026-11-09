@@ -23,7 +23,7 @@ func TestEvaluateMCPDescriptor_BatchOneDeniedFailsAll(t *testing.T) {
 			{Method: "tools/call", Name: "delete_repo", BatchIndex: 1},
 		},
 	}
-	d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{}, "")
+	d := evaluateMCPDescriptor(sets, nil, desc, nil, nil, time.Time{}, "")
 	if d == nil || d.Decision != "deny" {
 		t.Fatalf("decision = %+v, want deny", d)
 	}
@@ -45,23 +45,23 @@ func TestEvaluateMCPDescriptor_BatchAllAllowed(t *testing.T) {
 			{Method: "tools/call", Name: "search_repos", BatchIndex: 1},
 		},
 	}
-	d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{}, "")
+	d := evaluateMCPDescriptor(sets, nil, desc, nil, nil, time.Time{}, "")
 	if d == nil || d.Decision != "allow" {
 		t.Fatalf("decision = %+v, want allow", d)
 	}
 }
 
 // Empty descriptor (zero calls) returns nil — the caller is
-// responsible for denying when an mcp{} block is in scope but no body
+// responsible for denying when MCP rules are in scope but no body
 // was parseable. decideMCP handles that in the evaluator wrapper.
 func TestEvaluateMCPDescriptor_NoCallsReturnsNil(t *testing.T) {
 	sets := []*CBPMCPRules{{
 		AllowedMethods: []string{"tools/list"},
 	}}
-	if d := evaluateMCPDescriptor(sets, nil, nil, nil, time.Time{}, ""); d != nil {
+	if d := evaluateMCPDescriptor(sets, nil, nil, nil, nil, time.Time{}, ""); d != nil {
 		t.Errorf("nil descriptor: decision = %+v, want nil", d)
 	}
-	if d := evaluateMCPDescriptor(sets, &logical.MCPRequestDescriptor{}, nil, nil, time.Time{}, ""); d != nil {
+	if d := evaluateMCPDescriptor(sets, nil, &logical.MCPRequestDescriptor{}, nil, nil, time.Time{}, ""); d != nil {
 		t.Errorf("empty Calls: decision = %+v, want nil", d)
 	}
 }

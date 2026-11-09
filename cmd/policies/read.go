@@ -13,18 +13,27 @@ var ReadCmd = &cobra.Command{
 	SilenceErrors: true,
 	Short:         "Read a policy",
 	Long: `
-Usage: warden policy read <name>
+Usage: warden policy read <name> [flags]
 
-  Reads a capability-based policy and prints its contents.
+  Reads a policy and prints its contents. Use -type to select which kind:
+  "cbp" (default) or "mcp".
 
-  Example:
+  Examples:
 
-    Read a policy:
+    Read a capability-based policy:
 
       $ warden policy read my-policy
+
+    Read an MCP policy:
+
+      $ warden policy read -type mcp github-tools
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: runRead,
+}
+
+func init() {
+	addTypeFlag(ReadCmd)
 }
 
 func runRead(cmd *cobra.Command, args []string) error {
@@ -33,22 +42,28 @@ func runRead(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	pType, err := resolvePolicyType()
+	if err != nil {
+		return err
+	}
+
 	c, err := helpers.Client()
 	if err != nil {
 		return err
 	}
 
-	policy, err := c.Sys().GetPolicy(name)
+	policy, err := c.Sys().GetPolicyOfType(pType, name)
 	if err != nil {
 		return fmt.Errorf("error reading policy: %w", err)
 	}
 
 	if policy == nil {
-		return fmt.Errorf("policy %q not found: %w", name, helpers.ErrNotFound)
+		return fmt.Errorf("%s policy %q not found: %w", pType, name, helpers.ErrNotFound)
 	}
 
 	data := map[string]any{
 		"name":   name,
+		"type":   pType,
 		"policy": policy.Policy,
 	}
 

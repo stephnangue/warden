@@ -8,9 +8,9 @@ title: "HashiCorp Vault"
 This driver supports a **keyless mode** — use it instead of storing a secret inline. A stored secret is attack surface; keyless holds nothing. See [Keyless (OIDC federation)](#keyless-oidc-federation).
 :::
 
-The `hvault` driver brokers credentials out of **HashiCorp Vault** (or **OpenBao**). The **source** holds how Warden authenticates to the Vault server — typically an **AppRole** identity (`role_id` + `secret_id`) — plus the server address and optional namespace. That one source can back many **specs**, each of which selects a **mint method** naming which Vault engine to draw from and what shape of credential to hand back to the workload.
+The `hvault` driver brokers credentials out of **HashiCorp Vault** (or **OpenBao**). The **source** holds the server address, optional namespace, and how Warden authenticates to the Vault server — keylessly, by logging in per request with a Warden identity assertion, or with a stored **AppRole** identity (`role_id` + `secret_id`). That one source can back many **specs**, each of which selects a **mint method** naming which Vault engine to draw from and what shape of credential to hand back to the workload.
 
-Reach for it when your secrets already live in Vault: static KV entries, dynamic cloud credentials from the AWS/GCP/IBM engines, OAuth2 bearer tokens from the oauthapp engine, or freshly minted Vault tokens. Warden authenticates once with the source's privileged AppRole, then mints per request against whatever engine the spec points at.
+Reach for it when your secrets already live in Vault: static KV entries, dynamic cloud credentials from the AWS/GCP/IBM engines, OAuth2 bearer tokens from the oauthapp engine, or freshly minted Vault tokens. Warden authenticates as the source — per request when keyless, once with a stored AppRole — then mints per request against whatever engine the spec points at.
 
 ## Keyless (OIDC federation)
 
@@ -23,6 +23,16 @@ Warden logs in **per request** against Vault's own JWT auth method
 `bound_audiences`). A keyless source needs no `rotation_period`, and a keyless
 `vault_token` spec needs no `token_role`. See
 [Keyless credential sources](/federation/keyless-credentials/).
+
+The JWT role decides which assertions may log in. An agent's assertion carries its
+composite subject, `wid:<namespaceID>:<mountAccessor>:<principalID>`, so a role with
+`bound_claims_type=glob` and `bound_claims` `{"sub": "wid:<namespaceID>:*"}` admits the
+agents of one namespace. A spec that sets `assertion_user_claims` mints a
+[delegation token](/federation/assertion-claims/#an-agent-acting-for-a-user) instead —
+`sub` is the user's own id, the agent is in `act` — so give it a JWT role of its own
+(`jwt_role` on the spec) that binds `warden_namespace` beside `sub`. The
+[OAuth 3LO credential store](/federation/oauth-3lo-store/#step-4-the-second-gate--a-templated-policy)
+shows such a role.
 
 ## Credential issued
 
@@ -137,15 +147,19 @@ warden cred spec create oauth-bearer \
   -config=credential_name=github-app
 ```
 
+`credential_name` must match the name the credential was enrolled under on that mount. For
+the store-side setup — enrolling users, templating `credential_name` per user, and gating it
+with a templated policy — see [OAuth 3LO credential store](/federation/oauth-3lo-store/).
+
 ## Source config
 
 Keys for `warden cred source create <name> -type=hvault -config=key=value ...`:
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `vault_address` | Yes | — | Vault/OpenBao server URL (`http://` or `https://`), e.g. `https://vault.example.com`. |
+| `vault_address` | Yes | — | Vault/OpenBao server URL, e.g. `https://vault.example.com`. An `http://` address needs `tls_skip_verify=true`. |
 | `vault_namespace` | No | — | Namespace to scope all requests to. |
-| `auth_method` | No | — | Authentication method: `approle` (stored `secret_id`), or `oidc_federation` ([keyless](/federation/keyless-credentials/) — per-request JWT-auth login). Omit to use a pre-set token. |
+| `auth_method` | Yes | — | Authentication method: `approle` (stored `secret_id`), or `oidc_federation` ([keyless](/federation/keyless-credentials/) — per-request JWT-auth login). Required on every create and edit. |
 | `role_id` | If approle | — | AppRole role ID. |
 | `secret_id` | If approle | — | AppRole secret ID (secret, masked on read). |
 | `approle_mount` | If approle | — | Mount path of the AppRole auth backend, e.g. `approle`. |
@@ -153,10 +167,23 @@ Keys for `warden cred source create <name> -type=hvault -config=key=value ...`:
 | `jwt_role` | If keyless | — | Vault JWT-auth role the assertion logs in as (can be overridden per spec). |
 | `jwt_mount` | No | `jwt` | Vault JWT/OIDC auth mount path (keyless). |
 | `audience` | No | — | Assertion audience (keyless only). When set, must equal the Vault role's `bound_audiences`. |
-| `ca_data` | No | — | Base64-encoded PEM CA bundle for outbound upstream calls (e.g. the IBM IAM token exchange used by `dynamic_ibm`). Does not affect the connection to the Vault/OpenBao server itself. |
-| `tls_skip_verify` | No | `false` | Disable TLS verification on those outbound upstream calls (test only). Does not affect the Vault/OpenBao connection. |
+| `ca_data` | No | — | Base64-encoded PEM CA bundle that the server's TLS certificate must chain to. It applies to the Vault/OpenBao connection and to the driver's other outbound calls, such as the IBM IAM token exchange of `dynamic_ibm`. |
+| `tls_skip_verify` | No | `false` | Skip TLS verification on those same connections, and allow an `http://` `vault_address` (development only). |
 
 The `token` and `secret_id_accessor` fields are also treated as sensitive and masked on read.
+
+### The client comes from the source config alone
+
+The Vault client of a source is built from that source's config, and nothing from the
+Warden server's environment reaches it: not `VAULT_TOKEN`, `VAULT_NAMESPACE`,
+`VAULT_HEADERS`, `VAULT_AGENT_ADDR` or `VAULT_WRAP_TTL`, nor the TLS settings
+`VAULT_CACERT` and `VAULT_SKIP_VERIFY`. Its TLS trust is `ca_data` and `tls_skip_verify`.
+A source therefore authenticates only as its `auth_method` says, and never sends the
+server's own token to the address it names.
+
+A source stored before `auth_method` was required keeps minting with the server's
+environment token, and logs a warning. Any edit of it is refused until it sets
+`auth_method`.
 
 ## Specs and mint methods
 
@@ -172,8 +199,58 @@ Each spec sets a `mint_method` that picks the Vault engine and the credential sh
 | `dynamic_ibm` | IBM Cloud keys | `ibm_mount`, `role_name`, `ttl`, `iam_endpoint`, `access_key_id`, `secret_access_key` |
 | `vault_token` | Vault token | `token_role`, `ttl`, `display_name`, `meta` |
 | `oauth2` | OAuth bearer token | `oauth2_mount`, `credential_name` |
+| `transit_signer` | A scoped **signing capability** (not a secret) | `transit_key` (required), `transit_mount`, `signing_alg` (`RS256` default, or `RS384`, `PS256`, `ES256`, `ES384`), `payload.*` |
 
 `mint_method` is **required** — there is no default; an unset value is rejected at mint.
+
+### `transit_signer` — signing without the key
+
+Every other mint method yields material. `transit_signer` yields a **capability**: a
+short-lived token that may do nothing but sign with one named transit key, plus the
+coordinates naming that key. A consumer chains it and asks the KMS to sign,
+so the private key is read by nobody — including Warden.
+
+Its consumers sign an assertion remotely, through `secret_spec`:
+
+- the [`token_exchange`](/credential-drivers/token-exchange/) and
+  [`oauth2`](/credential-drivers/oauth2/#client-authentication) drivers with
+  `client_auth=kms_private_key_jwt`, for an RFC 7523 client assertion;
+- the [`azure`](/credential-drivers/azure/) driver with `auth_method=certificate`, for the
+  certificate assertion Entra ID expects. That one is signed PS256, so its producer sets
+  `signing_alg=PS256`.
+
+`signing_alg` is one of `RS256` (the default), `RS384`, `PS256`, `ES256` or `ES384`, and
+the transit key must be able to sign with it. Unlike a source's client, a consumer
+signing through a capability trusts the CA that `VAULT_CACERT` names in the Warden
+server's environment: a capability names no CA, so that is the only way to reach a store
+behind a private one.
+
+Two constraints apply:
+
+- It is **exchange-path-only** — the capability exists to be chained, not injected into
+  a proxied request.
+- A spec-level **`jwt_role`** is required.
+
+`transit_key` accepts `{{user.<claim>}}` / `{{agent.<claim>}}` templating, so one spec
+can select a per-caller key. Keys prefixed `payload.` are copied verbatim into the
+minted payload — they mean something to the consumer (the OAuth client the key is
+registered to, a `kid` an authorization server selects on) and this driver does not
+interpret them.
+
+```bash
+warden cred spec create signer-cap \
+  -source vault-keyless \
+  -config mint_method=transit_signer \
+  -config jwt_role=warden-signer \
+  -config transit_key=oauth-client-key \
+  -config signing_alg=RS256 \
+  -config subject_token_source=warden_identity \
+  -config payload.client_id=my-oauth-client
+```
+
+Because the method is exchange-path-only, the spec must set `subject_token_source`
+(and the source — or the spec, via `assertion_audience` — must carry an audience).
+A spec that omits it is rejected at create.
 
 Spec-config keys set with `warden cred spec create ... -config=key=value`:
 
@@ -189,7 +266,7 @@ Spec-config keys set with `warden cred spec create ... -config=key=value`:
 | `oauth2_mount` | For `oauth2` | — | Mount of the OAuth2 (oauthapp) engine. |
 | `role_name` | For dynamic aws/gcp/ibm | — | Engine role to generate credentials from. |
 | `role_type` | No | `roleset` | GCP role kind: `roleset` or `static-account`. |
-| `credential_name` | For `oauth2` | — | Named credential on the OAuth2 mount. Supports `{{user.<claim>}}` [per-user templating](/concepts/delegation/). |
+| `credential_name` | For `oauth2` | — | Named credential on the OAuth2 mount; must match the name it was enrolled under. Supports `{{user.<claim>}}` [per-user templating](/concepts/delegation/) and `{{agent.<claim>}}` per-agent templating. See [OAuth 3LO credential store](/federation/oauth-3lo-store/). |
 | `token_role` | For `vault_token` | — | Token role for `auth/token/create/<role>`. |
 | `ttl` | No | — | Requested lease TTL; validated against the spec's min/max bounds. |
 | `iam_endpoint` | No | IBM IAM default | Endpoint used to exchange the IBM API key for a bearer token. |

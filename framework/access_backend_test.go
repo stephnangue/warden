@@ -77,7 +77,7 @@ func setupAccessBackend(t *testing.T) *AccessBackend {
 func TestAccessBackend_Setup(t *testing.T) {
 	b := setupAccessBackend(t)
 	assert.NotNil(t, b.StorageView)
-	assert.NotNil(t, b.cfg)
+	assert.NotNil(t, b.cfg.Load())
 }
 
 func TestAccessBackend_TransparentMode(t *testing.T) {
@@ -203,4 +203,11 @@ func TestAccessBackend_GetAccessConfig_NilCfg(t *testing.T) {
 func TestAccessBackend_GetAutoAuthPath_NilCfg(t *testing.T) {
 	b := &AccessBackend{Backend: &Backend{}}
 	assert.Equal(t, "", b.GetAutoAuthPath())
+}
+
+// The role URL is the access path prefix, shared by every role (the role
+// travels as ?role=).
+func TestAccessBackend_RoleURLSuffix(t *testing.T) {
+	assert.Equal(t, "access/", (&AccessBackend{}).RoleURLSuffix("reader"))
+	assert.Equal(t, "grants/", (&AccessBackend{AccessPathPrefix: "grants/"}).RoleURLSuffix("reader"))
 }

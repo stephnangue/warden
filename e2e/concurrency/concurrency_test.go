@@ -52,7 +52,7 @@ func TestConcurrentSourceCRUD(t *testing.T) {
 			fmt.Sprintf("sys/cred/sources/e2e-conc-src-%d", i), leader, "")
 	}
 
-	sourceBody := `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
+	sourceBody := `{"type":"hvault","rotation_period":300,"config":{"vault_address":"http://127.0.0.1:8200","tls_skip_verify":true,"auth_method":"approle","role_id":"e2e-approle-role-id-1234","secret_id":"e2e-approle-secret-id-5678","approle_mount":"e2e_approle","role_name":"warden-e2e-role"}}`
 
 	created := h.ConcurrentDo(5, func(i int) bool {
 		status, _ := h.APIRequest(t, "POST",

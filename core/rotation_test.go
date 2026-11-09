@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,17 +18,18 @@ import (
 
 // mockRotatableDriver implements both SourceDriver and Rotatable (three-phase) for testing
 type mockRotatableDriver struct {
-	supportsRotation bool
-	prepareCount     int32
-	commitCount      int32
-	cleanupCount     int32
-	prepareError     error
-	commitError      error
-	cleanupError     error
-	preparedConfig   map[string]string
-	cleanupConfig    map[string]string
-	activateAfter    time.Duration // >0 triggers slow path
-	failUntilAttempt int32         // fail PrepareRotation until this many calls
+	supportsRotation   bool
+	prepareCount       int32
+	commitCount        int32
+	cleanupCount       int32
+	prepareError       error
+	commitError        error
+	cleanupError       error
+	preparedConfig     map[string]string
+	cleanupConfig      map[string]string
+	activateAfter      time.Duration // >0 triggers slow path
+	failUntilAttempt   int32         // fail PrepareRotation until this many calls
+	driverCleanupCount int32         // times Cleanup() ran on the driver instance
 }
 
 func (d *mockRotatableDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
@@ -43,7 +45,14 @@ func (d *mockRotatableDriver) Type() string {
 }
 
 func (d *mockRotatableDriver) Cleanup(ctx context.Context) error {
+	atomic.AddInt32(&d.driverCleanupCount, 1)
 	return nil
+}
+
+// GetDriverCleanupCount reports how many times the driver instance itself was torn
+// down, as distinct from cleanupCount, which counts rotation's cleanup stage.
+func (d *mockRotatableDriver) GetDriverCleanupCount() int {
+	return int(atomic.LoadInt32(&d.driverCleanupCount))
 }
 
 func (d *mockRotatableDriver) SupportsRotation() bool {
@@ -541,15 +550,27 @@ func TestRotationEntry_EntryType(t *testing.T) {
 // mockDriverFactory implements credential.SourceDriverFactory for testing
 type mockDriverFactory struct {
 	driver credential.SourceDriver
+
+	// rejectConfigKey makes ValidateConfig fail for any config carrying this key,
+	// which is how a test forces the persist stage of a rotation to fail.
+	rejectConfigKey string
 }
 
-func (f *mockDriverFactory) Type() string                           { return "mock" }
-func (f *mockDriverFactory) ValidateConfig(map[string]string) error { return nil }
-func (f *mockDriverFactory) SensitiveConfigFields() []string        { return nil }
-func (f *mockDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *mockDriverFactory) Type() string { return "mock" }
+func (f *mockDriverFactory) ValidateConfig(config credential.Config) error {
+	if f.rejectConfigKey != "" {
+		if _, ok := config.Lookup(f.rejectConfigKey); ok {
+			return fmt.Errorf("simulated validation failure for key %q", f.rejectConfigKey)
+		}
+	}
+	return nil
+}
+func (f *mockDriverFactory) SensitiveConfigFields() []string          { return nil }
+func (f *mockDriverFactory) StoredSecrets(credential.Config) []string { return nil }
+func (f *mockDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return "", fmt.Errorf("mock driver cannot infer type")
 }
-func (f *mockDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *mockDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	return f.driver, nil
 }
 
@@ -557,26 +578,36 @@ func (f *mockDriverFactory) Create(config map[string]string, log *logger.GatedLo
 // Returns the manager, context, mock driver, and a cleanup function.
 func createTestRotationManager(t *testing.T, driver *mockRotatableDriver) (*RotationManager, context.Context, func()) {
 	t.Helper()
+	rm, ctx, _, cleanup := createTestRotationManagerWithFactory(t, &mockDriverFactory{driver: driver})
+	return rm, ctx, cleanup
+}
+
+// createTestRotationManagerWithFactory is createTestRotationManager for tests that
+// need to configure the factory itself (e.g. to fail config validation). It also
+// returns the core, so a test can reach the config store directly.
+func createTestRotationManagerWithFactory(t *testing.T, factory *mockDriverFactory) (*RotationManager, context.Context, *Core, func()) {
+	t.Helper()
 
 	core := createTestCore(t)
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
 	// Register mock driver factory in the core's existing driver registry
 	// (createTestCore already initializes the registry with builtin drivers)
-	err := core.credentialDriverRegistry.RegisterFactory(&mockDriverFactory{driver: driver})
+	err := core.credentialDriverRegistry.RegisterFactory(factory)
 	require.NoError(t, err)
 
 	// Re-setup credential manager to use the updated registry with mock driver
 	log := core.logger
 	credManager, err := credential.NewManager(core.credentialTypeRegistry, core.credentialDriverRegistry, core.credConfigStore, log)
 	require.NoError(t, err)
+	core.credentialManager.Stop()
 	core.credentialManager = credManager
 
 	// Create source in config store
 	source := &credential.CredSource{
 		Name:   "test-source",
 		Type:   "mock",
-		Config: map[string]string{"key": "value"},
+		Config: credential.NewConfig(map[string]string{"key": "value"}),
 	}
 	err = core.credConfigStore.CreateSource(ctx, source)
 	require.NoError(t, err)
@@ -592,7 +623,7 @@ func createTestRotationManager(t *testing.T, driver *mockRotatableDriver) (*Rota
 		rm.Stop()
 	}
 
-	return rm, ctx, cleanup
+	return rm, ctx, core, cleanup
 }
 
 func TestBuildEntryKey(t *testing.T) {
@@ -812,8 +843,9 @@ func TestRotation_CleanupRetryAndPersist(t *testing.T) {
 	assert.Equal(t, 1, driver.GetCommitCount())
 	assert.Equal(t, 3, driver.GetCleanupCount(), "cleanup should be retried 3 times")
 
-	// Verify cleanup was persisted to storage
-	path := rotationCleanupPath + namespace.RootNamespace.UUID + "/test-source"
+	// Verify cleanup was persisted to storage, keyed by the credential it names
+	path := cleanupStoragePath(namespace.RootNamespace.UUID, "test-source", cleanupKindCleanup,
+		map[string]string{"secret_id_accessor": "old-accessor"})
 	raw, err := rm.storage.Get(context.Background(), path)
 	require.NoError(t, err)
 	require.NotNil(t, raw, "cleanup should be persisted to storage")
@@ -835,7 +867,7 @@ func TestRotation_PersistAndRestore(t *testing.T) {
 		source := &credential.CredSource{
 			Name:   name,
 			Type:   "mock",
-			Config: map[string]string{"key": "value"},
+			Config: credential.NewConfig(map[string]string{"key": "value"}),
 		}
 		err := rm.core.credConfigStore.CreateSource(ctx, source)
 		require.NoError(t, err)
@@ -903,7 +935,7 @@ func TestRotation_StopWithInflightJobs(t *testing.T) {
 		source := &credential.CredSource{
 			Name:   name,
 			Type:   "mock",
-			Config: map[string]string{"key": "value"},
+			Config: credential.NewConfig(map[string]string{"key": "value"}),
 		}
 		_ = rm.core.credConfigStore.CreateSource(ctx, source)
 		_ = rm.RegisterSource(ctx, name, "mock", 10*time.Millisecond)
@@ -943,4 +975,152 @@ func TestRotation_FailedStateHasNextAction(t *testing.T) {
 	assert.True(t, entry.NextAction.After(before),
 		"NextAction should be in the future for failed entry")
 	assert.Equal(t, StateFailed, entry.State)
+}
+
+// An entry is shared: worker goroutines mutate its state while the tick loop reads
+// it and persistEntry marshals every field. UpdateRotationPeriod used to write
+// RotationPeriod and NextAction, then marshal the whole struct, holding no lock at
+// all. Run under -race: this reports on the unguarded version and is quiet on the
+// guarded one.
+func TestRotationManager_UpdateRotationPeriodIsRaceFree(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	rm := NewRotationManager(nil, log.WithSubsystem("rotation"), nil)
+	rm.Start()
+	defer rm.Stop()
+
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	require.NoError(t, rm.RegisterSource(ctx, "racy-source", "vault", 1*time.Hour))
+
+	key := buildRotationKey(namespace.RootNamespace.UUID, "racy-source")
+	val, _ := rm.entries.Load(key)
+	entry := val.(*RotationEntry)
+
+	var wg sync.WaitGroup
+
+	// Writer: the config path an operator drives by updating a source.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			assert.NoError(t, rm.UpdateRotationPeriod(ctx, "racy-source", time.Duration(i+1)*time.Minute))
+		}
+	}()
+
+	// Writers: what a rotation job does to the same entry as it completes.
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				entry.mu.Lock()
+				entry.State = StateStaged
+				entry.Attempts++
+				entry.applyStaged(&stagedRotation{
+					NewConfig:       map[string]string{"access_key_id": "rotated"},
+					CleanupConfig:   map[string]string{"access_key_id": "old"},
+					ActivationDelay: time.Minute,
+					PreparedAt:      time.Now(),
+				})
+				entry.clearStagedFields()
+				entry.State = StateIdle
+				entry.mu.Unlock()
+			}
+		}()
+	}
+
+	// Readers: what the tick loop does on every pass.
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_ = entry.GetState()
+				_ = entry.GetNextAction()
+				_ = entry.GetAttempts()
+				_ = entry.GetNewConfig()
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+// TestRotation_FailedPersistLeavesCachedSourceUntouched asserts that a rotation whose
+// persist fails does not change what the config store hands out.
+//
+// The store returns the pointer it caches, so assigning the rotated config onto the
+// source fetched from it published new credentials before they were written. When the
+// write then failed, every later mint on this node used material that had never reached
+// storage — and a restart silently reverted to the old credential, which cleanup may
+// already have destroyed upstream.
+func TestRotation_FailedPersistLeavesCachedSourceUntouched(t *testing.T) {
+	driver := &mockRotatableDriver{
+		supportsRotation: true,
+		// The rotated config carries the key the factory rejects, so activation's
+		// persist stage fails validation.
+		preparedConfig: map[string]string{"key": "rotated", "reject-me": "1"},
+	}
+	factory := &mockDriverFactory{driver: driver, rejectConfigKey: "reject-me"}
+	rm, ctx, core, cleanup := createTestRotationManagerWithFactory(t, factory)
+	defer cleanup()
+
+	require.NoError(t, rm.RegisterSource(ctx, "test-source", "mock", 50*time.Millisecond))
+
+	require.Eventually(t, func() bool {
+		return rm.GetFailedCount() >= 1
+	}, 30*time.Second, 25*time.Millisecond, "rotation should have failed at persist")
+
+	src, err := core.credConfigStore.GetSource(ctx, "test-source")
+	require.NoError(t, err)
+	assert.Equal(t, "value", src.Config.Get("key"),
+		"a failed persist must leave the cached source carrying its original config")
+	assert.NotContains(t, src.Config.Map(), "reject-me",
+		"config that was never persisted must not be visible to readers")
+	assert.Equal(t, 0, driver.GetCommitCount(),
+		"commit must not run once persist has failed")
+}
+
+// TestRotation_ActivateIsRaceFreeWithConcurrentReaders drives rotations while readers
+// pull the source from the config store and read its config, which is what every mint
+// does.
+//
+// Run under -race: this reports on the version that assigned the rotated config onto the
+// shared cached object, and is quiet on the version that publishes a copy. Nothing here
+// asserts ordering — the race detector is the assertion.
+func TestRotation_ActivateIsRaceFreeWithConcurrentReaders(t *testing.T) {
+	driver := &mockRotatableDriver{supportsRotation: true}
+	rm, ctx, core, cleanup := createTestRotationManagerWithFactory(t, &mockDriverFactory{driver: driver})
+	defer cleanup()
+
+	require.NoError(t, rm.RegisterSource(ctx, "test-source", "mock", 50*time.Millisecond))
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				src, err := core.credConfigStore.GetSource(ctx, "test-source")
+				if err != nil || src == nil {
+					continue
+				}
+				// Read exactly as a driver does on the mint path.
+				_ = credential.GetString(src.Config, "key", "")
+				_ = src.Config.Len()
+			}
+		}()
+	}
+
+	// Let two full rotation cycles land while the readers run.
+	waitForRotation(t, rm, 10*time.Second)
+	waitForRotation(t, rm, 10*time.Second)
+
+	close(stop)
+	wg.Wait()
 }

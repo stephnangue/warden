@@ -12,23 +12,31 @@ type ProviderConfig struct {
 	Timeout         time.Duration
 	AutoAuthPath    string
 	UserAuthPath    string
-	UserAuthRole    string
 	DefaultAuthRole string
-	TLSSkipVerify   bool
-	CAData          string
+	// UserAuthRoleStored: the mount config still names the removed
+	// user_auth_role (framework.HasUserAuthRole).
+	UserAuthRoleStored bool
+	TLSSkipVerify      bool
+	CAData             string
+	// AllowedHosts is the target host allowlist; empty means the default.
+	AllowedHosts []string
 }
 
-// parseConfig parses configuration from mount config (map[string]any from JSON)
+// parseConfig parses configuration from mount config (map[string]any from JSON).
+// conf must have passed ValidateConfig.
 func parseConfig(conf map[string]any) ProviderConfig {
 	tlsSkipVerify, caData := framework.ParseTLSConfig(conf)
+	allowedHosts, _ := framework.ParseHostAllowlist(conf[framework.HostAllowlistKey])
 	return ProviderConfig{
 		MaxBodySize:     framework.ParseMaxBodySize(conf),
 		Timeout:         framework.ParseTimeout(conf, framework.DefaultTimeout),
 		AutoAuthPath:    framework.GetConfigString(conf, "auto_auth_path", ""),
 		UserAuthPath:    framework.GetConfigString(conf, "user_auth_path", ""),
-		UserAuthRole:    framework.GetConfigString(conf, "user_auth_role", ""),
 		DefaultAuthRole: framework.GetConfigString(conf, "default_role", ""),
-		TLSSkipVerify:   tlsSkipVerify,
-		CAData:          caData,
+
+		UserAuthRoleStored: framework.HasUserAuthRole(conf),
+		TLSSkipVerify:      tlsSkipVerify,
+		CAData:             caData,
+		AllowedHosts:       allowedHosts,
 	}
 }

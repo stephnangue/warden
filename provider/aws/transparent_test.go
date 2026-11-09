@@ -7,6 +7,17 @@ import (
 	"github.com/stephnangue/warden/framework"
 )
 
+// Every AWS role shares the mount-level gateway: the role travels in the
+// access key ID, not the URL.
+func TestRoleURLSuffix_MountLevelGateway(t *testing.T) {
+	b := &awsBackend{}
+	for _, role := range []string{"s3-reader", "admin"} {
+		if got := b.RoleURLSuffix(role); got != "gateway" {
+			t.Errorf("RoleURLSuffix(%q) = %q, want gateway", role, got)
+		}
+	}
+}
+
 func TestExtractToken_JWTTransparent(t *testing.T) {
 	// JWT in X-Amz-Security-Token → return JWT
 	r, _ := http.NewRequest("GET", "/", nil)

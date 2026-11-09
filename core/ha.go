@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"net/http"
 	"sync/atomic"
 	"time"
 
@@ -125,7 +124,7 @@ func (c *Core) HAEnabled() bool {
 
 // StepDown causes the active node to step down from leadership.
 // A standby node will then acquire the lock and become active.
-func (c *Core) StepDown(r *http.Request) error {
+func (c *Core) StepDown() error {
 	if c.ha == nil {
 		return ErrHANotEnabled
 	}

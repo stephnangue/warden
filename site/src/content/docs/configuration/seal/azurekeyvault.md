@@ -29,7 +29,7 @@ ambient managed identity — the preferred setup on Azure-hosted nodes.
 | `client_id` | *(managed identity)* | App registration client ID. |
 | `client_secret` | *(managed identity)* | App registration client secret. |
 | `environment` | `AZUREPUBLICCLOUD` | Azure environment (e.g. `AZUREPUBLICCLOUD`, `AZUREGOVERNMENTCLOUD`). |
-| `resource` | *(none)* | Resource identifier override for the vault endpoint. |
+| `resource` | *(the environment's)* | DNS suffix of the vault endpoint, such as `vault.azure.net`. The `AZURE_AD_RESOURCE` environment variable wins over it. |
 
 ## See Also
 

@@ -150,6 +150,7 @@ func (b *SystemBackend) handleProtectedResourceConfigWrite(ctx context.Context, 
 	if err := saveProtectedResourceConfig(ctx, storage, cfg); err != nil {
 		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
 	}
+	b.core.invalidateExternalBaseURL()
 
 	return &logical.Response{
 		Data: map[string]any{

@@ -7,17 +7,20 @@ Warden's purpose is to keep secrets out of workloads. Instead of handing an agen
 static API key, Warden **brokers access**: at request time it obtains a scoped, usually
 short-lived credential for the upstream the caller is reaching, then injects it into the
 request rather than handing it over. The workload presents only its
-[identity](/concepts/authentication/); it never holds a credential of its own.
+[identity](/identity/authentication/); it never holds a credential of its own.
 
 How Warden obtains that credential is a spectrum, best to worst by *what Warden stores*:
 
 - **Keyless** — Warden stores nothing. It federates a short-lived
   [identity assertion](/federation/oidc-issuer/) for a credential the upstream issues, or
   [chains](/federation/credential-chaining/) the needed secret from a keyless-federated
-  vault per request. **Recommended**, and coming to every driver.
+  vault per request. **Recommended** wherever the driver supports it — the
+  [capability matrix](/credential-drivers/#capability-matrix) says which do.
 - **Inline secret** — Warden holds a stored secret and either mints a short-lived
-  credential with it (*dynamic*) or injects it directly (*static*). A stored secret is
-  attack surface, so this is a fallback.
+  credential with it (*dynamic*) or injects it directly (*static*). It is the quick start,
+  not the production setup: a stored secret is attack surface, and a server can be set to
+  warn about or refuse it with
+  [`keyless_enforcement_level`](/federation/keyless-credentials/#keyless-enforcement).
 
 Whether the upstream sees a service identity or the *caller's* identity (on-behalf-of) is
 a separate, orthogonal choice — see [Delegation](/concepts/delegation/). The full picture
@@ -47,12 +50,12 @@ role.cred_spec_name ─▶ credential spec ─▶ credential source ─▶ drive
   workload's upstream request — an STS session, a Vault token, an installation token —
   with a lease and a TTL when the upstream supports it.
 
-A [role](/concepts/roles/) ties this to identity. Its `cred_spec_name` field names the
-spec a caller of that role will draw from — but naming the spec is all authentication
-does. Issuance is lazy: the credential is minted only when the workload actually makes a
+A [role](/identity/roles/) ties this to a request. Its `cred_spec_name` field names the
+spec a request under that role draws from, and a caller runs under the role only when one
+of its [groups](/identity/groups/) grants it. Issuance is lazy: the credential is minted only when the workload actually makes a
 request to the upstream through a [provider](/concepts/providers/), at which point Warden
 resolves the role's spec and mints (or reuses) the credential. Because
-[roles are per-request](/concepts/roles/#roles-are-per-request), the same workload can
+[roles are per-request](/identity/roles/), the same workload can
 draw from different specs — different upstream access — by naming a different role on each
 request.
 
@@ -93,7 +96,16 @@ Sources live at `sys/cred/sources/<name>`, scoped to the current
 a stored secret in place — an AppRole-backed OpenBao/Vault source, and specs whose credential
 type embeds a rotatable secret — and is **not needed for a keyless or chained source** (no
 stored secret to rotate), nor for a per-request exchange spec (where it is rejected). Config
-fields that hold secrets are masked on read.
+fields that hold secrets are masked on read; a secret field an update cleared to `""`
+reads back as `""`, not masked, so an empty field is never mistaken for a secret still
+held.
+
+Every source and spec read and list also reports **`stored_secrets`** — the names of the
+secret fields it holds, never their values — and omits it when it holds none. A write
+that would leave a secret stored warns by default, and is refused when the server runs
+with `keyless_enforcement_level=enforce`; `warden cred source keyless-plan` and
+`warden cred spec keyless-plan` print the keyless replacement. See
+[Keyless enforcement](/federation/keyless-credentials/#keyless-enforcement).
 
 ### Specs
 
@@ -125,7 +137,7 @@ to manage and audit it:
 | `Data` | The secret fields themselves (e.g. `access_key_id`, `secret_access_key`, `session_token`; or `token`). HMAC-salted in audit logs. |
 | `Type` / `Category` | The credential type and a routing category. |
 | `LeaseTTL` / `LeaseID` | Lease lifetime, and the upstream revocation handle. `LeaseTTL` is `0` for static credentials; `LeaseID` is empty when there is nothing to revoke — which includes dynamic-but-not-revocable credentials. |
-| `TokenID` | The [token](/concepts/tokens/) — session or transparent — the credential is bound to and expires with. |
+| `TokenID` | The [token](/identity/tokens/) — identity token, service token or ticket — the credential is bound to and expires with. |
 | `SourceName` / `SourceType` / `SpecName` | Provenance, for revocation and audit. |
 | `Revocable` | Whether the credential can be revoked upstream. |
 | `Metadata` | Non-secret attributes (e.g. `subject`), logged in clear. |
@@ -196,9 +208,12 @@ Warden ships drivers for:
 | `oauth2` | Generic OAuth2 providers |
 | `token_exchange` | RFC 8693 / RFC 7523 exchange at any OAuth2 STS |
 | `kubernetes` | Kubernetes API |
+| `anthropic` | Anthropic API tokens, through workload identity federation |
+| `openai` | OpenAI access tokens, through workload identity federation |
+| `cloudflare` | Cloudflare API tokens and R2 keys, chained from your secret store |
 | `local` | Static secrets stored in the spec itself |
 | `apikey` | Generic static API keys |
-| `ibm`, `elastic`, `grafana`, `honeycomb`, `alicloud`, `scaleway`, `ovh` | The respective SaaS / cloud APIs |
+| `ibm`, `elastic`, `grafana`, `alicloud`, `scaleway`, `ovh` | The respective SaaS / cloud APIs |
 
 Each driver has a reference page under [Credential drivers](/credential-drivers/) covering
 its config keys, mint methods, credential types, and rotation behaviour.
@@ -231,6 +246,14 @@ failing is persisted and retried daily for up to a week before being abandoned w
 error. Source rotation rotates the privileged secret Warden authenticates *with*; spec
 rotation rotates a secret a source manages *on behalf of* a workload.
 
+An operator edit always wins over a rotation in flight. An update or delete that changes
+a source's or spec's config **discards** any rotation staged for it, and the rotation
+starts again from the new config. Updates are compared against the config they were read
+from, so two writes that race are not merged: the second gets **`409`** (*changed while
+this update was in progress*) and should read the object again and retry. A source
+update that lands while a rotation holds the source gets `503` and can simply be
+retried.
+
 ## Delivering a Credential
 
 Credentials are delivered by **injection**. The workload sends its request to a Warden
@@ -238,9 +261,11 @@ Credentials are delivered by **injection**. The workload sends its request to a 
 credential and injects it into the proxied request — signing it with AWS SigV4, setting
 the upstream token header, and so on — then streams the upstream response back.
 
-The workload never receives the credential. It only ever lives inside the proxied hop, and
-any privileged secret that mints it never leaves Warden. That is the whole point: a
-compromised workload has no upstream secret to leak, because it never held one.
+The workload never receives the credential. It only ever lives inside the proxied hop. Behind
+it, a keyless source holds no privileged secret at all, a chained one fetches it from your
+store for that request and keeps nothing, and a stored one never leaves Warden. That is the
+whole point: a compromised workload has no upstream secret to leak, because it never held
+one.
 
 ## OAuth2 Consent
 
@@ -267,6 +292,7 @@ warden cred source read   <name>
 warden cred source list
 warden cred source update <name> -config=k=v ...
 warden cred source delete <name>
+warden cred source keyless-plan <name>   # print the keyless replacement; writes nothing
 
 # Specs
 warden cred spec create <name> -source=<source> -config=k=v ...
@@ -275,6 +301,7 @@ warden cred spec list
 warden cred spec update <name> -config=k=v ...
 warden cred spec delete <name>
 warden cred spec connect <name>   # OAuth2 authorization-code consent
+warden cred spec keyless-plan <name>
 ```
 
 Both commands also accept a full payload via `-json` (`-json @file.json`, `-json '<json>'`,
@@ -289,6 +316,6 @@ its own credential configuration, with no inheritance across boundaries.
 - [Keyless credential sources](/federation/keyless-credentials/) — the recommended `oidc_federation` mode.
 - [Credential chaining](/federation/credential-chaining/) — sourcing a secret keylessly per request.
 - [Delegation](/concepts/delegation/) — acting on behalf of a user.
-- [Roles](/concepts/roles/) — how `cred_spec_name` binds a spec to an identity.
+- [Roles](/identity/roles/) — how `cred_spec_name` binds a spec to a role.
 - [Providers](/concepts/providers/) — the mounts that inject or return credentials.
-- [Tokens](/concepts/tokens/) — the token a credential is bound to and expires with.
+- [Tokens](/identity/tokens/) — the token a credential is bound to and expires with.

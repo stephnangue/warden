@@ -40,28 +40,30 @@ func (t *CloudflareKeysCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("v1.0-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
 
 		credential.StringField("mint_method").
-			OneOf("static_keys", "static_cloudflare").
+			OneOf("static_keys").
 			Describe("Mint method for credential minting").
 			Example("static_keys"),
 
-		// Vault source fields
-		credential.StringField("kv2_mount").
-			Describe("Vault KV2 mount path (required for static_cloudflare)").
-			Example("secret"),
+		credential.StringField(credential.ConfigSecretSpec).
+			Describe("Name of a credential spec that yields the credential (api_token and/or access_key_id + secret_access_key); required on a cloudflare source").
+			Example("cloudflare-from-vault"),
 
-		credential.StringField("secret_path").
-			Describe("Path to secret in KV2 (required for static_cloudflare)").
-			Example("cloudflare/prod/keys"),
+		credential.StringField(credential.ConfigSecretField).
+			Describe("Which key of the referenced secret_spec's data holds the API token, when it is not stored as api_token").
+			Example("token"),
 	}
 }
 
 // ValidateConfig validates the Config for a Cloudflare credential spec
-func (t *CloudflareKeysCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *CloudflareKeysCredType) ValidateConfig(config credential.Config, sourceType string) error {
+	// A vault source is not supported: it would need a static_cloudflare mint
+	// method, which the Vault driver has never implemented. It used to be accepted
+	// here and then failed at the first mint.
 	switch sourceType {
-	case credential.SourceTypeLocal, credential.SourceTypeVault:
+	case credential.SourceTypeLocal, credential.SourceTypeCloudflare:
 		// Supported
 	default:
-		return fmt.Errorf("cloudflare_keys credentials require a local or vault source, got: %s", sourceType)
+		return fmt.Errorf("cloudflare_keys credentials require a local or cloudflare source, got: %s", sourceType)
 	}
 
 	schema := t.ConfigSchema()
@@ -69,32 +71,56 @@ func (t *CloudflareKeysCredType) ValidateConfig(config map[string]string, source
 		return err
 	}
 
-	switch sourceType {
-	case credential.SourceTypeVault:
-		if config["mint_method"] != "static_cloudflare" {
-			return fmt.Errorf("'mint_method' must be 'static_cloudflare' for vault source, got: %s", config["mint_method"])
-		}
-		if config["kv2_mount"] == "" {
-			return fmt.Errorf("'kv2_mount' is required when mint_method is static_cloudflare")
-		}
-		if config["secret_path"] == "" {
-			return fmt.Errorf("'secret_path' is required when mint_method is static_cloudflare")
-		}
-	default:
-		hasAPI := config["api_token"] != ""
-		hasR2 := config["access_key_id"] != "" || config["secret_access_key"] != ""
-		if !hasAPI && !hasR2 {
-			return fmt.Errorf("at least one of 'api_token' (for API) or 'access_key_id'+'secret_access_key' (for R2) is required")
-		}
-		// If R2 fields are partially set, both must be present
-		if config["access_key_id"] != "" && config["secret_access_key"] == "" {
-			return fmt.Errorf("'secret_access_key' is required when 'access_key_id' is set")
-		}
-		if config["secret_access_key"] != "" && config["access_key_id"] == "" {
-			return fmt.Errorf("'access_key_id' is required when 'secret_access_key' is set")
-		}
+	if sourceType == credential.SourceTypeCloudflare {
+		return validateChainedCloudflareKeys(config)
 	}
 
+	// A local source copies the spec config into the credential and cannot
+	// chain, so a reference here would be accepted and then fail at the first
+	// mint.
+	if config.Get(credential.ConfigSecretSpec) != "" {
+		return fmt.Errorf("secret_spec (credential chaining) is not supported with a local source; use a cloudflare source")
+	}
+
+	hasAPI := config.Get("api_token") != ""
+	hasR2 := config.Get("access_key_id") != "" || config.Get("secret_access_key") != ""
+	if !hasAPI && !hasR2 {
+		return fmt.Errorf("at least one of 'api_token' (for API) or 'access_key_id'+'secret_access_key' (for R2) is required")
+	}
+	// If R2 fields are partially set, both must be present
+	if config.Get("access_key_id") != "" && config.Get("secret_access_key") == "" {
+		return fmt.Errorf("'secret_access_key' is required when 'access_key_id' is set")
+	}
+	if config.Get("secret_access_key") != "" && config.Get("access_key_id") == "" {
+		return fmt.Errorf("'access_key_id' is required when 'secret_access_key' is set")
+	}
+
+	return nil
+}
+
+// validateChainedCloudflareKeys checks a spec on a cloudflare source, whose
+// credential always comes from the spec its secret_spec names.
+func validateChainedCloudflareKeys(config credential.Config) error {
+	if config.Get(credential.ConfigSecretSpec) == "" {
+		return fmt.Errorf("a cloudflare source requires '%s' naming a spec that yields api_token and/or access_key_id + secret_access_key",
+			credential.ConfigSecretSpec)
+	}
+	// Refuse an inline credential rather than quietly preferring one side: a
+	// secret sitting in spec config is the standing secret this source exists to
+	// avoid, and an inline half would be presented against a fetched other half.
+	for _, key := range []string{"api_token", "access_key_id", "secret_access_key"} {
+		if config.Get(key) != "" {
+			return fmt.Errorf("'%s' must be omitted on a cloudflare source; the referenced %s supplies the credential",
+				key, credential.ConfigSecretSpec)
+		}
+	}
+	// secret_field selects the API token. The R2 pair is read by name, both
+	// halves together, so naming one half here could only mislead.
+	switch field := config.Get(credential.ConfigSecretField); field {
+	case "access_key_id", "secret_access_key":
+		return fmt.Errorf("'%s' selects the API token and cannot name '%s': the R2 pair is read from the referenced payload by name",
+			credential.ConfigSecretField, field)
+	}
 	return nil
 }
 
@@ -134,12 +160,16 @@ func (t *CloudflareKeysCredType) Parse(rawData, metadata map[string]interface{},
 	}
 
 	return &credential.Credential{
-		Type:      credential.TypeCloudflareKeys,
-		Category:  credential.CategoryCloudIAM,
-		LeaseTTL:  leaseTTL,
-		LeaseID:   leaseID,
-		IssuedAt:  time.Now(),
-		Revocable: leaseTTL > 0,
+		Type:     credential.TypeCloudflareKeys,
+		Category: credential.CategoryCloudIAM,
+		LeaseTTL: leaseTTL,
+		LeaseID:  leaseID,
+		IssuedAt: time.Now(),
+		// Revoking means releasing a lease at the source, which needs a handle to
+		// release. Neither source hands one out: a local source returns no TTL, and
+		// a cloudflare source returns an advisory TTL with no leaseID, since it
+		// serves a credential that already exists rather than creating one.
+		Revocable: leaseTTL > 0 && leaseID != "",
 		Data:      data,
 		Metadata:  meta,
 	}, nil
@@ -188,6 +218,11 @@ func (t *CloudflareKeysCredType) RequiresSpecRotation() bool {
 // SensitiveConfigFields returns spec config keys that should be masked in output
 func (t *CloudflareKeysCredType) SensitiveConfigFields() []string {
 	return []string{"secret_access_key", "api_token"}
+}
+
+// StoredSecrets reports the secret config keys this spec holds.
+func (t *CloudflareKeysCredType) StoredSecrets(config credential.Config) []string {
+	return config.Present("api_token", "secret_access_key")
 }
 
 // FieldSchemas returns metadata about the credential's data fields

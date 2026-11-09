@@ -2,14 +2,15 @@ package drivers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/hashicorp/go-retryablehttp"
 	"github.com/hashicorp/vault/api"
 	"github.com/openbao/openbao/sdk/v2/helper/consts"
 	"github.com/stephnangue/warden/credential"
@@ -20,7 +21,8 @@ import (
 // authenticates to the upstream Vault/OpenBao. approle holds a long-lived secret_id
 // (rotatable); oidc_federation holds no secret and authenticates per request by
 // exchanging a caller-presented Warden identity assertion at Vault's JWT auth method.
-// An empty auth_method means a pre-set/environment token.
+// An empty auth_method means the server environment's token; writes refuse it, so
+// only a source stored before auth_method became required can still have one.
 const (
 	vaultAuthMethodApprole        = "approle"
 	vaultAuthMethodOIDCFederation = "oidc_federation"
@@ -44,6 +46,13 @@ type VaultDriver struct {
 	httpClient    *http.Client // HTTP client for external API calls (e.g., IBM IAM token exchange)
 	tokenExpireAt time.Time    // Tracks when the current token expires
 	authMu        sync.Mutex   // Protects tokenExpireAt and authentication
+
+	// configMu guards the credSource.Config field, which rotation replaces. It is
+	// separate from authMu because loginViaApprole reads config while authMu is
+	// already held, so reading under authMu would deadlock. configMu is only ever
+	// held long enough to read or replace one map header, never across another
+	// lock, so the two cannot deadlock in either order.
+	configMu sync.RWMutex
 }
 
 // VaultDriverFactory creates VaultDriver instances
@@ -55,26 +64,14 @@ func (f *VaultDriverFactory) Type() string {
 }
 
 // Create instantiates a new VaultDriver
-func (f *VaultDriverFactory) Create(config map[string]string, logger *logger.GatedLogger) (credential.SourceDriver, error) {
-	// Parse config values
-	vaultAddress := credential.GetString(config, "vault_address", "")
-	vaultNamespace := credential.GetString(config, "vault_namespace", "")
+func (f *VaultDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	authMethod := credential.GetString(config, "auth_method", "")
 
-	apiCfg := api.DefaultConfig()
-	apiCfg.Address = vaultAddress
-
-	apiClient, err := api.NewClient(apiCfg)
+	apiClient, err := newVaultAPIClient(config)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Vault client: %w", err)
+		return nil, err
 	}
 
-	// Set namespace if provided
-	if vaultNamespace != "" {
-		apiClient.SetNamespace(vaultNamespace)
-	}
-
-	// Authenticate if auth_method is provided
 	credSource := &credential.CredSource{
 		Type:   credential.SourceTypeVault,
 		Config: config,
@@ -90,13 +87,26 @@ func (f *VaultDriverFactory) Create(config map[string]string, logger *logger.Gat
 	driver := &VaultDriver{
 		vault:      apiClient,
 		credSource: credSource,
-		logger:     logger.WithSubsystem(credential.SourceTypeVault),
+		logger:     log.WithSubsystem(credential.SourceTypeVault),
 		httpClient: httpClient,
 	}
 
+	if authMethod == "" {
+		driver.logger.Warn("vault source has no auth_method and logs in with the server environment's VAULT_TOKEN; "+
+			"set auth_method, which any edit of this source now requires",
+			logger.String("vault_address", credential.GetString(config, "vault_address", "")))
+	}
+
+	// The login and the role check share one deadline. Each request is otherwise
+	// bounded only by the client's per-request timeout, retried, so an upstream that
+	// accepts connections and never answers held the source's first mint for minutes.
+	probeCtx, cancel := context.WithTimeout(context.Background(), vaultCreateProbeTimeout)
+	defer cancel()
+
 	// Perform initial authentication
 	if authMethod != "" {
-		if err := driver.authenticate(context.Background()); err != nil {
+		if err := driver.authenticate(probeCtx); err != nil {
+			_ = driver.Cleanup(context.Background())
 			return nil, fmt.Errorf("Vault authentication failed: %w", err)
 		}
 	}
@@ -107,11 +117,13 @@ func (f *VaultDriverFactory) Create(config map[string]string, logger *logger.Gat
 		approleMount := credential.GetString(config, "approle_mount", "")
 		if roleName != "" && approleMount != "" {
 			rolePath := fmt.Sprintf("auth/%s/role/%s", approleMount, roleName)
-			secret, err := apiClient.Logical().ReadWithContext(context.Background(), rolePath)
+			secret, err := apiClient.Logical().ReadWithContext(probeCtx, rolePath)
 			if err != nil {
+				_ = driver.Cleanup(context.Background())
 				return nil, fmt.Errorf("failed to verify AppRole role '%s': %w", roleName, err)
 			}
 			if secret == nil || secret.Data == nil {
+				_ = driver.Cleanup(context.Background())
 				return nil, fmt.Errorf("AppRole role '%s' does not exist at path '%s'", roleName, rolePath)
 			}
 		}
@@ -120,89 +132,175 @@ func (f *VaultDriverFactory) Create(config map[string]string, logger *logger.Gat
 	return driver, nil
 }
 
+// vaultAPITimeout bounds each request the source's Vault client makes, as the
+// library's own default does.
+const vaultAPITimeout = 60 * time.Second
+
+// vaultCreateProbeTimeout bounds the login and role check a source runs when its
+// driver is built. A var so tests can shorten it.
+var vaultCreateProbeTimeout = 30 * time.Second
+
+// newVaultAPIClient builds the source's Vault client from the source config alone.
+//
+// It never starts from api.DefaultConfig, which reads the server process's
+// VAULT_* environment: VAULT_SKIP_VERIFY and VAULT_CACERT would set this
+// source's TLS trust, VAULT_AGENT_ADDR would send its requests elsewhere, and
+// ConfigureTLS cannot undo either, since it only ever adds settings. api.NewClient
+// still reads VAULT_TOKEN, VAULT_NAMESPACE and VAULT_HEADERS whatever Config it is
+// given, so those are cleared after it returns, and the wrapping lookup is pinned
+// so VAULT_WRAP_TTL cannot wrap a response the driver then fails to read.
+//
+// A source with no auth_method is the exception: it has no credential of its
+// own and logs in with the environment's VAULT_TOKEN, so it keeps the
+// environment-derived client. Writes refuse to create such a source, and refuse
+// to edit one until it sets auth_method; a stored one keeps minting meanwhile.
+func newVaultAPIClient(config credential.Config) (*api.Client, error) {
+	address := credential.GetString(config, "vault_address", "")
+	namespace := credential.GetString(config, "vault_namespace", "")
+
+	if credential.GetString(config, "auth_method", "") == "" {
+		apiCfg := api.DefaultConfig()
+		apiCfg.Address = address
+		client, err := api.NewClient(apiCfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Vault client: %w", err)
+		}
+		pinNoResponseWrapping(client)
+		if namespace != "" {
+			client.SetNamespace(namespace)
+		}
+		return client, nil
+	}
+
+	httpClient, err := BuildHTTPClient(config, vaultAPITimeout)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+	// The library handles redirects itself — one hop, never https to http — and
+	// expects net/http not to follow them first, as api.DefaultConfig arranges.
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	client, err := api.NewClient(&api.Config{
+		Address:    address,
+		HttpClient: httpClient,
+		Timeout:    vaultAPITimeout,
+		MaxRetries: 2,
+		Backoff:    retryablehttp.RateLimitLinearJitterBackoff,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Vault client: %w", err)
+	}
+	client.ClearToken()
+	client.ClearNamespace()
+	client.SetHeaders(http.Header{api.RequestHeaderName: []string{"true"}})
+	pinNoResponseWrapping(client)
+	if namespace != "" {
+		client.SetNamespace(namespace)
+	}
+	return client, nil
+}
+
+// pinNoResponseWrapping stops VAULT_WRAP_TTL from wrapping this client's
+// responses: with no lookup of its own, the library consults that variable on
+// every request, and a wrapped response hides the secret the driver reads. A
+// clone does not inherit the lookup, so each clone is pinned again.
+func pinNoResponseWrapping(client *api.Client) {
+	client.SetWrappingLookupFunc(func(string, string) string { return "" })
+}
+
 // ValidateConfig validates Vault driver configuration using declarative schema
-func (f *VaultDriverFactory) ValidateConfig(config map[string]string) error {
-	// Validate vault_address with custom URL validation
+func (f *VaultDriverFactory) ValidateConfig(config credential.Config) error {
+	// auth_method is required: without one the source would log in with the
+	// server environment's VAULT_TOKEN, sending Warden's own token to whatever
+	// vault_address the source's author chose. Only a source stored before this
+	// rule can still lack one (see newVaultAPIClient).
 	if err := credential.ValidateSchema(config,
 		credential.StringField("vault_address").
 			Required().
 			Custom(validateVaultAddress).
 			Describe("Vault server address").
 			Example("https://vault.example.com"),
+
+		credential.StringField("auth_method").
+			Required().
+			OneOf(vaultAuthMethodApprole, vaultAuthMethodOIDCFederation).
+			Describe("Authentication method: 'approle' (secret_id) or 'oidc_federation' (keyless JWT auth)").
+			Example(vaultAuthMethodOIDCFederation),
+
+		credential.StringField("ca_data").
+			Custom(ValidateCAData).
+			Describe("Base64-encoded PEM CA certificate for custom/self-signed CAs").
+			Example(""),
+
+		credential.BoolField("tls_skip_verify").
+			Describe("Skip TLS certificate verification, and allow an http:// vault_address (development only)").
+			Example("false"),
 	); err != nil {
 		return err
 	}
+	if !credential.GetBool(config, "tls_skip_verify", false) &&
+		strings.HasPrefix(strings.ToLower(credential.GetString(config, "vault_address", "")), "http://") {
+		return fmt.Errorf("vault_address must use https:// (set tls_skip_verify=true for a development server over http://)")
+	}
 
-	// Validate auth_method if provided
 	authMethod := credential.GetString(config, "auth_method", "")
-	if authMethod != "" {
+	switch authMethod {
+	case vaultAuthMethodApprole:
+		// AppRole requires the login + rotation fields.
 		if err := credential.ValidateSchema(config,
-			credential.StringField("auth_method").
-				OneOf(vaultAuthMethodApprole, vaultAuthMethodOIDCFederation).
-				Describe("Authentication method: 'approle' (secret_id) or 'oidc_federation' (keyless JWT auth)").
-				Example(vaultAuthMethodApprole),
+			credential.StringField("role_id").
+				Required().
+				Describe("AppRole role ID").
+				Example("role-id-uuid"),
+
+			credential.StringField("secret_id").
+				Required().
+				Describe("AppRole secret ID").
+				Example("secret-id-uuid"),
+
+			credential.StringField("approle_mount").
+				Required().
+				Describe("AppRole auth mount path").
+				Example("approle"),
+
+			credential.StringField("role_name").
+				Required().
+				Describe("AppRole role name for rotation").
+				Example("warden-source-role"),
 		); err != nil {
 			return err
 		}
-
-		switch authMethod {
-		case vaultAuthMethodApprole:
-			// AppRole requires the login + rotation fields.
-			if err := credential.ValidateSchema(config,
-				credential.StringField("role_id").
-					Required().
-					Describe("AppRole role ID").
-					Example("role-id-uuid"),
-
-				credential.StringField("secret_id").
-					Required().
-					Describe("AppRole secret ID").
-					Example("secret-id-uuid"),
-
-				credential.StringField("approle_mount").
-					Required().
-					Describe("AppRole auth mount path").
-					Example("approle"),
-
-				credential.StringField("role_name").
-					Required().
-					Describe("AppRole role name for rotation").
-					Example("warden-source-role"),
-			); err != nil {
-				return err
+		// Reject keyless-federation config on an approle source so a
+		// misconfiguration cannot silently mix modes.
+		for _, k := range []string{"jwt_role", "jwt_mount", "audience"} {
+			if config.Get(k) != "" {
+				return fmt.Errorf("field '%s' is only valid for auth_method=%s", k, vaultAuthMethodOIDCFederation)
 			}
-			// Reject keyless-federation config on an approle source so a
-			// misconfiguration cannot silently mix modes.
-			for _, k := range []string{"jwt_role", "jwt_mount", "audience"} {
-				if config[k] != "" {
-					return fmt.Errorf("field '%s' is only valid for auth_method=%s", k, vaultAuthMethodOIDCFederation)
-				}
-			}
+		}
 
-		case vaultAuthMethodOIDCFederation:
-			// Keyless: the source holds no secret and authenticates per request by
-			// exchanging a Warden identity assertion at Vault's JWT auth method.
-			if err := credential.ValidateSchema(config,
-				credential.StringField("jwt_role").
-					Required().
-					Describe("Vault JWT-auth role name the assertion logs in as").
-					Example("warden-agents"),
+	case vaultAuthMethodOIDCFederation:
+		// Keyless: the source holds no secret and authenticates per request by
+		// exchanging a Warden identity assertion at Vault's JWT auth method.
+		if err := credential.ValidateSchema(config,
+			credential.StringField("jwt_role").
+				Required().
+				Describe("Vault JWT-auth role name the assertion logs in as").
+				Example("warden-agents"),
 
-				credential.StringField("jwt_mount").
-					Describe("Vault JWT/OIDC auth mount path (default 'jwt')").
-					Example("jwt"),
+			credential.StringField("jwt_mount").
+				Describe("Vault JWT/OIDC auth mount path (default 'jwt')").
+				Example("jwt"),
 
-				credential.StringField("audience").
-					Describe("Assertion audience; must equal the Vault role's bound_audiences").
-					Example("https://vault.example.com/warden"),
-			); err != nil {
-				return err
-			}
-			// Reject approle/token secrets on a keyless source (symmetric guard).
-			for _, k := range []string{"role_id", "secret_id", "secret_id_accessor", "approle_mount", "role_name", "token"} {
-				if config[k] != "" {
-					return fmt.Errorf("field '%s' must not be set for auth_method=%s", k, vaultAuthMethodOIDCFederation)
-				}
+			credential.StringField("audience").
+				Describe("Assertion audience; must equal the Vault role's bound_audiences").
+				Example("https://vault.example.com/warden"),
+		); err != nil {
+			return err
+		}
+		// Reject approle/token secrets on a keyless source (symmetric guard).
+		for _, k := range []string{"role_id", "secret_id", "secret_id_accessor", "approle_mount", "role_name", "token"} {
+			if config.Get(k) != "" {
+				return fmt.Errorf("field '%s' must not be set for auth_method=%s", k, vaultAuthMethodOIDCFederation)
 			}
 		}
 	}
@@ -233,9 +331,22 @@ func (f *VaultDriverFactory) SensitiveConfigFields() []string {
 	return []string{"token", "secret_id", "secret_id_accessor"}
 }
 
+// StoredSecrets reports the secrets this source holds. secret_id_accessor is
+// masked but is only a handle, so it is not reported. A source with no
+// auth_method logs in with no stored secret of its own: its client takes the
+// token from the server's environment (api.DefaultConfig in Create), which is a
+// long-lived secret all the same.
+func (f *VaultDriverFactory) StoredSecrets(config credential.Config) []string {
+	held := config.Present("secret_id", "token")
+	if len(held) == 0 && credential.GetString(config, "auth_method", "") == "" {
+		return []string{"vault token from the server environment"}
+	}
+	return held
+}
+
 // InferCredentialType infers the credential type from the spec's mint_method.
-func (f *VaultDriverFactory) InferCredentialType(specConfig map[string]string) (string, error) {
-	mintMethod := specConfig["mint_method"]
+func (f *VaultDriverFactory) InferCredentialType(specConfig credential.Config) (string, error) {
+	mintMethod := specConfig.Get("mint_method")
 	switch mintMethod {
 	case "static_aws", "dynamic_aws":
 		return credential.TypeAWSAccessKeys, nil
@@ -251,14 +362,29 @@ func (f *VaultDriverFactory) InferCredentialType(specConfig map[string]string) (
 		return credential.TypeOAuthBearerToken, nil
 	case "vault_token", "":
 		return credential.TypeVaultToken, nil
+	case mintMethodTransitSigner:
+		// A multi-field payload with no single primary field, which is what makes a
+		// consumer read it by name rather than having one value picked out for it.
+		return credential.TypeKeyValue, nil
 	default:
 		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
 	}
 }
 
+// sourceConfig returns the current config map. Rotation swaps in a whole new map
+// rather than writing into the live one, so the result is a stable snapshot.
+// An operation that reads more than one key must take one snapshot and read every
+// value from it. Calling this per key is correct for a single value and wrong for
+// a set: a rotation between two calls yields values from two generations.
+func (d *VaultDriver) sourceConfig() credential.Config {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	return d.credSource.Config
+}
+
 // getAuthMethod returns the source's configured auth_method ("" for a pre-set token).
 func (d *VaultDriver) getAuthMethod() string {
-	return credential.GetString(d.credSource.Config, "auth_method", "")
+	return credential.GetString(d.sourceConfig(), "auth_method", "")
 }
 
 // authenticate performs Vault authentication only if needed (thread-safe)
@@ -298,9 +424,18 @@ func (d *VaultDriver) isTokenValid(ctx context.Context) bool {
 
 // loginViaApprole authenticates to Vault using AppRole
 func (d *VaultDriver) loginViaApprole(ctx context.Context) error {
-	roleID := credential.GetString(d.credSource.Config, "role_id", "")
-	secretID := credential.GetString(d.credSource.Config, "secret_id", "")
-	approleMount := credential.GetString(d.credSource.Config, "approle_mount", "")
+	// One snapshot: secret_id is what rotation replaces, so reading it separately
+	// from role_id would let a login pair a role with a secret issued for a
+	// different generation of it.
+	//
+	// That cannot happen today — every caller holds authMu, and the only writer
+	// holds it too — but that is an argument spanning three functions, and it stops
+	// holding the moment someone adds a caller that does not take authMu. The
+	// snapshot makes the guarantee local.
+	config := d.sourceConfig()
+	roleID := credential.GetString(config, "role_id", "")
+	secretID := credential.GetString(config, "secret_id", "")
+	approleMount := credential.GetString(config, "approle_mount", "")
 
 	data := map[string]interface{}{
 		"role_id":   roleID,
@@ -356,9 +491,10 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 
 	switch mintMethod {
 	case "static_aws", "static_apikey", "kv2_read":
-		// Non-federation path carries no user context; a templated secret_path here
-		// fails closed in resolveSecretPath (no claims to satisfy {{user.…}}).
-		return d.fetchStaticKVSecret(ctx, d.vault, spec, nil)
+		// Non-federation path carries neither principal's claims; a templated
+		// secret_path here fails closed in resolveSecretPath (nothing to satisfy
+		// {{user.…}} or {{agent.…}} with).
+		return d.fetchStaticKVSecret(ctx, d.vault, spec, nil, nil)
 	case "dynamic_aws":
 		return d.fetchDynamicAWSCreds(ctx, d.vault, spec)
 	case "dynamic_gcp":
@@ -368,11 +504,19 @@ func (d *VaultDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	case "vault_token":
 		return d.fetchDynamicVaultToken(ctx, d.vault, spec)
 	case "oauth2":
-		// Non-federation path carries no user context; a templated credential_name here
-		// fails closed in resolveUserTemplate (no claims to satisfy {{user.…}}).
-		return d.fetchOAuth2Creds(ctx, d.vault, spec, nil)
+		// Non-federation path carries neither principal's claims; a templated
+		// credential_name here fails closed in resolveClaimTemplate (nothing to
+		// satisfy {{user.…}} or {{agent.…}} with).
+		return d.fetchOAuth2Creds(ctx, d.vault, spec, nil, nil)
+	case mintMethodTransitSigner:
+		// Refused rather than served from the shared source session: the capability is
+		// minted as the caller so it can be pinned to a narrow per-caller role, and the
+		// signing key stays reachable by nothing that outlives the request.
+		return nil, nil, 0, "", fmt.Errorf(
+			"vault: mint_method=%s requires auth_method=%s on the source and subject_token_source on the spec, so the capability is minted as the caller",
+			mintMethodTransitSigner, vaultAuthMethodOIDCFederation)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'kv2_read', 'dynamic_aws', 'dynamic_gcp', 'dynamic_ibm', 'vault_token', 'oauth2'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for Vault driver; supported: 'static_aws', 'static_apikey', 'kv2_read', 'dynamic_aws', 'dynamic_gcp', 'dynamic_ibm', 'vault_token', 'oauth2', 'transit_signer'", mintMethod)
 	}
 }
 
@@ -398,14 +542,22 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	if inputs == nil || inputs.SubjectToken == "" {
 		return nil, nil, 0, "", fmt.Errorf("vault: no subject token in exchange inputs")
 	}
+	mintMethod := credential.GetString(spec.Config, "mint_method", "")
+
+	// Checked BEFORE logging in, not inside the mint: the login is what obtains the
+	// token, so a check that ran afterwards would already have minted one under
+	// whatever role the source names — the broad token this requirement exists to
+	// prevent — and only then refused to use it.
+	if err := validateTransitSignerSpec(mintMethod, spec); err != nil {
+		return nil, nil, 0, "", err
+	}
+
 	// Exchange the assertion for a per-request Vault token on an isolated client.
 	client, loginAuth, err := d.loginViaJWT(ctx, spec, inputs.SubjectToken)
 	if err != nil {
 		return nil, nil, 0, "", err
 	}
 	loginTTL := time.Duration(loginAuth.LeaseDuration) * time.Second
-
-	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 
 	// The JWT-login token itself is the credential — never revoke it here.
 	if mintMethod == "vault_token" {
@@ -441,6 +593,12 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 		return rawData, metadata, loginTTL, "", nil
 	}
 
+	// Like vault_token, the login token is itself the credential — it carries the
+	// capability — so this returns before the revoke-on-exit paths below.
+	if mintMethod == mintMethodTransitSigner {
+		return d.mintTransitSigner(ctx, client, spec, loginAuth, loginTTL, inputs.UserClaims, inputs.AgentClaims)
+	}
+
 	// Downstream engines: broker with the per-request login token.
 	var (
 		rawData  map[string]interface{}
@@ -449,7 +607,7 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	)
 	switch mintMethod {
 	case "static_aws", "static_apikey", "kv2_read":
-		rawData, metadata, leaseTTL, _, err = d.fetchStaticKVSecret(ctx, client, spec, inputs.UserClaims)
+		rawData, metadata, leaseTTL, _, err = d.fetchStaticKVSecret(ctx, client, spec, inputs.UserClaims, inputs.AgentClaims)
 		// A static read holds no lease that depends on the login token — best-effort
 		// revoke it so a transient session is not left behind.
 		defer d.revokeLoginToken(loginAuth.Accessor, client)
@@ -460,9 +618,9 @@ func (d *VaultDriver) MintCredentialWithExchange(ctx context.Context, spec *cred
 	case "dynamic_ibm":
 		rawData, metadata, leaseTTL, _, err = d.fetchDynamicIBMCreds(ctx, client, spec)
 	case "oauth2":
-		rawData, metadata, leaseTTL, _, err = d.fetchOAuth2Creds(ctx, client, spec, inputs.UserClaims)
+		rawData, metadata, leaseTTL, _, err = d.fetchOAuth2Creds(ctx, client, spec, inputs.UserClaims, inputs.AgentClaims)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("vault: mint_method %q is not supported over auth_method=%s (supported: vault_token, static_aws, static_apikey, kv2_read, dynamic_aws, dynamic_gcp, dynamic_ibm, oauth2)", mintMethod, vaultAuthMethodOIDCFederation)
+		return nil, nil, 0, "", fmt.Errorf("vault: mint_method %q is not supported over auth_method=%s (supported: vault_token, transit_signer, static_aws, static_apikey, kv2_read, dynamic_aws, dynamic_gcp, dynamic_ibm, oauth2)", mintMethod, vaultAuthMethodOIDCFederation)
 	}
 	if err != nil {
 		return nil, nil, 0, "", err
@@ -487,7 +645,7 @@ func (d *VaultDriver) effectiveJWTRole(spec *credential.CredSpec) string {
 	if r := credential.GetString(spec.Config, "jwt_role", ""); r != "" {
 		return r
 	}
-	return credential.GetString(d.credSource.Config, "jwt_role", "")
+	return credential.GetString(d.sourceConfig(), "jwt_role", "")
 }
 
 // loginViaJWT builds a per-request, token-isolated Vault client and logs in at the
@@ -503,12 +661,13 @@ func (d *VaultDriver) loginViaJWT(ctx context.Context, spec *credential.CredSpec
 		return nil, nil, fmt.Errorf("vault: failed to clone client for JWT login: %w", err)
 	}
 	client.SetToken("")
+	pinNoResponseWrapping(client)
 
 	jwtRole := d.effectiveJWTRole(spec)
 	if jwtRole == "" {
 		return nil, nil, fmt.Errorf("vault: jwt_role is required for auth_method=%s", vaultAuthMethodOIDCFederation)
 	}
-	jwtMount := credential.GetString(d.credSource.Config, "jwt_mount", defaultVaultJWTMount)
+	jwtMount := credential.GetString(d.sourceConfig(), "jwt_mount", defaultVaultJWTMount)
 
 	path := fmt.Sprintf("auth/%s/login", jwtMount)
 	secret, err := client.Logical().WriteWithContext(ctx, path, map[string]interface{}{
@@ -556,90 +715,18 @@ func (d *VaultDriver) revokeLoginToken(accessor string, client *api.Client) {
 	}
 }
 
-// userClaimTemplate matches a {{user.<claim>}} token in secret_path. The claim
-// name is a conservative identifier (letters, digits, '_', '.', '-').
-var userClaimTemplate = regexp.MustCompile(`\{\{user\.([A-Za-z0-9_.-]+)\}\}`)
-
-// userClaimValuePattern is the strict allow-list a substituted claim value must
-// match before it can be placed into a KV path segment. It excludes '/' (which
-// would let one value span segments) and every other separator. '.' is allowed
-// (e.g. first.last), so a value or adjacent values could still compose a "."/".."
-// segment — that is caught after substitution by the segment check below, not here.
-var userClaimValuePattern = regexp.MustCompile(`^[A-Za-z0-9._@-]+$`)
-
 // resolveSecretPath returns the KV secret path for a kv2_read, substituting any
-// {{user.<claim>}} token from the projected per-user claims. See resolveUserTemplate
-// for the fail-closed rules.
-func resolveSecretPath(rawPath string, userClaims map[string]string) (string, error) {
-	return resolveUserTemplate(rawPath, userClaims, "secret_path")
+// {{user.<claim>}} or {{agent.<claim>}} token from the projected claims. See
+// resolveClaimTemplate for the fail-closed rules.
+func resolveSecretPath(rawPath string, userClaims, agentClaims map[string]string) (string, error) {
+	return resolveClaimTemplate(rawPath, userClaims, agentClaims, "secret_path")
 }
 
-// resolveUserTemplate substitutes any {{user.<claim>}} token in raw from the projected
-// per-user claims, for a Vault request path segment (a KV secret_path, an OAuth engine
-// credential_name, …). A value with no such token is returned verbatim (byte-identical to
-// the pre-templating behaviour). It FAILS CLOSED when a referenced claim is absent (project
-// it via assertion_user_claims), when a value is empty or not in the strict allow-list, or
-// when the RESOLVED value contains a "." / ".." segment or a leftover template fragment. The
-// last check is the real boundary: the Vault API client runs path.Clean on the request path,
-// so a claim value of "." (which collapses its segment) or two adjacent tokens composing
-// ".." would otherwise silently retarget the request at a shared/parent path — the per-user
-// value must deny instead. field names the config key for error messages.
-func resolveUserTemplate(raw string, userClaims map[string]string, field string) (string, error) {
-	if !strings.Contains(raw, "{{user.") {
-		return raw, nil
-	}
-	// Deliberately NOT an ErrUserRequired case, however tempting: an empty claim
-	// map does not mean the request lacked a user. Claims are projected only when
-	// the spec sets assertion_user_claims, and when it does, core has already
-	// rejected a user-less request before the driver runs — and a present user
-	// always yields at least "sub". So reaching here with no claims means the
-	// spec structurally cannot project any, which no amount of authenticating
-	// will change. Returning a 401 challenge would send the caller into an OAuth
-	// loop it cannot escape while hiding the real fix from the operator.
-	var subErr error
-	resolved := userClaimTemplate.ReplaceAllStringFunc(raw, func(match string) string {
-		claim := userClaimTemplate.FindStringSubmatch(match)[1]
-		v, ok := userClaims[claim]
-		if !ok {
-			// The user IS present; this claim was simply never projected. Note
-			// that assertion_user_claims only applies to a warden_identity
-			// subject — pairing {{user.…}} with subject_token_source=user_identity
-			// cannot populate claims at all, which is the likelier mistake.
-			subErr = fmt.Errorf("%s references {{user.%s}} but that claim is absent from the user's projected claims "+
-				"(list it in assertion_user_claims, which requires subject_token_source=warden_identity)", field, claim)
-			return ""
-		}
-		// The value becomes path bytes: a single non-empty allow-listed token that
-		// cannot span segments (no '/'). Dot-only / traversal segments it might
-		// compose are rejected after substitution.
-		if v == "" || !userClaimValuePattern.MatchString(v) {
-			subErr = fmt.Errorf("%s claim %q has a value rejected by the allow-list", field, claim)
-			return ""
-		}
-		return v
-	})
-	if subErr != nil {
-		return "", subErr
-	}
-	// A leftover fragment means a malformed token (e.g. a missing brace or an empty
-	// claim name) — fail closed rather than use a literal "{{user.…" value.
-	if strings.Contains(resolved, "{{user.") {
-		return "", fmt.Errorf("%s has an unresolved template fragment after substitution", field)
-	}
-	// Reject any "." or ".." segment the substituted value(s) may have composed —
-	// path.Clean would otherwise resolve it into a different (shared/parent) path.
-	for _, seg := range strings.Split(resolved, "/") {
-		if seg == "." || seg == ".." {
-			return "", fmt.Errorf("%s resolves to a %q path segment (traversal)", field, seg)
-		}
-	}
-	return resolved, nil
-}
-
-// fetchStaticKVSecret fetches static secrets from Vault KV v2. userClaims, when
-// non-nil (a per-user chained mint), supplies the values for any {{user.<claim>}}
-// token in secret_path so the read is scoped to one user's secret.
-func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, client *api.Client, spec *credential.CredSpec, userClaims map[string]string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+// fetchStaticKVSecret fetches static secrets from Vault KV v2. userClaims and
+// agentClaims, when non-nil, supply the values for any {{user.<claim>}} or
+// {{agent.<claim>}} token in secret_path, so the read is scoped to one
+// principal's secret.
+func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, client *api.Client, spec *credential.CredSpec, userClaims, agentClaims map[string]string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	kv2Mount := credential.GetString(spec.Config, "kv2_mount", "")
 	rawPath := credential.GetString(spec.Config, "secret_path", "")
 
@@ -647,17 +734,37 @@ func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, client *api.Clien
 		return nil, nil, 0, "", fmt.Errorf("kv2_mount and secret_path are required for static KV credentials")
 	}
 
-	secretPath, err := resolveSecretPath(rawPath, userClaims)
+	secretPath, err := resolveSecretPath(rawPath, userClaims, agentClaims)
 	if err != nil {
 		return nil, nil, 0, "", err
 	}
 
-	secret, err := client.KVv2(kv2Mount).Get(ctx, secretPath)
+	// A spec may pin a numbered revision; without one it reads the current revision.
+	// Pinning does not follow rotation — a pinned spec keeps vending the revision it
+	// names until an operator moves it.
+	kv := client.KVv2(kv2Mount)
+	secretVersion := credential.GetInt(spec.Config, "secret_version", 0)
+
+	var secret *api.KVSecret
+	if secretVersion > 0 {
+		secret, err = kv.GetVersion(ctx, secretPath, secretVersion)
+	} else {
+		secret, err = kv.Get(ctx, secretPath)
+	}
 	if err != nil {
+		if secretVersion > 0 {
+			return nil, nil, 0, "", fmt.Errorf("failed to read version %d of KV secret: %w", secretVersion, err)
+		}
 		return nil, nil, 0, "", fmt.Errorf("failed to read KV secret: %w", err)
 	}
 
 	if secret == nil || secret.Data == nil {
+		// A deleted revision still answers, carrying its metadata and no data. The
+		// path is fine in that case, so blaming the path would send the operator
+		// looking in the wrong place.
+		if secretVersion > 0 {
+			return nil, nil, 0, "", fmt.Errorf("version %d of the secret at path '%s' on mount '%s' holds no data (the revision may have been deleted)", secretVersion, secretPath, kv2Mount)
+		}
 		return nil, nil, 0, "", fmt.Errorf("no secret found at path '%s' on mount '%s'", secretPath, kv2Mount)
 	}
 
@@ -666,11 +773,17 @@ func (d *VaultDriver) fetchStaticKVSecret(ctx context.Context, client *api.Clien
 			logger.String("spec", spec.Name),
 			logger.String("mount", kv2Mount),
 			logger.String("path", secretPath),
+			logger.Int("secret_version", secretVersion),
 		)
 	}
 
+	// Project through the spec's field selection, when it declares one. A stored
+	// secret may hold more keys than this spec should vend, and their names are
+	// chosen by whoever wrote the secret rather than by the credential type.
+	data := credential.ApplyKeyMap(secret.Data, credential.GetString(spec.Config, "json_key_map", ""))
+
 	// Return raw data (static, no lease)
-	return secret.Data, nil, 0, "", nil
+	return data, nil, 0, "", nil
 }
 
 // fetchDynamicAWSCreds fetches dynamic AWS credentials from Vault AWS engine
@@ -825,7 +938,7 @@ func (d *VaultDriver) fetchDynamicGCPCreds(ctx context.Context, client *api.Clie
 
 // fetchOAuth2Creds fetches OAuth2 credentials from an OpenBao/Vault OAuth2 secret engine
 // (compatible with openbao-plugin-secrets-oauthapp)
-func (d *VaultDriver) fetchOAuth2Creds(ctx context.Context, client *api.Client, spec *credential.CredSpec, userClaims map[string]string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+func (d *VaultDriver) fetchOAuth2Creds(ctx context.Context, client *api.Client, spec *credential.CredSpec, userClaims, agentClaims map[string]string) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	oauth2Mount := credential.GetString(spec.Config, "oauth2_mount", "")
 	rawCredentialName := credential.GetString(spec.Config, "credential_name", "")
 
@@ -833,11 +946,11 @@ func (d *VaultDriver) fetchOAuth2Creds(ctx context.Context, client *api.Client, 
 		return nil, nil, 0, "", fmt.Errorf("oauth2_mount and credential_name are required for oauth2 credentials")
 	}
 
-	// credential_name may template {{user.<claim>}} (per-user OAuth engine credentials): the
-	// federation login resolves it to the caller's own credential, scoped by a templated
-	// OpenBao policy. userClaims is nil on the non-federation path, where a templated name
-	// fails closed (no claims to satisfy it).
-	credentialName, err := resolveUserTemplate(rawCredentialName, userClaims, "credential_name")
+	// credential_name may template {{user.<claim>}} (per-user OAuth engine credentials) or
+	// {{agent.<claim>}} (per-agent ones): the federation login resolves it to the caller's
+	// own credential, scoped by a templated policy on the store side. Both maps are nil on
+	// the non-federation path, where a templated name fails closed.
+	credentialName, err := resolveClaimTemplate(rawCredentialName, userClaims, agentClaims, "credential_name")
 	if err != nil {
 		return nil, nil, 0, "", err
 	}
@@ -936,7 +1049,7 @@ func (d *VaultDriver) fetchDynamicIBMCreds(ctx context.Context, client *api.Clie
 	// that Warden can't use. Use a fresh context for revocation so it still fires
 	// if the caller's context is already canceled.
 	iamEndpoint := credential.GetString(spec.Config, "iam_endpoint", defaultIBMIAMEndpoint)
-	accessToken, tokenExpiry, err := exchangeIBMAPIKeyForIAMToken(ctx, d.httpClient, apiKey, iamEndpoint)
+	accessToken, tokenExpiry, err := exchangeIBMAPIKeyForIAMToken(ctx, d.httpClient, apiKey, iamEndpoint, d.logger)
 	if err != nil {
 		if secret.LeaseID != "" {
 			revokeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1111,6 +1224,9 @@ func (d *VaultDriver) Revoke(ctx context.Context, leaseID string) error {
 	if !containsSlash(leaseID) {
 		// Try to revoke as token accessor
 		err := d.vault.Auth().Token().RevokeAccessorWithContext(ctx, leaseID)
+		if isTokenGone(err) {
+			return fmt.Errorf("token accessor %s: %w", leaseID, credential.ErrLeaseGone)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to revoke token accessor %s: %w", leaseID, err)
 		}
@@ -1138,6 +1254,22 @@ func (d *VaultDriver) Revoke(ctx context.Context, leaseID string) error {
 	return nil
 }
 
+// isTokenGone reports whether revoking an accessor failed because its token no
+// longer exists: a 400 reading "token not found". An accessor nobody knows is a
+// 200, so this is the expired-or-revoked token whose accessor is still indexed.
+func isTokenGone(err error) bool {
+	var refused *api.ResponseError
+	if !errors.As(err, &refused) || refused.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	for _, msg := range refused.Errors {
+		if msg == "token not found" {
+			return true
+		}
+	}
+	return false
+}
+
 // containsSlash checks if a string contains a forward slash
 func containsSlash(s string) bool {
 	return strings.Contains(s, "/")
@@ -1150,21 +1282,29 @@ func (d *VaultDriver) Type() string {
 
 // Cleanup releases resources
 func (d *VaultDriver) Cleanup(ctx context.Context) error {
-	// Vault client doesn't need explicit cleanup
+	if d.httpClient != nil {
+		d.httpClient.CloseIdleConnections()
+	}
+	// The API client pools its own connections. CloneConfig copies its http.Client
+	// but shares the transport, so this closes the pool the client itself uses.
+	if d.vault != nil {
+		if hc := d.vault.CloneConfig().HttpClient; hc != nil {
+			hc.CloseIdleConnections()
+		}
+	}
 	return nil
 }
 
 // SupportsRotation returns true if this driver instance can rotate its credentials.
 // Currently only AppRole authentication supports rotation.
 func (d *VaultDriver) SupportsRotation() bool {
-	authMethod := credential.GetString(d.credSource.Config, "auth_method", "")
-	if authMethod != "approle" {
+	config := d.sourceConfig()
+	if credential.GetString(config, "auth_method", "") != "approle" {
 		return false
 	}
 
 	// AppRole rotation requires role_name to generate new secret_id
-	roleName := credential.GetString(d.credSource.Config, "role_name", "")
-	return roleName != ""
+	return credential.GetString(config, "role_name", "") != ""
 }
 
 // PrepareRotation generates a new AppRole secret_id WITHOUT destroying the old one.
@@ -1174,24 +1314,45 @@ func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
-	authMethod := credential.GetString(d.credSource.Config, "auth_method", "")
+	// One snapshot for everything this rotation derives from the current config, so
+	// the role it generates against and the accessor it retires describe the same
+	// generation.
+	config := d.sourceConfig()
+
+	authMethod := credential.GetString(config, "auth_method", "")
 	if authMethod != "approle" {
 		return nil, nil, 0, fmt.Errorf("rotation only supported for approle auth method, got: %s", authMethod)
 	}
 
-	approleMount := credential.GetString(d.credSource.Config, "approle_mount", "")
-	roleName := credential.GetString(d.credSource.Config, "role_name", "")
-	oldAccessor := credential.GetString(d.credSource.Config, "secret_id_accessor", "")
+	approleMount := credential.GetString(config, "approle_mount", "")
+	roleName := credential.GetString(config, "role_name", "")
+	oldAccessor := credential.GetString(config, "secret_id_accessor", "")
 
 	if roleName == "" {
 		return nil, nil, 0, fmt.Errorf("role_name is required for AppRole rotation")
 	}
 
-	// Generate new secret_id (old one still valid - no disruption)
-	generatePath := fmt.Sprintf("auth/%s/role/%s/secret-id", approleMount, roleName)
-	secret, err := d.vault.Logical().WriteWithContext(ctx, generatePath, nil)
+	// Generate new secret_id (old one still valid - no disruption). Sent once: the
+	// client retries a 5xx or a lost answer, either of which can follow a secret_id
+	// already generated, and a replay would leave a second one that nothing tracks.
+	// A clone, so the shared client keeps its retries for everything else.
+	once, err := d.vault.CloneWithHeaders()
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("failed to generate new secret_id: %w", err)
+		return nil, nil, 0, fmt.Errorf("failed to prepare the secret_id request: %w", err)
+	}
+	once.SetToken(d.vault.Token())
+	once.SetMaxRetries(0)
+	pinNoResponseWrapping(once)
+
+	generatePath := fmt.Sprintf("auth/%s/role/%s/secret-id", approleMount, roleName)
+	secret, err := once.Logical().WriteWithContext(ctx, generatePath, nil)
+	if err != nil {
+		var refused *api.ResponseError
+		if errors.As(err, &refused) && refused.StatusCode < 500 {
+			return nil, nil, 0, fmt.Errorf("failed to generate new secret_id: %w", err)
+		}
+		return nil, nil, 0, fmt.Errorf("failed to generate new secret_id; one may still have been generated on role %q, "+
+			"so list its secret_id accessors and destroy any not in use: %w", roleName, err)
 	}
 
 	if secret == nil || secret.Data == nil {
@@ -1208,9 +1369,10 @@ func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 		return nil, nil, 0, fmt.Errorf("secret_id_accessor not found in response")
 	}
 
-	// Build new config (both old and new are valid at this point)
-	newConfig := make(map[string]string)
-	for k, v := range d.credSource.Config {
+	// Build new config (both old and new are valid at this point), from the same
+	// snapshot the checks above used rather than re-reading the live field.
+	newConfig := make(map[string]string, config.Len())
+	for k, v := range config.All() {
 		newConfig[k] = v
 	}
 	newConfig["secret_id"] = newSecretID
@@ -1236,24 +1398,27 @@ func (d *VaultDriver) PrepareRotation(ctx context.Context) (map[string]string, m
 
 // CommitRotation activates the new credentials in driver state.
 //
-// Thread-safety: authMu protects credSource.Config writes and loginViaApprole reads.
-// The rotated fields (secret_id, secret_id_accessor) are ONLY read inside loginViaApprole
-// which always runs under authMu. Other config fields (vault_address, database_mount, etc.)
-// are never modified by rotation, so concurrent reads by MintCredential are safe.
+// Thread-safety: authMu serializes this against authentication, and configMu guards
+// the config field itself. Both are needed. The rotated fields (secret_id,
+// secret_id_accessor) are only read inside loginViaApprole, which runs under authMu,
+// and the other fields hold the same value before and after a rotation — but equal
+// values do not make an unsynchronized field write safe. Readers elsewhere take
+// configMu, so the swap must too.
 func (d *VaultDriver) CommitRotation(ctx context.Context, newConfig map[string]string) error {
 	d.authMu.Lock()
 	defer d.authMu.Unlock()
 
-	// Update internal state (safe: rotated fields only read under authMu)
-	d.credSource.Config = newConfig
+	d.configMu.Lock()
+	d.credSource.Config = credential.NewConfig(newConfig)
+	d.configMu.Unlock()
 
 	// Re-authenticate with new credentials
 	if err := d.loginViaApprole(ctx); err != nil {
 		return fmt.Errorf("failed to authenticate with new secret_id: %w", err)
 	}
 
-	roleName := credential.GetString(newConfig, "role_name", "")
-	newAccessor := credential.GetString(newConfig, "secret_id_accessor", "")
+	roleName := newConfig["role_name"]
+	newAccessor := newConfig["secret_id_accessor"]
 
 	if d.logger != nil {
 		d.logger.Debug("committed rotated AppRole secret_id",

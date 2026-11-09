@@ -4,6 +4,273 @@ All notable changes to Warden are documented in this file.
 
 ## [Unreleased]
 
+## [v0.22.0] — 2026-11-06
+
+### Breaking Changes
+
+- **Auth roles are removed; roles are granted per request by groups.** A role lives in the namespace at `sys/roles/<name>`, and a group at `sys/identity/group/<name>` grants it to the callers whose verified facts match its rules. A login admits a credential and takes no `role`. Every operation under `auth/<mount>/role/` answers `410 Gone`, and the CLI exits 11. An auth mount write carrying `default_role`, `groups_claim`, `group_policy_prefix`, `metadata_claims`, `metadata_mappings` or `token_type` is refused, and a stored one is ignored with a warning; the provider key `user_auth_role` is removed. A request that selects no role gets `400`, and one with no credential `401`. Export your auth roles before upgrading, and recreate each as a namespace role and a virtual group with one rule per mount it was bound to, naming the claims it matched as mount `facts`. (#795, #796, #797, #798, #799, #800, #801, #802, #803, #804, #805, #810)
+- **Agent jwt and spiffe mounts require `bound_audiences`, and `max_age` is a mount setting.** Credential age is bounded per mount on jwt, kubernetes and spiffe (JWT-SVIDs only), no longer per role. A spiffe mount without `bound_audiences` refuses every JWT-SVID while still admitting X.509-SVIDs, and any config write to an agent mount must set them. A human mount is refused on the agent leg. The user leg's audience is bound by the user mount's `bound_audiences`, else by the protected resource's identifier, else refused. Set `bound_audiences`, and `max_age` where a role carried one, on each mount. (#797, #800, #805)
+- **Token types are named by what they carry.** `identity_token` (IDs `wdi_`) replaces `jwt_role`, `cert_role`, `kubernetes_role`, `spiffe_role` and the `transparent` display name, and `service_token` (values `wds.`, IDs `wds_`) replaces `warden_token`, in audit and in CEL `agent.token_type`. A `cws.` token no auth mount issued, such as the root token, resolves until it expires or is revoked. Any token a v0.21.0 auth mount issued is refused, so agents log in again. The `api/auth/jwt` and `api/auth/cert` client packages are removed, and a login's audit result no longer carries `role_name` or `credential_spec`. Update audit queries and CEL conditions that name the old types. (#810)
+- **Reserved names.** `default` and every `default-*` name are reserved in both policy types, and role names starting `warden-`, in any case. A policy an earlier release stored under a reserved name can still be read and deleted, but is given to no request. Rename such policies, and give any auth role starting `warden-` another name when you convert it. (#818, #870)
+- **Discovery runs through the request path.** `/v1/sys/mcp` and `sys/introspect/roles` are authorized by the namespace's built-in policies and audited. Every `sys/mcp` call except the session lifecycle, `tools/list`, `resources/templates/list`, `logging/setLevel` and `subscriptions/listen` needs a credential: with none admitted the answer is HTTP `401`, or `503` when none was admitted and a mount could not decide, which replaces the `200` with warnings. A batch of more than 50 messages is refused, and discovery streams end after one minute. Present the agent's credential on every discovery call, and keep `default-cbp` and `default-mcp` granting the discovery paths if you edit them. (#810, #819, #820)
+- **The MCP `resources` family covers `skills/get` and `resources/directory/read`.** Both are gated by URI as `resources/read` is, and `skills/list` and directory listings are pruned to what the caller could fetch. A contract with `methods { allowed = ["*"] }` and no `resources` block now refuses them; add a `resources` grant such as `["skill://*"]`. An `Mcp-Name` header that disagrees with the body is a `header_mismatch` on every method that names something. (#774, #775)
+- **gcp and azure forward only to `allowed_host_suffixes`, and azure refuses Graph `$batch`.** A host outside the mount's list gets `403` before a token is attached; the defaults are `.googleapis.com` and the public Azure endpoints Warden fronts. A Graph `$batch` through the azure provider gets `400`. Add sovereign clouds, Azure Monitor, Azure DevOps or custom domains to `allowed_host_suffixes`, and send batched Graph calls one by one or move them to the msgraph provider. (#754, #761)
+- **Policy names and request paths have one spelling.** A policy name that is not canonical, such as `Admin`, gets `400` on the policy endpoints. A percent-encoded `.`, `..` or empty path segment gets `400`, and `X-Warden-Role` must be a valid role name. The upstream receives exactly the path the request was authorized on, so a double-encoded `%252F` no longer reaches it as `%2F`. Write policy names in lowercase and send paths unencoded. (#812, #813, #814)
+- **Credential sources are held to their own config.** An `hvault` source's client is built from its config alone: an edit must set `auth_method`, and an `http://` `vault_address` needs `tls_skip_verify`. A user principal beginning `wid:` is refused with `403`. Providers strip Kubernetes `Impersonate-*`, Elastic `es-security-runas-user` and Warden routing headers before forwarding. A spec or source edit reaches live sessions on their next request, and an edit that would break a `secret_spec` reference is refused, naming the consumer. Set `auth_method` on every `hvault` source before its next edit. (#777, #778, #779, #790, #791)
+- **Audit has a floor.** Request headers and bodies are no longer fields of an audit entry. An operator's `salt_fields` extends the default salting instead of replacing it, so a custom `omit_fields` can no longer expose headers or bodies, a device without an HMAC key omits its salt paths, and `response.upstream_url` query values read `[redacted]`. A salt or omit path that matches no field is refused at enable; a stored device loads without it, with a warning. Remove unknown paths from audit device configs. (#824)
+- **Nested namespaces written through an ancestor were misplaced.** Before this release, creating, updating or deleting `acme/dev` from root stored its record in root's view, and a reload could then fail or bring a deleted namespace back. No repair ships: recreate the namespaces created, updated or deleted that way. A namespace path with an empty, `.` or `..` segment gets `400`, and one whose parent does not exist `400` instead of `500`. (#864)
+- **Mixed-version clusters and cache capacity.** A v0.21.0 node cannot decode a `PS256` signing capability a v0.22.0 node minted, and knows nothing of namespace roles, groups or entities, so finish upgrading every node before writing them. At the default 100 MiB the token cache holds about 113,000 service tokens, against about 409,000 at the old flat cost that undercounted them; raise `token_cache_megabytes` on busy nodes. (#766, #851, #853)
+
+### Security
+
+- **Policy names and request paths are canonical**, which closes two inherited upstream policy advisories: a policy is stored, cached and attached under one spelling, and a gateway forwards exactly the path it authorized. (#812, #813, #814)
+- **The SigV4 gateways keep the upstream on an AWS host**, whatever region, service or access-point ARN the client signs. (#753)
+- **gcp and azure carry a token only to allowed hosts.** (#754)
+- **Graph `$batch` is refused** on the azure and msgraph providers, since path policy never sees the requests inside it. (#760, #761)
+- **Every stored secret is masked** on a spec or source read, list and keyless plan, including an inline AWS secret key. (#755)
+- **An `hvault` source never inherits the server process's environment**, so no source can send the server's own token or TLS settings to an address its writer chose. (#778)
+- **`sys/step-down` requires root or sudo**, is audited, and is refused in namespaces. It was served to any caller. (#816)
+- **No credential reaches an audit entry or log in clear.** Headers and bodies are out of audit entries, issued credentials are always salted, and a failed token generation no longer logs the login credential. (#780, #824)
+- **The `wid:` subject prefix is reserved for agents.** (#777)
+- **Kubernetes impersonation, Elastic run-as and Warden routing headers are stripped** before an upstream sees them. (#779)
+- **Discovery is authorized and audited**, and a test fails the build if a `/v1/` route bypasses the request path. (#819, #820, #821)
+- **Skills on MCP gateways are gated by URI.** (#774, #775)
+
+### New Features
+
+**Agent identity and governance**
+
+- **Native identities.** Every admission carries the native identity its mount verified — a JWT `sub`, a certificate name, a service account, a SPIFFE ID — chosen per mount with `alias_name_source`. Audit records it with the admitting mount (`mount_accessor`, `alias_name`, `entity_kind`). (#829)
+- **Entities in the identity store.** An entity claims an agent's native identities across mounts, and carries a description, a profile and a state (`active`, `suspended`, `retired`). `warden identity entity` and `warden identity alias` manage them, `entity lookup` finds the entity behind a native identity, and `entity list -ungoverned` shows the agents nobody answers for. Entities are optional. (#830, #831, #832, #833)
+- **Sponsors.** An entity's sponsor is a virtual group of humans who accepted it, and an entity with an accepted sponsor and a description is governed. Sponsor members read, suspend and hand over their agents with `warden identity sponsor`, holding no Warden role, through the built-in `default-sponsor` policy; audit records `sponsored_by`. (#855, #856, #857)
+- **Observe, then deny.** `sys/identity/config` sets `unknown_aliases`. Under the default, `observe`, every agent request records in `auth.identity_status` why `deny` would refuse it. `deny` refuses unclaimed and ungoverned agents, except on `exempt_mounts`. A suspended or retired entity is refused in every mode. A write that would lock its writer out needs `force`. CEL reads `agent.entity.*` and `agent.alias`, and audit records `entity_id`, `entity_name` and `governed_by`. (#859)
+- **Static groups.** A static group lists entities, each with an optional `until`. Once an entity claims a native identity, that caller holds only the roles its entity's static groups grant, and only while the entity is governed and active. (#860)
+- **`governed_only` roles** are granted only through a static group listing a governed, active entity, never by a virtual group. (#861, #862)
+
+**Roles granted per request**
+
+- **Namespace roles and virtual groups.** `warden role create|read|update|delete|list` manage roles at `sys/roles/<name>`. `warden identity group` manages virtual groups, whose rules match a mount's verified facts with `*` and `**` globs and an optional `valid_until`, and `warden identity usage` shows the caps. A role or group edit applies to the next request. (#801, #802, #803, #804, #805)
+- **Mounts name the facts they verify.** jwt, kubernetes, cert and spiffe mounts take `entity_kind` and `facts`, a claim or JSON pointer mapped to a fact name. (#795, #796, #797, #798, #799, #800)
+- **Group writes name their type**, `virtual` or `static`, so one condition on `request.data.type` separates who manages each. (#827, #828)
+- **Audit records the grant** (`role_granted_by`, `role_group_type`, `role_denied_reason`, `groups`), and CEL reads `agent.groups`. (#803, #860)
+
+**Human operators**
+
+- **The `oidc` auth method** signs people in with the authorization code flow and PKCE, authenticating to the IdP with a client secret, none, or `private_key_jwt`. Sessions last `session_ttl`, 1 hour by default and 8 at most. (#842)
+- **Ticket tokens** (`wdt.`) carry the verified identity and its facts, sealed and never stored, with no role: the role is chosen per request and granted by groups over the IdP's claims. A ticket cannot be revoked before it expires; disabling its mount ends it. People are not entities. (#840, #841)
+- **`warden login`, `warden role use`, `warden logout` and `warden print token`.** The CLI keeps one session per address and namespace, and a child namespace falls back to its parent's. (#843, #844)
+
+**Built-in operator roles**
+
+- **`warden-admin`, `warden-provider-admin`, `warden-security-admin` and `warden-viewer`**, defined in code and granted by groups. Each is compiled in the token's namespace, so it reaches that namespace and those below it, and none ever reaches a data plane. Role reads, `warden role list -all` and discovery show them. (#865, #868, #870, #871, #872)
+- **`enable_builtin_roles`.** Root always has the built-in roles; any other namespace has them when its parent turns them on. Turning them off is refused while a group grants one. (#869)
+- **`request.data_plane`** in CEL tells a provider's gateway and access paths from its control paths. (#866)
+
+**Discovery under policy**
+
+- **Built-in `default-cbp` and `default-mcp` policies** in every namespace grant the discovery paths. They can be edited, never deleted; emptying one withdraws its grants. (#818)
+- **Identity paths** authorize on the credential the caller presents, before any role. `/v1/<namespace>/sys/mcp` works by path, and audit records `auth.discovery`. (#819, #820, #821)
+- **A role write warns when agents cannot find the role**: its `provider_path` leads to no auth mount through an `auto_auth_path`, and the namespace sets none. The role still works, and a person's ticket still lists it. (#874)
+- **Policy compilation is about 2.7 times cheaper**, and a CEL condition converts request strings and strips its source once. (#822, #867)
+
+**Microsoft 365 and Entra**
+
+- **The `msgraph` provider** covers every Graph workload, acts as the user or the app, rewrites paging links back to the gateway (`rewrite_links`), and answers in Graph's error shape. (#760, #762, #763)
+- **Entra on-behalf-of.** `mint_method=on_behalf_of` on `azure_bearer_token` exchanges the user's Entra token for a delegated token, keyless over a federated credential or with the source's secret. Entra's refusals the user can fix answer `401` with the challenge MSAL expects, and Entra's refresh token is discarded. (#757, #758, #759)
+- **Azure certificate authentication.** `auth_method=certificate` proves the app with a PS256 assertion naming the certificate by `x5t#S256`; the key is local or held in a KMS through a `transit_signer` spec with `signing_alg=PS256`. Source reads show `certificate_info`. (#766, #767, #768, #769)
+
+**Credentials and providers**
+
+- **oauth2 client authentication**: `client_secret_basic`, `private_key_jwt` and `kms_private_key_jwt` beside `client_secret_post`, and `client_assertion_aud=issuer` on oauth2 and token_exchange, over one shared signing and client-authentication path. (#743, #745, #747, #748, #749)
+- **Bedrock Runtime calls go through the aws gateway**, and a provider's mount `timeout`, no longer a fixed 20 or 120 seconds, bounds the wait for response headers. (#751, #752)
+
+**Performance and sizing**
+
+- **One pool of copy buffers** for every proxied response. (#825)
+- **Caches sized by what they hold**, with `token_cache_megabytes` (default 100) and `credential_cache_megabytes` (default 64). (#850, #851, #852, #853)
+
+### Fixed
+
+- **The chained-secret cache holds the 10,000 secrets it documents**; it held 175. (#850)
+- **An `rds_iam_token` spec refuses `role_arn`.** The mint signs with the source's own credentials and never assumed the role, though the field was described as cross-account access. A spec write naming it is refused; a stored spec mints as before, and an edit clears it with `role_arn=""`.
+- **An audit entry's `error` reads as the failure's message.** A refused request recorded the text of the list it was gathered in (`1 error occurred:\n\t* permission denied\n\n`); it now records `permission denied`, several messages joined with `; `, as the HTTP response already did. Update log queries that matched the old text.
+- **A transit seal configured in HCL works.** In every release up to v0.21.0 its `key_name` reached the seal under the wrong name, so it failed unless set through the environment. The same bug lost `region` (awskms, gcpckms, alicloudkms), `endpoint` (awskms, kmip), azurekeyvault's `key_name` and ocikms's `key_id`, and Azure's `resource` is now a string. (#772)
+- **The `pkcs11` seal, which no release supported, is removed.** A `seal "pkcs11"` stanza fails with an error pointing to the transit seal over an HSM-backed key. (#771)
+- **The root token is recognised after a restart**, so revoking or replacing it takes effect. (#794)
+- **Access backends authenticate agents implicitly**, and concurrent first calls for different grants no longer mint each other's credential. (#793)
+- **Credential lifetimes are bounded in one place.** `max_ttl` caps every credential, oauth2 and token_exchange take `default_token_ttl` when a response has no `expires_in`, and every lease is registered for the span it is served and revoked once. (#788, #789)
+- **A create is never replayed** after an ambiguous failure, one slow upstream no longer stalls every source's mints while its driver is built, and one caller's cancellation or a driver's panic no longer fails every caller waiting on the same mint. (#782, #783, #784, #785, #848)
+- **A bearer minted with a signing capability lives by its own `expires_in`**, not the capability's, and every retry signs a fresh client assertion. (#744, #746)
+- **The playground tour pastes whole** and starts the agent from the playground directory. (#741, #742)
+- **Docs and test tooling:** the v0.21.0 site, the httpproxy provider README, `get_leader.sh`, and core tests that release their caches. (#739, #765, #817, #846)
+
+### Dependencies
+
+- **go-jose** 4.1.4 → 4.1.6 (#836), **grpc** 1.83.1 → 1.83.2 (#837), **chi** 5.3.2 → 5.4.0 (#835).
+
+### Upgrade notes
+
+- **Export your auth roles before upgrading**, with `warden list auth/<mount>/role` and `warden read auth/<mount>/role/<name>`: after the upgrade those paths answer `410`. Each becomes a `warden role create` with its policies and credential spec, and a `warden identity group create` with one rule per mount, with the claims it matched named as that mount's `facts`. (#805, #810)
+- **Agents holding v0.21.0 login tokens log in again.** (#810)
+- **The seeded `troubleshooting` skill is not refreshed on existing clusters.** Foundation skills are seeded once, and deleting one does not seed it again. Update it from the shipped text with `warden skill update troubleshooting -body-file <file>`, the file holding the skill's body without its frontmatter; the same holds for provider skills seeded before the upgrade, such as `aws`. (#752)
+- **Recreate nested namespaces** created, updated or deleted through an ancestor. (#864)
+- **Rotate `cws.` service tokens.** They resolve until they expire or are revoked, and every new token is `wds.`. (#810)
+- **On an access path whose provider has `auto_auth_path`, operators send `X-Warden-Token`**, not `Authorization: Bearer`. (#793)
+- **A mount `timeout` of zero is refused on write**; a stored one keeps the default, with a warning. (#751)
+- Work through [Upgrading from v0.21.0](https://wardengateway.com/upgrade/from-v0-21/) before rolling out the binary.
+
+## [v0.21.0] — 2026-10-05
+
+### Breaking Changes
+
+- **The `default` assertion profile is now an RFC 8693 delegation token.** With no user disclosed, the top level is the agent: the composite `sub` is byte-identical to before, so agent trusts keep matching, alongside `warden_role` and opt-in `warden_metadata`. When a spec discloses a user, the top level becomes the **user** — the IdP's raw `sub`, `warden_namespace`, `warden_role`, `warden_metadata` — and the agent moves into `act`. `warden_sub`, `warden_auth_mount`, `warden_user` and the agent-level `warden_namespace` are gone. Rewrite any verifier that reads them (a Vault JWT role's `claim_mappings`, a GCP attribute condition, a CEL rule) and bind `warden_namespace` beside the user `sub` on delegation specs. (#693)
+- **`get_skill` is removed; agents read skills with `read_skill(uri)`.** Roles on the jwt, cert, kubernetes and spiffe auth methods carry structured `skill` and `provider_path` fields, and `list_roles` returns each role's `provider`, a `skill://<name>/SKILL.md` URI and the `url` to call. The convention of writing `(skill: …, url: …)` into a role's description is retired: **backfill `provider_path` on existing roles**, or they are listed with no `url` and no `skill`. (#709)
+- **Skill reads on the discovery server are identity-bound.** An agent sees only the skills reachable from the roles it can assume. The `sys/skills` API and `warden skill` are unchanged. (#710)
+- **Skill names follow the Agent Skills rule** — lowercase letters, digits and single hyphens. Every stored skill whose name carries an underscore is renamed once at unseal, hyphens for underscores — the built-in `mcp_aws` and `ansible_tower` become `mcp-aws` and `ansible-tower` — and `requires` entries follow. A rename that would collide or still be invalid is left in place and logged. Provider type names are unchanged. Update anything that names a skill with `_`. (#708)
+- **MCP refusals are JSON-RPC errors.** Warden answers a refused MCP call with code `-32090`, echoing the call's id, so the client's session survives it. The former top-level `error` / `error_description` move under `error.data`; the `403` and the `WWW-Authenticate` challenge are unchanged. (#722)
+- **Azure `key_vault_secret` specs fail every mint.** Move them to `mint_method=secret_read`. `azure_db_iam_token`, `scopes` and non-UUID `client_id` / `tenant_id` are refused at write. (#675, #677)
+- **GitHub's singular `repository` key is refused**, on write and at mint; use `repositories`. A stored `permissions` value, which was silently ignored, is now enforced. (#735)
+- **New AWS federated specs default to `assertion_profile=aws`**, which carries the role and metadata as session tags and needs `sts:TagSession` in the role's trust policy; **new Azure federated specs default to `minimal`**. Existing specs keep `default`. Opt out with `assertion_profile=default`. (#657, #676)
+- **AWS and Alibaba Cloud config writes merge.** A key left out of a write keeps its value; to reset one, name it. (#674)
+
+### Security
+
+- **Azure Key Vault URL injection closed**, and rotation no longer deletes live secrets. (#675)
+- **MCP policy is enforced on every POST** to an MCP mount, whatever its `Content-Type`. A POST body that is not JSON-RPC is refused. (#721)
+
+### New Features
+
+**A playground to try Warden in minutes**
+
+- **`warden server -dev-playground`** starts a dev server with its own identity provider, a protected bank with MCP and REST faces, and GitHub's MCP server waiting for a PAT — no IdP to stand up and no upstream keys to hold. (#717, #718)
+- **`warden dev jwt`, `warden dev scenarios` and `warden dev audit`** mint identities, print the nine-scenario tour, and read the audit log. (#719, #725, #726, #727)
+- **The tour is written out for Claude Code, Codex, Cursor, Gemini CLI, opencode, VS Code** or any MCP client, with `warden dev scenarios -client` or `WARDEN_DEV_CLIENT`, and on the new Getting started page. The agent runs in a terminal tab of its own, away from the root token. (#733)
+
+**Discovery and skills**
+
+- **Structured role fields** `skill` and `provider_path`, and `list_roles` with a resolved `provider`, `skill` URI and `url`. (#709)
+- **The MCP Skills extension** on the discovery server: `skills/list`, `skills/get`, and `skill://` resources. (#710)
+- **`read_skill` carries the SKILL.md as `markdown`** in its structured output, for clients that read only structured results. (#723)
+
+**Keyless credentials**
+
+- **Anthropic and OpenAI federate.** Keyless `anthropic` and `openai` sources exchange a Warden assertion for a short-lived token through workload identity federation; the providers accept the bearer. (#652, #695, #696)
+- **A keyless `cloudflare` source** for `cloudflare_keys`, chained from your secret store through `secret_spec`. (#691)
+- **Azure Key Vault is a chaining producer** (`mint_method=secret_read`). A chained consumer now expires with the secret it was minted from. (#677)
+- **`assertion_profile`** selects the claim shape of the minted assertion per spec — `default`, `minimal` or `aws` — and **`assertion_ttl`** requests a shorter lifetime, capped by the issuer. (#656, #657, #676)
+- **`keyless_enforcement_level`** (`off`, `warn`, `enforce`; default `warn`) gates writes that would leave a secret stored in Warden. Sources and specs report what they store as `stored_secrets`, and **`warden cred source|spec keyless-plan`** describes the keyless replacement for one. (#686, #687, #690)
+- **`token_exchange` sources can be public clients** (`client_auth=none`). (#714)
+- **GitHub App tokens can be scoped** with `repositories` and `permissions`. (#735)
+
+**The gateway answers in the upstream's own shape**
+
+- **Warden's own failures are rendered as the upstream would render them**: each AWS service's protocol, and OpenAI's and Anthropic's error bodies, with a `Warden:` message prefix — and, on OpenAI, `warden_`-prefixed codes. (#659, #660, #661, #699, #706, #707)
+- **A mount timeout answers `504`**, not an empty `200`. (#662)
+
+**Providers and policy**
+
+- **Anthropic**: the workspace a credential acts in, `anthropic-version` and `anthropic-beta` governed from mount config, and attribution to the user's upstream profile. (#648, #649, #650)
+- **Policy can read request bodies on `rest` mounts** (`parse_request_body`), and body parsing follows the mount's `max_body_size` and recognises every JSON media type. (#715, #716)
+- **The audit log records the user's namespace, role and act chain**, and every actor's issuer. (#694)
+
+**Docker**
+
+- **`-dev-listen-address`, `-dev-tls-cert-dir` and `-dev-tls-san`**, and an image whose volumes need no `chown`. Dev mode in the image listens on every container interface. (#705)
+
+### Fixed
+
+- **A credential mint the upstream refuses answers `403`**, not `500`; an unreachable upstream answers `503`. (#667)
+- **A config write takes effect only once it is saved**, across providers and auth methods; a refused write changes nothing. Vault, Azure and GCP config must carry `auto_auth_path` in the same write. (#668, #669, #670, #671)
+- **Forwarding headers are trusted only from `trusted_proxies`** — `X-Forwarded-For`, `X-Real-IP` and `X-Request-Id`, not only the forwarded client certificate. (#666)
+- **Rotation activations no longer revert operator edits or orphan keys**; a concurrent update answers `409`. (#688)
+- **Source drivers are rebuilt after a node steps down.** (#689)
+- **A forwarded request keeps its request id** on the active node. (#665)
+- **Federated Anthropic and GCP tokens record who they were minted for.** (#698)
+- **Each credential client gets its own pooled transport.** Deleting one source no longer drops another's connections. (#684)
+- **`mcp_aws` closes the idle connections of a replaced transport**, and a SPIFFE login is judged against one snapshot of the config. (#672, #673)
+- **App installation-token mints no longer wait on one another.** (#735)
+
+### Upgrade notes
+
+- **Behind a load balancer, list it in `trusted_proxies`**, or client IPs resolve to the balancer — which IP-bound tokens and `request.client_ip` conditions see. (#666)
+- **Sources with `ca_data` or `tls_skip_verify`, and Kubernetes auth with a CA certificate, now honour `HTTPS_PROXY` / `NO_PROXY`** and may negotiate HTTP/2. Add internal hosts to `NO_PROXY`. (#684)
+- **Every write that leaves a secret stored in Warden now warns**, since `keyless_enforcement_level` defaults to `warn`. (#687)
+- **Dev mode in the Docker image listens on `0.0.0.0:8400`**, so other containers on its network can reach it. Publish it as `-p 127.0.0.1:8400:8400`, or opt out with `-dev-listen-address=127.0.0.1:8400`. (#705)
+- **`application/jsonl` bodies are no longer parsed** for policy. (#716)
+
+## [v0.20.0] — 2026-09-13
+
+### Breaking Changes
+
+- **The CEL `token` namespace is renamed to `agent`.** Policy conditions now describe two principals — `agent` (the workload) and `user` (the person it acts for) — so the namespace is named for the one it means. Six fields carry over unchanged; three take a `token_` prefix because they describe the credential rather than the principal: `token.type` → `agent.token_type`, `token.ttl_seconds` → `agent.token_ttl_seconds`, `token.expires_at` → `agent.token_expires_at`. **There is no alias.** A condition referencing `token` fails to compile with a directed error naming the replacement, both at write and at load — and because a stored policy is re-parsed on every read, a policy carrying `token.*` **cannot be read back after the upgrade**. Export your policy texts first (`warden policy list -o text`, `warden policy read -o table`). Audit `salt_fields` selectors move too, and this one is quiet: a stale selector does not error, it simply stops matching, and the value it was protecting **begins logging in clear**. (#624)
+
+- **Dual-token extraction; `user_token_header` retired.** `Backend.ExtractToken` becomes `ExtractTokens(r, userLeg)`, and a mount with `user_auth_path` now carries two credentials. The legs are the other way round from before: `Authorization` carries the **user**, and the agent presents a client certificate or the new **`X-Warden-Agent-Token`** header. Consequences to check on upgrade: an agent that sent its own token in `Authorization` under an ambient client certificate on such a mount now resolves to the **certificate** identity; `X-Warden-Token` and `Authorization` together on a protected-resource mount is a `400`; and `user_auth_path` is read from the **mount only**, no longer from namespace metadata, so a deployment that set it at namespace level must re-set it per mount. A persisted `user_token_header` loads with a warning and is ignored. (#487)
+
+- **MCP rules move out of capability policies into a first-class policy type.** MCP authorization lives at `sys/policies/mcp/<name>`, written with `warden policy write -type mcp`. An `mcp { }` block nested inside a capability policy's `path` stanza is **rejected at parse**, with an error naming the new location. The grammar moved from `allowed_*` / `denied_*` keys to family blocks (`methods`, `tools`, `resources`, `prompts`), each taking `allowed` / `denied`, and `allowed_params` / `denied_params` are removed — express argument constraints as a CEL `condition` over `call.args`. Effective access is the **intersection**: a request must be granted by a capability policy and permitted by every MCP policy in scope, which an MCP policy can only narrow. Policy names are unique across both types, and an MCP policy comes into scope the same way as any other — by being named in the role's `token_policies`. (#584, #585, #586)
+
+- **MCP traffic with no MCP policy in scope is denied.** Previously it passed unrestricted; it now fails closed with `no_mcp_policy`. Any mount meant to stay open needs an explicit wildcard MCP policy. The session-lifecycle methods `initialize`, `ping`, `notifications/*` and `server/discover` stay exempt so the handshake and the 2026-07-28 revision's discovery RPC work without one. (#587, #590)
+
+- **The `mcp` and `mcp_aws` mount `timeout` default drops from 10 minutes to 60 seconds**, and its meaning tightens: it now caps a **single call** rather than a session. Applies to newly created mounts; existing mounts keep their stored value. Long-lived streams — `subscriptions/listen` and the legacy SSE GET — answer to the new **`listen_timeout`**, which defaults to the previous 10 minutes. Set `timeout` explicitly on any mount whose individual tool calls run long. (#589)
+
+- **IBM `iam_with_cos` is removed.** It bundled two unrelated credentials into one spec. Split it into an `iam_token` spec and an `access_keys` spec that sources the COS HMAC pair through `secret_spec` — `access_keys` **requires** the reference; there is no inline form. (#556)
+
+- **OVH `dynamic_s3` and `oauth2_token_and_s3` are removed**, along with the source's `api_url`, `project_id` and `user_id` keys. Replace them with `access_keys`, which serves a pair held elsewhere rather than minting one, so revocation is a no-op and no leases are issued. **Drain any credentials minted by the removed methods before upgrading** — they keep their lease ids and are not cleaned up afterwards. (#549)
+
+- **The `apikey` source key `optional_metadata` is renamed to `credential_fields`.** The old name is rejected on write with an error naming the new one; there is no alias. The mechanism also **works** now: the declared fields were discarded before reaching the provider, so a source that looked correct silently carried nothing. That is what makes Datadog's `application_key` and Atlassian's `email` reachable, and it means a spec written against the old behaviour may start behaving differently — correctly — once renamed. (#505)
+
+### New Features
+
+**Agent and user in the policy layer**
+
+- **The verified user principal is visible to CEL conditions.** A `user` namespace sits beside `agent`, carrying the same fields minus `policies` — the user never authorizes, so exposing it would read like an authorization check that it is not. The user cannot widen what an agent may do, but it can be made **required**, which is what enables a binding rule: it is not enough that a user and an agent are both present, the user must be paired with *this* agent. The pairing is attested on the user's token by an RFC 8693 claim — `may_act` (§4.4) where the IdP pre-authorizes an agent, `act` (§4.1) where the credential is itself a post-exchange delegation token — and projected into metadata with an RFC 6901 pointer, so either maps the same way. (#625, #626)
+
+- **A policy denial that a user could remedy answers `401`, not `403`.** When a condition references `user.*` and denies because no user was presented, Warden returns `401` with a `WWW-Authenticate: Bearer` challenge carrying a `resource_metadata` parameter, so the client knows to authenticate a user and retry. A retry that presents a user and still fails gets a terminal `403` — the exchange cannot loop. (#627)
+
+- **RFC 9728 protected resource metadata.** Warden publishes a discovery document per user-auth mount at `/.well-known/oauth-protected-resource/v1/<namespace>/<mount>`, so the client receiving that challenge can find the authorization server without out-of-band configuration. Configured deployment-wide with `warden protected-resource configure`. (#488)
+
+**MCP policies and protocol hardening**
+
+- **Per-URI gating for `subscriptions/listen`.** Each URI a caller subscribes to is checked against the `resources` family, so a caller denied `resources/read` on a URI cannot reach the same data through update-timing signals instead. (#591)
+- **MCP transport headers are validated against the body** they describe; a contradiction is denied structurally (`header_mismatch`), since no contract was consulted to reach it and none can permit it. (#592)
+- **Modern-era batches are refused** (`batch_unsupported`) — batching left the MCP spec in 2025-06-18. Legacy-era batches still work, and the client's self-description is recorded. (#594)
+- **Per-principal MCP responses are marked uncacheable** by shared caches. (#593)
+
+**Credentials**
+
+- **AWS Secrets Manager and GCP Secret Manager can produce chained secrets** via `mint_method=secret_read`, joining OpenBao/Vault's `kv2_read`. Both can be federated, which is what makes a chain keyless end to end. A keyless AWS `secret_read` assumes `role_arn` first and reads the secret as that role. (#607, #621)
+- **Keyless federation for Alibaba Cloud and Kubernetes.** Alibaba Cloud exchanges an assertion via STS `AssumeRoleWithOIDC` (`oidc_provider_arn` on the source, `assume_role` only); Kubernetes presents the assertion **directly as the bearer token** to the API server with no exchange hop, so its audience must match one the cluster authenticator accepts. (#538, #530)
+- **Sign a client assertion without holding the key — `client_auth=kms_private_key_jwt`.** The same RFC 7523 assertion goes on the wire as `private_key_jwt`, but the key lives in a KMS and Warden never sees it. The capability arrives by chaining and has no inline form. (#566)
+- **`transit_signer` mints a scoped signing capability** rather than key material: a short-lived token that may do nothing but sign with one named transit key. Its `transit_key` accepts claim templating, so one spec can select a signing key per caller. Exchange-path-only; requires a spec-level `jwt_role`. (#565)
+- **Claim templating reaches more locators.** `{{agent.<claim>}}` joins `{{user.<claim>}}`, and an AWS `secret_id` templates alongside Vault's `secret_path` and GCP's `secret_name`. Values are allow-listed, cannot span a path segment, and a `.`/`..` segment composed after substitution is rejected. (#522, #606)
+- **Endpoint overrides**: AWS `sts_endpoint` / `secretsmanager_endpoint` (mutually exclusive with `rotation_period`, which manages keys those overrides do not redirect) and GCP `sts_endpoint` (keyless only — a static source exchanges the service-account key's own `token_uri` and never calls STS). (#600, #620)
+- **`json_key_map` field selection and a `secret_version` pin** generalized across `static_aws`, `static_apikey` and `kv2_read`; both refused where inert. (#554)
+- **The OAuth2 connect callback validates the RFC 9207 `iss` parameter** byte-exactly. (#595)
+- **Nine more drivers can chain their standing secret** — elastic, gitlab, grafana, ibm, oauth2, ovh, scaleway and apikey join github, with token_exchange chaining its client credential. The `oauth2` driver chains the **whole** client credential on the source (`client_credentials` grant only); chaining a refresh token is no longer supported.
+- **The `honeycomb` credential driver is removed.** The keys it minted were wrong on the wire and Honeycomb offers no way to revoke or expire them, so a leaked key stayed valid indefinitely. Hold the key in a vault and chain it through the `apikey` driver. The honeycomb **provider** is unaffected. (#581)
+
+**Providers**
+
+- **Prometheus `auth_type` moved to mount config**, which is what made Basic auth reachable at all — the per-spec field never reached the provider. (#504)
+- **Datadog carries `DD-APPLICATION-KEY`** and **Atlassian's Basic-auth branch is reachable**, both consequences of adjunct fields now surviving the mint. (#505)
+
+### Fixed
+
+- **`cas_required` is enforced.** The policy write path never applied it, so a policy that set it was unguarded. A check-and-set refusal now answers `4xx` rather than `500` — a failed check-and-set is the caller's race to lose, not a server fault. (#513)
+- **Denied requests are audited once**, not twice. (#627)
+- **Responses longer than 10 seconds survive.** A hardcoded listener write timeout severed every response over ~10s, so no LLM provider mount could reach its 120-second budget and raising the mount `timeout` did nothing. The listener now exposes `http_read_timeout` (5s), `http_write_timeout` (10s) and `http_idle_timeout` (1m), and streaming and gateway traffic sheds them. (#589)
+- **`rotation_period` is rejected wherever the credential holds no secret to rotate.** (#531)
+- **A stale compiled-policy cache entry could outlive its policy.** (#491)
+- **Sealed OAuth spec-config keys are enforced**, and a masked-config resend no longer clobbers the stored secret. (#512, #502)
+- **Non-revocable credentials no longer take lease handles** they cannot honour. (#534)
+- **Git smart-HTTP probe passthrough is restored for certificate agents**, and the AWS provider strips `X-Warden-*` headers upstream. (#490)
+- **Non-object JSON request bodies are carried**, and a refusal answers `4xx` rather than `500`. (#507)
+- Internal login is kept off the caller's body and query. (#506)
+
+### Dependencies
+
+- Go 1.26.0 → 1.26.7, plus grpc and grouped minor/patch bumps.
+
+
 ## [v0.19.0] — 2026-08-15
 
 ### Breaking Changes

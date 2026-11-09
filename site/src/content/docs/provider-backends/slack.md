@@ -4,6 +4,54 @@ title: "Slack"
 
 The Slack provider enables proxied access to the Slack Web API through Warden. It streams requests to Slack API methods (chat.postMessage, conversations.list, etc.) with automatic bot token injection and policy evaluation on request fields like channel, text, and user.
 
+## How a request flows
+
+This mount injects `Authorization: Bearer <token>` from an **`api_key`** credential. The question is where that
+bot token (`xoxb-…`) lives.
+
+The recommended setup keeps it in the vault that manages it, read per request.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the Slack bot token (`xoxb-…`) from an external vault at a path templated by the agent's team and environment, and injects it to the Slack API" src="/images/warden-prov-slack-vault-apikey.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to a KMS-backed
+   issuer unsigned, where one is configured.
+4. The issuer returns it signed.
+5. Warden authenticates to the **external vault** and reads
+   `secret/slack/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the bot token (`xoxb-…`) for that team and environment.
+7. Warden injects it and forwards.
+
+The credential is served **verbatim** — nothing is minted. What chaining buys is custody:
+it stays in the store that manages it, and the read path decides who reaches which one.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the credential, so most requests skip from step 2 to step 7. The entry is
+keyed by namespace, the agent's token id and the spec name — plus the user's token id when
+the mount carries a user.
+:::
+
+### The simpler variant
+
+<p align="center"><img alt="Warden reads a static Slack bot token (`xoxb-…`) from its encrypted storage and injects it to the Slack API for every caller" src="/images/warden-prov-slack-inline-apikey.png" width="860"></p>
+
+**Inline.** The credential sits in Warden's storage. Shortest to set up, weakest custody:
+one long-lived credential for every caller.
+
+## Credential modes
+
+| Mode | What Slack sees | Where the credential lives |
+|---|---|---|
+| **Chained** ✅ *recommended* | One long-lived credential, scoped by path | The vault; nothing in Warden |
+| **Inline** ⚠️ | One long-lived credential, shared | Warden's storage |
+
+Slack exposes no workload-identity federation and mints nothing per request, so the
+credential is long-lived in both rows; what changes is whether Warden holds it.
+
+See the [apikey credential driver](/credential-drivers/apikey/) for every source and spec
+key.
+
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
@@ -13,21 +61,23 @@ The Slack provider enables proxied access to the Slack Web API through Warden. I
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup:
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/slack-user \
-    token_policies="slack-access" \
-    user_claim=sub \
-    cred_spec_name=slack-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -71,73 +121,100 @@ Verify the configuration:
 warden read slack/config
 ```
 
-## Step 3: Create a Credential Source and Spec
+## Step 3: Create a Role and Grant It
 
-The credential source holds only connection info (`api_url`). The bot token is stored on the credential spec below, allowing multiple specs with different tokens to share one source.
-
-```bash
-warden cred source create slack-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://slack.com/api \
-  -config=verify_endpoint=/auth.test \
-  -config=verify_method=POST \
-  -config=display_name=Slack
-```
-
-Verify the source was created:
+A [role](/identity/roles/) binds the credential spec and policy, and `provider_path` names the provider mount it is used with. Create it after the provider has its `auto_auth_path`; until then, agents cannot find the role through discovery. The spec and policy come in the next steps, so the write warns that they do not exist yet:
 
 ```bash
-warden cred source read slack-src
+warden role create slack-user -json '{
+  "policies": ["slack-access"],
+  "cred_spec_name": "slack-ops",
+  "provider_path": "slack/"
+}'
 ```
 
-Create a credential spec that references the credential source. The spec carries the bot token and gets associated with tokens at login time.
+Nobody holds the role yet. A virtual [group](/identity/groups/) grants it to the callers the JWT mount admits:
 
 ```bash
-warden cred spec create slack-ops \
-  -source slack-src \
-  -config api_key=xoxb-your-bot-token
+warden identity group create slack-user-agents -json '{
+  "type": "virtual",
+  "roles": ["slack-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
 ```
 
-The bot token is validated at creation time via a `POST /auth.test` call to the Slack API (SpecVerifier). If the token is invalid, spec creation will fail.
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
 
-Verify:
+This rule matches every token the mount accepts. Add selectors on the token's facts, such as `sub`, to grant the role to fewer callers.
+
+## Step 4: Create a Credential Source and Spec
+
+### Option A: Chained (recommended)
+
+The flow in the first diagram. The vault holds the credential; Warden reads it per request
+and injects it.
 
 ```bash
-warden cred spec read slack-ops
+# The store Warden reads from, reached keylessly — no vault token in Warden
+warden cred source create vault-keyless -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-agents",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+
+warden cred spec create slack-ops -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "static_apikey",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "slack/{{agent.team}}/{{agent.env}}"
+  }
+}'
 ```
 
-### Alternative: Vault/OpenBao as Credential Source
+The KV secret must carry the credential under **`api_key`**.
 
-Instead of storing the bot token directly in Warden, you can store it in a Vault/OpenBao KV v2 secret engine and have Warden fetch it at runtime. This centralizes secret management in Vault.
+Both principals are available to the path template: `{{agent.sub}}` is free,
+`{{agent.<claim>}}` needs `assertion_metadata_claims`, and `{{user.<claim>}}` needs
+`assertion_user_claims` plus a user on the request. Swap `{{agent.team}}` for
+`{{user.sub}}` to give each person their own credential. Templates resolve at **mint,
+not at write**, so a path naming an unprojected claim is accepted by `spec create` and
+fails on the first request.
 
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your Slack bot token (e.g., at `secret/slack/ops` with an `api_key` field)
-- An AppRole configured for Warden access
+### Option B: Inline
 
+⚠️ 
 ```bash
-# Create a Vault credential source
-warden cred source create slack-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
+warden cred source create slack-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://slack.com/api",
+    "verify_endpoint": "/auth.test",
+    "verify_method": "POST",
+    "display_name": "Slack"
+  }
+}'
 
-# Create a credential spec using the static_apikey mint method
-warden cred spec create slack-ops \
-  -source slack-vault-src \
-  -config mint_method=static_apikey \
-  -config kv2_mount=secret \
-  -config secret_path=slack/ops
+printf '{"source":"slack-src","min_ttl":3600,"max_ttl":86400,"config":{"api_key":"%s"}}' \
+  "$(cat /path/to/slack-token)" | warden cred spec create slack-ops -json -
 ```
 
-The KV v2 secret at `secret/slack/ops` should contain at minimum an `api_key` field. Warden fetches the secret from Vault on each credential request.
+One long-lived credential for every caller. Prefer Option A.
 
-## Step 4: Create a Policy
+## Step 5: Create a Policy
 
 Create a policy that grants access to the Slack provider gateway:
 
@@ -190,7 +267,7 @@ path "slack/role/+/gateway/auth.test" {
 EOF
 ```
 
-The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/concepts/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
+The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/identity/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
 
 Verify:
 
@@ -198,7 +275,7 @@ Verify:
 warden policy read slack-access
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -320,13 +397,13 @@ This allows operators to enforce policies such as:
 
 ## TLS Certificate Authentication
 
-Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+The steps above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
+The role, credential spec and policy are identical. Replace the JWT mount (Step 1), its group (Step 3) and the requests (Step 6) with the following.
 
 ### Enable Cert Auth
 
@@ -339,23 +416,24 @@ warden auth enable cert
 Provide the PEM-encoded CA certificate that signs your client certificates:
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=slack-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
 
-### Create a Cert Role
+### Grant the Role to Certificates
 
-Create a role that binds allowed certificate identities to a credential spec and policy:
+A virtual group grants `slack-user` to the certificates the mount admits whose common name matches:
 
 ```bash
-warden write auth/cert/role/slack-user \
-    allowed_common_names="agent-*" \
-    token_policies="slack-access" \
-    cred_spec_name=slack-ops
+warden identity group create slack-user-agents -json '{
+  "type": "virtual",
+  "roles": ["slack-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
 ```
 
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
+The `cn` selector supports glob patterns; you can also match on other certificate fields. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group) for the full set of fields.
 
 ### Configure Provider for Cert Auth
 
@@ -390,7 +468,7 @@ curl --cert client.pem --key client-key.pem \
 | Aspect | Details |
 |--------|---------|
 | **Storage** | Bot token is stored on the credential spec (not the source) |
-| **Validation** | Token is verified at spec creation via `POST /auth.test` |
+| **Validation** | Spec creation calls `POST /auth.test`, but that only proves the endpoint is reachable: Slack answers an invalid token with HTTP 200 and `ok:false`, and the driver checks the status code only, so a bad token still stores |
 | **Rotation** | Manual — Slack bot tokens are tied to app installations |
 | **Lifetime** | Static — no expiration or auto-refresh |
 

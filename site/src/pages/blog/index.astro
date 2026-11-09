@@ -1,0 +1,41 @@
+---
+import BlogLayout from '../../layouts/BlogLayout.astro';
+import { getPosts, formatDate, readingTime } from '../../lib/posts';
+
+const posts = await getPosts();
+---
+
+<BlogLayout
+  title="Blog"
+  description="Notes on brokering credentials for AI agents — identity, policy, and audit at the gateway."
+>
+  <div class="blog-header">
+    <h1>Blog</h1>
+    <p>Notes on brokering credentials for AI agents — identity, policy, and audit.</p>
+  </div>
+
+  {
+    posts.length === 0 ? (
+      <p class="blog-empty">No posts yet.</p>
+    ) : (
+      <ul class="post-list">
+        {posts.map((post) => (
+          <li class="post-card">
+            <h2>
+              <a href={`/blog/${post.id}/`}>{post.data.title}</a>
+              {post.data.draft && <span class="draft-flag">draft</span>}
+            </h2>
+            <div class="post-meta">
+              <time datetime={post.data.publishDate.toISOString()}>
+                {formatDate(post.data.publishDate)}
+              </time>
+              <span class="dot" />
+              <span>{readingTime(post.body)} min read</span>
+            </div>
+            <p class="summary">{post.data.description}</p>
+          </li>
+        ))}
+      </ul>
+    )
+  }
+</BlogLayout>

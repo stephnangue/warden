@@ -6,6 +6,30 @@ import (
 	"github.com/stephnangue/warden/credential"
 )
 
+// assertionSubjectMetadata names who a federated exchange spoke for, read from the
+// token actually exchanged: subject is the sub the upstream verified, and actor is
+// act.sub when that token is a delegation token. Under delegation the sub is the
+// user's id and the agent is the actor, so reading the agent's own claims instead
+// would attribute the credential to the wrong party. Claim reads only — no token or
+// assertion bytes are recorded — and best-effort: a token that does not parse
+// yields no metadata, never a failed mint.
+func assertionSubjectMetadata(subjectToken string) map[string]interface{} {
+	meta := map[string]interface{}{}
+	claims := unverifiedJWTClaims(subjectToken)
+	if claims == nil {
+		return meta
+	}
+	if sub, ok := scalarClaim(claims["sub"]); ok && sub != "" {
+		meta["subject"] = sub
+	}
+	if act, ok := claims["act"].(map[string]interface{}); ok {
+		if sub, ok := scalarClaim(act["sub"]); ok && sub != "" {
+			meta["actor"] = sub
+		}
+	}
+	return meta
+}
+
 // DeriveAssertionResource returns the canonical downstream resource a
 // warden_identity federation spec targets, or ("", false) when there is no single
 // statically-known one. It is pure: it reads the source and spec config maps only
@@ -21,7 +45,7 @@ import (
 // The returned value is opaque: it carries a human-readable provider prefix but
 // must never be parsed back into parts, since a resource identifier (e.g. a Vault
 // KV path) can itself contain the ':' delimiter.
-func DeriveAssertionResource(sourceType string, sourceCfg, specCfg map[string]string) (string, bool) {
+func DeriveAssertionResource(sourceType string, sourceCfg, specCfg credential.Config) (string, bool) {
 	switch sourceType {
 	case credential.SourceTypeAWS:
 		return awsAssertionResource(specCfg)
@@ -33,6 +57,14 @@ func DeriveAssertionResource(sourceType string, sourceCfg, specCfg map[string]st
 		return gcpAssertionResource(sourceCfg, specCfg)
 	case credential.SourceTypeVault:
 		return vaultAssertionResource(sourceCfg, specCfg)
+	case credential.SourceTypeKubernetes:
+		return kubernetesAssertionResource(specCfg)
+	case credential.SourceTypeAlicloud:
+		return alicloudAssertionResource(specCfg)
+	case credential.SourceTypeAnthropic:
+		return anthropicAssertionResource(specCfg)
+	case credential.SourceTypeOpenAI:
+		return openaiAssertionResource(specCfg)
 	default:
 		return "", false
 	}
@@ -49,7 +81,7 @@ func DeriveAssertionResource(sourceType string, sourceCfg, specCfg map[string]st
 // source (or rely on the driver's conventional default) instead of repeating it on
 // every spec. An explicit spec assertion_audience always takes precedence; this is
 // consulted only as the fallback.
-func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg map[string]string) (string, bool) {
+func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg credential.Config) (string, bool) {
 	switch sourceType {
 	case credential.SourceTypeGCP:
 		return gcpAssertionAudience(sourceCfg)
@@ -59,9 +91,155 @@ func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg map[string]st
 		return azureAssertionAudience(sourceCfg)
 	case credential.SourceTypeVault:
 		return vaultAssertionAudience(sourceCfg)
+	case credential.SourceTypeKubernetes:
+		return kubernetesAssertionAudience(sourceCfg)
+	case credential.SourceTypeAlicloud:
+		return alicloudAssertionAudience(sourceCfg)
+	case credential.SourceTypeAnthropic:
+		return anthropicAssertionAudience(sourceCfg)
+	case credential.SourceTypeOpenAI:
+		return openaiAssertionAudience(sourceCfg)
 	default:
 		return "", false
 	}
+}
+
+// anthropicAssertionAudience derives the warden_identity assertion audience for an
+// anthropic source: the source's explicit `audience`, or ("", false) when unset.
+// There is no conventional default — the federation rule matches whatever audience
+// the operator registered — so an unset audience forces the spec to set
+// assertion_audience (the spec-create gate enforces this, and mint fails closed
+// otherwise).
+//
+// Gated on auth_method=oidc_federation like the other keyless sources, even though
+// it is the anthropic source's only mode: ValidateConfig requires the key, so a
+// record without it did not pass validation and derives nothing.
+func anthropicAssertionAudience(sourceCfg credential.Config) (string, bool) {
+	if credential.GetString(sourceCfg, "auth_method", "") != anthropicAuthMethodOIDCFederation {
+		return "", false
+	}
+	if aud := credential.GetString(sourceCfg, "audience", ""); aud != "" {
+		return aud, true
+	}
+	return "", false
+}
+
+// anthropicAssertionResource reports the service account a federation spec acts as,
+// for the warden_resource claim — which a federation rule can then match on, pinning
+// the rule to one service account. Pure: reads spec config only, no network or
+// driver state. The driver has a single mint path, so there is no mint_method to
+// dispatch on.
+//
+// The provider prefix is human-readable sugar on an opaque value — never parse it
+// back.
+func anthropicAssertionResource(specCfg credential.Config) (string, bool) {
+	if sa := credential.GetString(specCfg, "service_account_id", ""); sa != "" {
+		return "anthropic:" + sa, true
+	}
+	return "", false
+}
+
+// openaiAssertionAudience derives the warden_identity assertion audience for an
+// openai source: the source's explicit `audience`, or ("", false) when unset. There
+// is no conventional default — the identity provider matches whatever audience the
+// operator registered — so an unset audience forces the spec to set
+// assertion_audience.
+//
+// Gated on auth_method=oidc_federation like the other keyless sources, even though
+// it is the openai source's only mode: ValidateConfig requires the key, so a record
+// without it did not pass validation and derives nothing.
+func openaiAssertionAudience(sourceCfg credential.Config) (string, bool) {
+	if credential.GetString(sourceCfg, "auth_method", "") != openaiAuthMethodOIDCFederation {
+		return "", false
+	}
+	if aud := credential.GetString(sourceCfg, "audience", ""); aud != "" {
+		return aud, true
+	}
+	return "", false
+}
+
+// openaiAssertionResource reports the service account a federation spec acts as,
+// for the warden_resource claim — which a service account mapping can then match
+// on, pinning the mapping to one service account. Pure: reads spec config only.
+//
+// The provider prefix is human-readable sugar on an opaque value — never parse it
+// back.
+func openaiAssertionResource(specCfg credential.Config) (string, bool) {
+	if sa := credential.GetString(specCfg, "service_account_id", ""); sa != "" {
+		return "openai:" + sa, true
+	}
+	return "", false
+}
+
+// alicloudAssertionAudience derives the warden_identity assertion audience for a
+// keyless Alicloud source: the source's explicit `audience`, or ("", false) when
+// unset. There is no conventional default — unlike AWS, which accepts
+// sts.amazonaws.com, Alibaba matches the assertion's aud against the client_ids
+// registered on the RAM OIDC provider, which the operator chooses — so an unset
+// audience forces the spec to set assertion_audience (the spec-create gate
+// enforces this, and mint fails closed otherwise).
+//
+// Gated on auth_method=oidc_federation: only a keyless source federates, so a
+// static source supplies no derived audience even if a stored config record
+// somehow carries one.
+func alicloudAssertionAudience(sourceCfg credential.Config) (string, bool) {
+	if credential.GetString(sourceCfg, "auth_method", alicloudAuthMethodStatic) != alicloudAuthMethodOIDCFederation {
+		return "", false
+	}
+	if aud := credential.GetString(sourceCfg, "audience", ""); aud != "" {
+		return aud, true
+	}
+	return "", false
+}
+
+// alicloudAssertionResource reports the RAM role a federation spec assumes, for
+// the warden_resource claim. Pure: reads spec config only, no network or driver
+// state. The driver has a single mint path, so unlike the multi-engine sources
+// there is no mint_method to dispatch on.
+//
+// The provider prefix is human-readable sugar on an opaque value — never parse it
+// back, since a role ARN contains ':' itself.
+func alicloudAssertionResource(specCfg credential.Config) (string, bool) {
+	if arn := credential.GetString(specCfg, "role_arn", ""); arn != "" {
+		return "alicloud-ram:" + arn, true
+	}
+	return "", false
+}
+
+// kubernetesAssertionAudience derives the warden_identity assertion audience for a
+// keyless Kubernetes source: the source's explicit `audience`, or ("", false) when
+// unset. There is no conventional default — the value must appear in the cluster
+// authenticator's own audiences list, which the operator chooses — so an unset
+// audience forces the spec to set assertion_audience (the spec-create gate enforces
+// this, and mint fails closed otherwise).
+//
+// Gated on auth_method=oidc_federation: only a keyless source federates, so a
+// static source supplies no derived audience even if a stored config record somehow
+// carries one.
+func kubernetesAssertionAudience(sourceCfg credential.Config) (string, bool) {
+	if credential.GetString(sourceCfg, "auth_method", kubernetesAuthMethodStatic) != kubernetesAuthMethodOIDCFederation {
+		return "", false
+	}
+	if aud := credential.GetString(sourceCfg, "audience", ""); aud != "" {
+		return aud, true
+	}
+	return "", false
+}
+
+// kubernetesAssertionResource reports the service account a federation spec mints
+// for, as "namespace/service_account", for the warden_resource claim. Pure: reads
+// spec config only, no network or driver state. The driver has a single mint path,
+// so unlike the multi-engine sources there is no mint_method to dispatch on.
+//
+// The returned value is opaque — never parse it back, since a Kubernetes name can
+// in principle carry the separator.
+func kubernetesAssertionResource(specCfg credential.Config) (string, bool) {
+	namespace := credential.GetString(specCfg, "namespace", "")
+	sa := credential.GetString(specCfg, "service_account", "")
+	if namespace != "" && sa != "" {
+		return namespace + "/" + sa, true
+	}
+	return "", false
 }
 
 // vaultAssertionAudience derives the warden_identity assertion audience for a Vault
@@ -74,7 +252,7 @@ func DeriveAssertionAudience(sourceType string, sourceCfg, specCfg map[string]st
 // Gated on auth_method=oidc_federation: only a keyless source federates, so a static
 // (approle/token) source supplies no derived audience even if a stored config record
 // somehow carries one.
-func vaultAssertionAudience(sourceCfg map[string]string) (string, bool) {
+func vaultAssertionAudience(sourceCfg credential.Config) (string, bool) {
 	if credential.GetString(sourceCfg, "auth_method", "") != vaultAuthMethodOIDCFederation {
 		return "", false
 	}
@@ -90,7 +268,7 @@ func vaultAssertionAudience(sourceCfg map[string]string) (string, bool) {
 // that selects which upstream engine/path the federated session actually reaches. The
 // returned value is the bare mount/path (or role) with no provider prefix; it is
 // opaque — never parse it back, as a KV path or role name can itself contain ':'.
-func vaultAssertionResource(sourceCfg, specCfg map[string]string) (string, bool) {
+func vaultAssertionResource(sourceCfg, specCfg credential.Config) (string, bool) {
 	switch credential.GetString(specCfg, "mint_method", "") {
 	case "vault_token":
 		// The effective JWT-auth role: a spec override falls back to the source value.
@@ -140,7 +318,7 @@ func vaultAssertionResource(sourceCfg, specCfg map[string]string) (string, bool)
 // so only a keyless source derives an audience even if a stored config record somehow
 // carries a provider on a non-federation source (ValidateConfig already forbids that
 // combination; this is the matching derive-time guard).
-func gcpAssertionAudience(sourceCfg map[string]string) (string, bool) {
+func gcpAssertionAudience(sourceCfg credential.Config) (string, bool) {
 	if credential.GetString(sourceCfg, "auth_method", gcpAuthMethodStatic) != gcpAuthMethodOIDCFederation {
 		return "", false
 	}

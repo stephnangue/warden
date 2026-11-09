@@ -5,7 +5,7 @@ title: "Provider Backends"
 A **provider backend** is a mounted gateway that fronts an upstream system — an
 LLM API, a cloud control plane, a Git host, an observability platform. A workload
 sends its request to the Warden mount as if Warden were the upstream; Warden
-authenticates the caller, checks [policy](/concepts/policies/), injects the
+authenticates the caller, checks [policy](/identity/policies/), injects the
 right [credential](/concepts/credentials/), and proxies the call through. See
 [Providers](/concepts/providers/) for the gateway model and how a request
 flows.
@@ -13,6 +13,13 @@ flows.
 Each page below is a setup guide for one provider — prerequisites, mount
 configuration, credential sources and specs, policy, and a configuration
 reference.
+
+Two provider config keys tie a mount to its callers, documented once in
+[Provider configuration](/provider-backends/configuration/). `auto_auth_path`
+names the auth mount that admits callers on every request, with no login.
+`default_role`, optional, names a role of the namespace for requests that name
+none. Naming a role does not grant it: a [group](/identity/groups/) grants it
+per request, to the callers whose verified facts match its rules.
 
 ## MCP
 
@@ -36,6 +43,7 @@ reference.
 |---|---|
 | [AWS](/provider-backends/aws/) | Amazon Web Services control plane and service APIs |
 | [Azure](/provider-backends/azure/) | Microsoft Azure resource management and services |
+| [Microsoft Graph](/provider-backends/msgraph/) | Microsoft 365 data through Graph, as the user (Entra on-behalf-of) or as the app |
 | [GCP](/provider-backends/gcp/) | Google Cloud Platform APIs |
 | [Alicloud](/provider-backends/alicloud/) | Alibaba Cloud OpenAPI (ACS3) and OSS object storage |
 | [IBM Cloud](/provider-backends/ibmcloud/) | IBM Cloud platform services |
@@ -94,7 +102,8 @@ reference.
 
 - [Providers](/concepts/providers/) — the gateway model: how a request is authenticated, authorized, and proxied.
 - [Credentials](/concepts/credentials/) — what each provider injects into the proxied request.
-- [Roles](/concepts/roles/) — how the role on a request selects access and credential.
+- [Roles](/identity/roles/) — how the role on a request selects access and credential.
+- [Groups](/identity/groups/) — how a role is granted to a caller.
 - [`warden provider`](/cli/provider/) — the CLI for enabling, listing, tuning, and disabling providers.
 - [Concepts](/concepts/) — how Warden works, end to end.
 </content>

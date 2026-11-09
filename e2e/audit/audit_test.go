@@ -3,9 +3,15 @@
 package audit
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/stephnangue/warden/audit"
 	h "github.com/stephnangue/warden/e2e/helpers"
 )
 
@@ -121,6 +127,30 @@ func TestAuditStandbyForwardedRequest(t *testing.T) {
 		t.Fatalf("expected 'e2e-audit-fwd' to appear in leader (node %d) log for forwarded request", leaderNodeNum)
 	}
 
+	// The leader audits the forwarded request under the id the standby gave
+	// it, not under none. Audit writes are asynchronous, hence the poll; the
+	// cleanup's deletes go to the leader directly, so they are skipped.
+	var forwarded []audit.LogEntry
+	for i := 0; i < 30 && len(forwarded) == 0; i++ {
+		for _, e := range h.ReadAuditEntries(t, leaderNodeNum, "e2e-audit-fwd") {
+			if e.Request != nil && e.Request.Operation != "delete" {
+				forwarded = append(forwarded, e)
+			}
+		}
+		if len(forwarded) == 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	if len(forwarded) == 0 {
+		t.Fatalf("no audit entry on the leader (node %d) for the forwarded request", leaderNodeNum)
+	}
+	for _, e := range forwarded {
+		if e.Request.ID == "" {
+			t.Errorf("leader audited the forwarded request's %s entry (%s %s) with no request id",
+				e.Type, e.Request.Operation, e.Request.Path)
+		}
+	}
+
 	h.CleanupNamespaces(t, leader, "e2e-audit-fwd")
 }
 
@@ -136,6 +166,7 @@ func TestAuditSensitiveFieldMasking(t *testing.T) {
 		"rotation_period": 300,
 		"config": {
 			"vault_address": "http://127.0.0.1:8200",
+			"tls_skip_verify": true,
 			"auth_method": "approle",
 			"role_id": "e2e-approle-role-id-1234",
 			"secret_id": "e2e-approle-secret-id-5678",
@@ -154,6 +185,133 @@ func TestAuditSensitiveFieldMasking(t *testing.T) {
 	}
 
 	h.APIRequest(t, "DELETE", "sys/cred/sources/e2e-audit-secret", leader, "")
+}
+
+// TestAuditCustomListsKeepTheFloor enables a device whose operator set their
+// own salt and omit lists, which used to replace the defaults, and checks that
+// a gateway call through it writes no credential: not the agent's JWT, not a
+// query value, not the credential Warden issued.
+func TestAuditCustomListsKeepTheFloor(t *testing.T) {
+	leader := h.GetLeaderPort(t)
+	logPath := filepath.Join(h.E2EDir(), ".logs", "e2e-floor-audit.log")
+	_ = os.Remove(logPath)
+	h.APIRequest(t, "DELETE", "sys/audit/e2e-floor", leader, "")
+
+	body := fmt.Sprintf(`{
+		"type": "file",
+		"config": {
+			"file_path": %q,
+			"buffer_size": 1,
+			"salt_fields": ["auth.token_id"],
+			"omit_fields": ["auth.token_accessor"]
+		}
+	}`, logPath)
+	status, resp := h.APIRequest(t, "POST", "sys/audit/e2e-floor", leader, body)
+	if status != 200 && status != 201 && status != 204 {
+		t.Fatalf("enable audit device: expected 200/201/204, got %d: %s", status, resp)
+	}
+	t.Cleanup(func() {
+		h.APIRequest(t, "DELETE", "sys/audit/e2e-floor", leader, "")
+		_ = os.Remove(logPath)
+	})
+
+	jwt := h.GetDefaultJWT(t)
+	status, resp = h.VaultTransparentRequest(t, "GET", "secret/data/e2e/app-config?api_key=E2E-QUERY-SECRET", "e2e-reader", leader, jwt)
+	if status != 200 {
+		t.Fatalf("gateway request: expected 200, got %d: %s", status, resp)
+	}
+
+	var raw []byte
+	var entries []audit.LogEntry
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, _ = os.ReadFile(logPath)
+		entries = h.ReadAuditFile(t, logPath, "e2e-reader")
+		if hasIssuedCredential(entries) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !hasIssuedCredential(entries) {
+		t.Fatalf("no response entry with an issued credential in %s", logPath)
+	}
+
+	for _, secret := range []string{jwt, "E2E-QUERY-SECRET"} {
+		if strings.Contains(string(raw), secret) {
+			t.Errorf("%q written in clear to the audit log", secret[:min(len(secret), 16)])
+		}
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		var entry map[string]map[string]any
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		for _, part := range []string{"request", "response"} {
+			for _, field := range []string{"headers", "data"} {
+				if _, ok := entry[part][field]; ok {
+					t.Errorf("an entry records %s.%s: %s", part, field, line)
+				}
+			}
+		}
+	}
+	redactedURLs := 0
+	for _, e := range entries {
+		if e.Response == nil || e.Response.Credential == nil {
+			continue
+		}
+		for k, v := range e.Response.Credential.Data {
+			if !strings.HasPrefix(v, "hmac-sha256:") {
+				t.Errorf("credential data %q is not salted", k)
+			}
+		}
+		switch u := e.Response.UpstreamURL; {
+		case strings.Contains(u, "api_key=%5Bredacted%5D"):
+			redactedURLs++
+		case u != "":
+			t.Errorf("upstream_url keeps the query value: %s", u)
+		}
+	}
+	if redactedURLs == 0 {
+		t.Error("no response entry recorded the upstream URL with its query value redacted")
+	}
+}
+
+// hasIssuedCredential reports whether entries hold a response entry carrying
+// the credential a gateway call was issued.
+func hasIssuedCredential(entries []audit.LogEntry) bool {
+	for _, e := range entries {
+		if e.Response != nil && e.Response.Credential != nil && len(e.Response.Credential.Data) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAuditUnknownFieldPathRefused checks that enabling a device with a salt
+// path that names no field is refused, where it used to be ignored without a
+// word.
+func TestAuditUnknownFieldPathRefused(t *testing.T) {
+	leader := h.GetLeaderPort(t)
+	logPath := filepath.Join(h.E2EDir(), ".logs", "e2e-bad-audit.log")
+	t.Cleanup(func() {
+		h.APIRequest(t, "DELETE", "sys/audit/e2e-bad", leader, "")
+		_ = os.Remove(logPath)
+	})
+
+	body := fmt.Sprintf(`{
+		"type": "file",
+		"config": {
+			"file_path": %q,
+			"salt_fields": ["agent.metadata.env"]
+		}
+	}`, logPath)
+	status, resp := h.APIRequest(t, "POST", "sys/audit/e2e-bad", leader, body)
+	if status != 400 {
+		t.Fatalf("expected 400, got %d: %s", status, resp)
+	}
+	if !strings.Contains(string(resp), "agent.metadata.env") {
+		t.Errorf("the refusal does not name the path: %s", resp)
+	}
 }
 
 // TestAuditDeviceFailureBlocksRequests verifies the audit log file is actively being written to (T-088).

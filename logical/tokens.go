@@ -25,6 +25,41 @@ const (
 	HeaderWardenAgentToken = "X-Warden-Agent-Token"
 )
 
+// WardenRequestHeaders returns every header a client sends to Warden for
+// Warden alone: the X-Warden-* credentials, routing selectors, and retired and
+// reserved names, and the DPoP proof of a bound ticket. None means anything to
+// an upstream and the credentials are secrets, so every gateway strips them
+// all before proxying. A new such header is added here, once. The slice is
+// fresh on each call.
+func WardenRequestHeaders() []string {
+	return []string{
+		HeaderWardenToken,
+		HeaderWardenAgentToken,
+		// Routing selectors: they name a role, a provider mount or a tenant
+		// the upstream has no use for.
+		"X-Warden-Role",
+		"X-Warden-Provider",
+		"X-Warden-Namespace",
+		// Token-exchange inputs: internal only, never forwarded.
+		"X-Warden-Subject-Token",
+		"X-Warden-Actor-Token",
+		// Retired in 0.20: the user credential now rides Authorization. Still
+		// stripped so a client that keeps sending the old header cannot leak
+		// the credential to the upstream.
+		"X-Warden-User-Token",
+		// Reserved: it will select one agent among several presenting one
+		// native identity. Stripped already, so no upstream comes to rely on
+		// it.
+		"X-Warden-Agent",
+		// The proof of the key a ticket is bound to: Warden checks it, and the
+		// upstream is called with a credential Warden supplies.
+		"DPoP",
+		// Internal to the cluster, and already removed at every listener.
+		// Listed too, so that no gateway can pass it on whatever reaches it.
+		listener.ForwardedCertHandshakeHeader,
+	}
+}
+
 // IsJWT reports whether s has the compact-JWS shape ("eyJ", the base64 of the
 // `{"` that opens every JOSE header). It is a shape check, not validation — the
 // auth mount verifies the token. The same prefix test is open-coded in several

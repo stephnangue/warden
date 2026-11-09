@@ -31,12 +31,14 @@ var (
 //
 // Storage layout (under barrier view at "core/skills/"):
 //
-//	{skill-name}        -> JSON-encoded storedSkill
-//	_meta/seeded        -> sentinel byte set after the one-time seed runs
+//	{skill-name}            -> JSON-encoded storedSkill
+//	_meta/seeded            -> sentinel byte set after the one-time seed runs
+//	_meta/names-agentskills -> sentinel byte set after the name migration runs
 //
-// Skills are read-light and written rarely; no in-memory cache is
-// maintained. Skill bodies are bounded (see maxSkillBodyBytes) so a
-// straight List-then-Get is acceptable.
+// Skills are read-light and written rarely; the store keeps no in-memory
+// copy of the records. Skill bodies are bounded (see maxSkillBodyBytes) so a
+// straight List-then-Get is acceptable. The discovery server memoises each
+// skill's rendered SKILL.md on Core.skillRenders; Delete drops its entry.
 type SkillStore struct {
 	core    *Core
 	logger  *logger.GatedLogger
@@ -249,6 +251,7 @@ func (s *SkillStore) Delete(ctx context.Context, name string) error {
 	if err := s.storage.Delete(ctx, name); err != nil {
 		return fmt.Errorf("failed to delete skill: %w", err)
 	}
+	s.core.skillRenders.forget(name)
 
 	s.logger.Info("deleted skill", logger.String("name", name))
 	return nil
@@ -314,15 +317,25 @@ func (s *SkillStore) load(ctx context.Context, name string) (*Skill, error) {
 }
 
 // setupSkillStore is called during unseal to wire the SkillStore's
-// storage view to the unsealed barrier and seed the foundation skills
-// on first run. Provider-type skills follow a different lifecycle
-// (seeded at provider mount time) and are not handled here.
-func (c *Core) setupSkillStore(ctx context.Context) error {
+// storage view to the unsealed barrier and, on the active node, seed the
+// foundation skills on first run and migrate legacy skill names. Standby
+// nodes only wire the storage view: storage writes belong to the active
+// node. Provider-type skills follow a different lifecycle (seeded at
+// provider mount time) and are not handled here.
+func (c *Core) setupSkillStore(ctx context.Context, standby bool) error {
 	if c.skillStore == nil {
 		return fmt.Errorf("skill store not initialized")
 	}
 	if err := c.skillStore.LoadFromStorage(ctx); err != nil {
 		return err
+	}
+	if standby {
+		return nil
+	}
+	if err := c.skillStore.MigrateSkillNames(ctx); err != nil {
+		// Like seeding, a failed migration must not block unseal: the
+		// unmigrated skills stay readable under their old names.
+		c.logger.Warn("failed to migrate skill names", logger.Err(err))
 	}
 	if err := c.skillStore.SeedFoundation(ctx); err != nil {
 		// Seed failures must not block unseal: agents can still operate
@@ -338,6 +351,7 @@ func (c *Core) teardownSkillStore() error {
 	if c.skillStore != nil {
 		c.skillStore.UnloadFromCache()
 	}
+	c.skillRenders.reset()
 	return nil
 }
 

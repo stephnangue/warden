@@ -3,6 +3,7 @@ package ibmcloud
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/dualgateway"
+	"github.com/stephnangue/warden/provider/sdk/upstream"
 )
 
 // DefaultIBMCloudURL is the sentinel meaning "route by path". While ibmcloud_url
@@ -92,17 +94,17 @@ var Spec = &dualgateway.ProviderSpec{
 		}
 	},
 
-	RewriteAPITarget: func(providerURL, apiPath string, state map[string]any) (string, error) {
+	RewriteAPITarget: func(providerURL, apiPath string, state map[string]any) (*url.URL, error) {
 		host, rest, err := splitHostFromPath(apiPath)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		suffixes, _ := state["allowed_host_suffixes"].([]string)
 		if len(suffixes) == 0 {
 			suffixes = defaultIBMAllowedHostSuffixes
 		}
 		if !hostAllowed(host, suffixes) {
-			return "", fmt.Errorf("host %q not in allowed_host_suffixes", host)
+			return nil, fmt.Errorf("host %q not in allowed_host_suffixes", host)
 		}
 
 		// A configured ibmcloud_url sends every service through one egress
@@ -116,10 +118,10 @@ var Spec = &dualgateway.ProviderSpec{
 		// checking a value nothing downstream can act on. Keeping it means
 		// the gateway sees exactly what the caller addressed.
 		if base := strings.TrimRight(providerURL, "/"); base != "" && base != DefaultIBMCloudURL {
-			return base + "/" + host + rest, nil
+			return upstream.URL(base, "/"+host+rest, "")
 		}
 
-		return "https://" + host + rest, nil
+		return upstream.URL("https://"+host, rest, "")
 	},
 
 	// COS uses access_key_id/secret_access_key (same field names as Cloudflare R2)
@@ -289,8 +291,18 @@ Credential type: ibmcloud_keys (at least one mode required)
   - secret_access_key: COS HMAC secret access key for Object Storage (COS mode)
 
 Two credential source types are supported:
-- ibm (iam_with_cos): IAM token minted from source API key + static COS HMAC keys
+- ibm (iam_token): IAM token minted from the source API key, for API mode
+- ibm (access_keys): the COS HMAC pair a referenced spec yields, for COS mode
 - hvault (dynamic_ibm): Dynamic API key from Vault IBM engine + IAM token exchange + static COS HMAC
+
+Specs for this mount must be typed ibmcloud_keys explicitly. A spec created without
+a type is inferred from its mint_method, and iam_token infers oauth_bearer_token —
+which this mount refuses at request time, after the spec has written successfully.
+
+A spec serves one mode, and a role binds one spec, so serving both API and COS
+traffic takes two roles, one per spec. The COS pair is never stored on the spec:
+access_keys names a secret_spec that yields it, and nothing here creates or deletes
+a pair at IBM.
 
 Configuration:
 - ibmcloud_url: Egress base. Left unset, API mode connects to the host named in the

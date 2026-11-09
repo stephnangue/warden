@@ -2,6 +2,8 @@ package types
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
@@ -58,16 +60,18 @@ func NewAzureBearerTokenCredType() *AzureBearerTokenCredType {
 func (t *AzureBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 	return []*credential.FieldValidator{
 		credential.StringField("mint_method").
-			OneOf("bearer_token", "key_vault_secret").
-			Describe("Method for minting Azure credentials").
+			OneOf("bearer_token", "on_behalf_of").
+			Describe("Method for minting Azure credentials: bearer_token (the app's own token) or on_behalf_of (a delegated token for the user presenting their Entra access token)").
 			Example("bearer_token"),
 
 		credential.StringField("tenant_id").
+			Custom(func(v string) error { return credential.ValidateUUID("tenant_id", v) }).
 			Describe("Azure AD tenant ID (optional, defaults to source tenant)").
 			Example("12345678-1234-1234-1234-123456789012"),
 
 		credential.StringField("client_id").
 			Required().
+			Custom(func(v string) error { return credential.ValidateUUID("client_id", v) }).
 			Describe("Azure AD service principal client ID (application ID)").
 			Example("12345678-1234-1234-1234-123456789012"),
 
@@ -80,35 +84,40 @@ func (t *AzureBearerTokenCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("uuid-secret-id"),
 
 		credential.StringField("resource_uri").
-			Describe("Azure resource URI to request token for (bearer_token method)").
+			Describe("Azure resource URI to request a token for, as its .default scope (default https://management.azure.com/ for bearer_token, https://graph.microsoft.com/ for on_behalf_of)").
 			Example("https://management.azure.com/"),
-
-		credential.StringField("scopes").
-			Describe("Comma-separated list of OAuth2 scopes (bearer_token method)").
-			Example("https://graph.microsoft.com/.default"),
-
-		// Key Vault Secret fields
-		credential.StringField("vault_name").
-			Describe("Azure Key Vault name (required for key_vault_secret method)").
-			Example("my-keyvault"),
-
-		credential.StringField("secret_name").
-			Describe("Key Vault secret name (required for key_vault_secret method)").
-			Example("database-password"),
-
-		credential.StringField("secret_version").
-			Describe("Key Vault secret version (optional, defaults to latest)").
-			Example("abc123def456"),
 	}
+}
+
+// retiredBearerTokenKeys are keys this type once declared and no longer reads. The
+// schema ignores keys it does not know, so without an explicit refusal a spec
+// carrying one would be accepted and the key silently ignored — a spec that reads
+// as scoped, or as reading a Key Vault secret, while doing neither.
+var retiredBearerTokenKeys = map[string]string{
+	"scopes":         "the client-credentials grant takes a single '<resource>/.default' scope; set 'resource_uri' instead",
+	"vault_name":     "Key Vault reads are no longer an azure_bearer_token mint method",
+	"secret_name":    "Key Vault reads are no longer an azure_bearer_token mint method",
+	"secret_version": "Key Vault reads are no longer an azure_bearer_token mint method",
 }
 
 // ValidateConfig validates the Config for an Azure Bearer token credential spec
 // sourceType determines the validation rules:
 // - "azure": requires service principal configuration for token minting
-func (t *AzureBearerTokenCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *AzureBearerTokenCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	// Step 1: Validate source type compatibility
 	if sourceType != credential.SourceTypeAzure {
 		return fmt.Errorf("azure_bearer_token credentials require an azure source, got: %s", sourceType)
+	}
+
+	// Checked ahead of the schema so the refusal names the retirement rather than
+	// listing the one method that is left.
+	if config.Get("mint_method") == "key_vault_secret" {
+		return fmt.Errorf("mint_method 'key_vault_secret' is no longer supported for azure_bearer_token")
+	}
+	for _, key := range slices.Sorted(maps.Keys(retiredBearerTokenKeys)) {
+		if config.Get(key) != "" {
+			return fmt.Errorf("'%s' is not supported by azure_bearer_token: %s", key, retiredBearerTokenKeys[key])
+		}
 	}
 
 	// Step 2: Validate config against schema
@@ -121,19 +130,25 @@ func (t *AzureBearerTokenCredType) ValidateConfig(config map[string]string, sour
 	// A federated spec (subject_token_source set) presents a Warden assertion as a
 	// client_assertion, so it holds no client_secret. The audience/algorithm rules
 	// for warden_identity are enforced generically by ValidateExchangeSpecConfig.
-	mintMethod := config["mint_method"]
+	mintMethod := config.Get("mint_method")
+	// On-behalf-of acts for the user presenting their own Entra token, which reaches
+	// the driver only as the user_identity subject.
+	if mintMethod == "on_behalf_of" && config.Get(credential.ConfigSubjectTokenSource) != credential.SourceUserIdentity {
+		return fmt.Errorf("mint_method 'on_behalf_of' exchanges the user's Entra access token: set %s=%s",
+			credential.ConfigSubjectTokenSource, credential.SourceUserIdentity)
+	}
 	if credential.SpecRequestsExchange(config) {
-		if config["tenant_id"] == "" {
+		if config.Get("tenant_id") == "" {
 			return fmt.Errorf("'tenant_id' is required for a keyless federated spec (a spec with subject_token_source)")
 		}
-		if config["client_secret"] != "" || config["secret_id"] != "" {
+		if config.Get("client_secret") != "" || config.Get("secret_id") != "" {
 			return fmt.Errorf("'client_secret'/'secret_id' must not be set for a keyless federated spec")
 		}
-		if mintMethod != "" && mintMethod != "bearer_token" {
-			return fmt.Errorf("mint_method %q is not supported over federation (supported: bearer_token)", mintMethod)
+		if mintMethod != "" && mintMethod != "bearer_token" && mintMethod != "on_behalf_of" {
+			return fmt.Errorf("mint_method %q is not supported over federation (supported: bearer_token, on_behalf_of)", mintMethod)
 		}
 	} else {
-		if config["client_secret"] == "" || config["secret_id"] == "" {
+		if config.Get("client_secret") == "" || config.Get("secret_id") == "" {
 			return fmt.Errorf("'client_secret' and 'secret_id' are required for a static azure spec")
 		}
 	}
@@ -150,4 +165,10 @@ func (t *AzureBearerTokenCredType) RequiresSpecRotation() bool {
 // SensitiveConfigFields returns spec config keys that should be masked in output
 func (t *AzureBearerTokenCredType) SensitiveConfigFields() []string {
 	return []string{"client_secret", "secret_id"}
+}
+
+// StoredSecrets reports the secret config keys this spec holds. secret_id is the
+// password credential's id, not the secret.
+func (t *AzureBearerTokenCredType) StoredSecrets(config credential.Config) []string {
+	return config.Present("client_secret")
 }

@@ -33,19 +33,17 @@ A running Warden server. See the [AWS provider README](/provider-backends/aws/) 
 
 ### 2. AWS IAM credentials
 
-Two IAM identities are recommended — a **service user** (whose access keys Warden holds and rotates) and a **database role** (with only `rds-db:connect`, assumed via STS). This separation ensures the database-scoped identity cannot manage IAM keys.
-
-**Service IAM user** (`warden-svc`) — holds access keys, can assume the database role and rotate its own keys:
+Warden signs each RDS IAM auth token itself, with the access keys of an IAM **service user** (`warden-svc`) held on the credential source. Warden rotates those keys; the tokens it hands out live 15 minutes. `rds_iam_token` has no federated form, so the source must hold keys, and the token is always signed by that user: a spec naming `role_arn` is refused. The service user therefore needs `rds-db:connect` on the database users it serves, plus the permissions to rotate its own keys:
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "AssumeDBRole",
+      "Sid": "RDSIAMAuth",
       "Effect": "Allow",
-      "Action": "sts:AssumeRole",
-      "Resource": "arn:aws:iam::<account-id>:role/warden-rds-connect"
+      "Action": "rds-db:connect",
+      "Resource": "arn:aws:rds-db:<region>:<account-id>:dbuser:<dbi-resource-id>/*"
     },
     {
       "Sid": "KeyRotation",
@@ -61,40 +59,7 @@ Two IAM identities are recommended — a **service user** (whose access keys War
 }
 ```
 
-**Database IAM role** (`warden-rds-connect`) — scoped to RDS IAM auth only:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "RDSIAMAuth",
-      "Effect": "Allow",
-      "Action": "rds-db:connect",
-      "Resource": "arn:aws:rds-db:<region>:<account-id>:dbuser:<dbi-resource-id>/*"
-    }
-  ]
-}
-```
-
-The role's trust policy must allow the service user to assume it:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::<account-id>:user/warden-svc" },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-```
-
-Replace `<region>`, `<account-id>`, and `<dbi-resource-id>` (from the RDS console → Configuration → Resource ID) with your values.
-
-> **Simpler alternative:** For non-production environments, you can use a single IAM user with both `rds-db:connect` and `iam:*AccessKey` permissions, and omit `role_arn` from the credential spec. The trade-off is that the same identity that connects to the database can also manage its own keys.
+Replace `<region>`, `<account-id>`, and `<dbi-resource-id>` (from the RDS console → Configuration → Resource ID) with your values. Narrow the `dbuser` resource to the database users Warden serves (`.../app_readonly`, `.../app_readwrite`) rather than `*`.
 
 ### 3. RDS instance with IAM authentication enabled
 
@@ -134,54 +99,20 @@ CREATE USER 'app_readwrite'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'
 GRANT SELECT, INSERT, UPDATE, DELETE ON myapp.* TO 'app_readwrite'@'%';
 ```
 
-Each database user name must match the `db_user` in its corresponding credential spec (Step 3). Warden controls which workload gets which user — the database controls what that user can do.
+Each database user name must match the `db_user` in its corresponding credential spec (Step 4). Warden controls which workload gets which user — the database controls what that user can do.
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Set up JWT auth for workload authentication. The auth role does **not** need a `cred_spec_name` — the RDS provider resolves credentials via path-based provider grants instead.
+Set up JWT auth for workload authentication. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source); the commands below are for the local dev setup.
 
 ```bash
 warden auth enable jwt
-
-warden write auth/jwt/config \
-    jwks_url=http://localhost:4444/.well-known/jwks.json \
-    default_role=db-user
-
-warden write auth/jwt/role/db-user \
-    token_policies="rds-access" \
-    user_claim=sub
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
-
-Setting `default_role=db-user` means workloads don't need to pass `?role=` — the auth method uses this role automatically during authentication.
-
-> **Advanced: Dynamic Policy Mapping with `groups_claim`**
->
-> If your identity provider includes group claims in JWTs (e.g., Keycloak, Auth0, Azure AD), you can map groups directly to Warden policies instead of creating multiple auth roles:
->
-> ```bash
-> warden write auth/jwt/config \
->     jwks_url=http://localhost:4444/.well-known/jwks.json \
->     default_role=db-user \
->     groups_claim=groups \
->     group_policy_prefix=group-
->
-> warden write auth/jwt/role/db-user \
->     token_policies="base-access" \
->     user_claim=sub
->
-> # Create policies matching group names
-> warden policy write group-db-read - <<EOF
-> path "rds/access/readonly" { capabilities = ["read"] }
-> EOF
->
-> warden policy write group-db-write - <<EOF
-> path "rds/access/readwrite" { capabilities = ["read"] }
-> EOF
-> ```
->
-> A workload with JWT `{"groups": ["db-read"]}` gets policies `["base-access", "group-db-read"]` — access to `rds/access/readonly` but not `rds/access/readwrite`. The group-to-policy mapping is automatic: each group name is prefixed with `group_policy_prefix` (default `group-`) to form the policy name.
->
-> This requires an identity provider that supports custom claims. Hydra (used in the quickstart) needs a [token hook](https://www.ory.sh/docs/hydra/guides/claims-at-refresh) for custom claims. Keycloak, Auth0, and Azure AD support this natively.
 
 ## Step 2: Mount and Configure the RDS Provider
 
@@ -203,7 +134,65 @@ warden provider list
 warden read rds/config
 ```
 
-## Step 3: Create a Credential Source and Spec
+## Step 3: Create a Role and Grant It
+
+Create the role that names the policy, then a virtual group that grants it to callers admitted through the JWT mount. The role does **not** need a `cred_spec_name` — the RDS provider resolves credentials through its grants (Step 5) instead. The policy comes in Step 6; until it exists, the role write warns.
+
+```bash
+warden role create db-user -json '{
+  "policies": ["rds-access"],
+  "provider_path": "rds/"
+}'
+
+warden identity group create db-user-agents -json '{
+  "type": "virtual",
+  "roles": ["db-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+> **Advanced: grant roles by your identity provider's groups**
+>
+> If your identity provider puts group names in a claim (e.g., Keycloak, Auth0, Azure AD), publish the claim as a fact on the JWT mount and grant one role per group:
+>
+> ```bash
+> warden write auth/jwt/config '{
+>   "facts": {
+>     "groups": "groups"
+>   }
+> }'
+>
+> warden policy write db-write - <<EOF
+> path "rds/access/readwrite" { capabilities = ["read"] }
+> EOF
+>
+> warden role create db-writer -json '{
+>   "policies": ["db-write"],
+>   "provider_path": "rds/"
+> }'
+>
+> warden identity group create db-writers -json '{
+>   "type": "virtual",
+>   "roles": ["db-writer"],
+>   "rules": [
+>     { "mount": ["auth/jwt/"], "groups": ["db-write"] }
+>   ]
+> }'
+> ```
+>
+> A workload whose JWT carries `{"groups": ["db-write"]}` may now ask for `db-writer`, and with it reach `rds/access/readwrite`; any other workload is refused that role. See [Grant the role with a group](/auth-methods/jwt/#step-4-grant-the-role-with-a-group).
+>
+> This requires an identity provider that supports custom claims. Hydra (used in the quickstart) needs a [token hook](https://www.ory.sh/docs/hydra/guides/claims-at-refresh) for custom claims. Keycloak, Auth0, and Azure AD support this natively.
+
+## Step 4: Create a Credential Source and Spec
 
 Create an AWS credential source with the service user's access keys and automatic rotation. The rotation period controls how often Warden rotates the source IAM access keys (creates a new key, waits for propagation, activates, deletes the old key):
 
@@ -218,7 +207,7 @@ warden cred source create aws-prod \
 
 > Set `-rotation-period=0` to disable rotation (not recommended for production). The IAM permissions for rotation are included in the prerequisite policy on the service user.
 
-Create credential specs for each database user / permission level. The `role_arn` points to the database IAM role from the prerequisites:
+Create credential specs for each database user / permission level:
 
 ```bash
 # Read-only spec
@@ -228,8 +217,7 @@ warden cred spec create rds-readonly \
   -config db_endpoint=mydb.abc123.us-east-1.rds.amazonaws.com \
   -config db_user=app_readonly \
   -config db_engine=postgres \
-  -config region=us-east-1 \
-  -config role_arn=arn:aws:iam::123456789:role/warden-rds-connect
+  -config region=us-east-1
 
 # Read-write spec
 warden cred spec create rds-readwrite \
@@ -238,8 +226,7 @@ warden cred spec create rds-readwrite \
   -config db_endpoint=mydb.abc123.us-east-1.rds.amazonaws.com \
   -config db_user=app_readwrite \
   -config db_engine=postgres \
-  -config region=us-east-1 \
-  -config role_arn=arn:aws:iam::123456789:role/warden-rds-connect
+  -config region=us-east-1
 ```
 
 For Aurora, use the cluster or reader endpoint:
@@ -254,20 +241,9 @@ warden cred spec create aurora-readonly \
   -config region=us-east-1
 ```
 
-For cross-account access, add `role_arn`:
+For a database in another AWS account, create a separate source holding the keys of a service user in that account: the token is signed by the source's own keys, not by an assumed role.
 
-```bash
-warden cred spec create rds-cross-account \
-  -source aws-prod \
-  -config mint_method=rds_iam_token \
-  -config db_endpoint=mydb.xyz789.eu-west-1.rds.amazonaws.com \
-  -config db_user=app_readonly \
-  -config db_engine=postgres \
-  -config region=eu-west-1 \
-  -config role_arn=arn:aws:iam::987654321:role/rds-cross-account
-```
-
-## Step 4: Create Grants on the Provider
+## Step 5: Create Grants on the Provider
 
 Grants map access paths to credential specs and include the database name in the connection string:
 
@@ -289,9 +265,9 @@ Verify:
 warden read rds/grants/readonly
 ```
 
-## Step 5: Create a Policy
+## Step 6: Create a Policy
 
-Control which grants each token can access:
+Control which grants each role can access:
 
 ```bash
 warden policy write rds-access - <<EOF
@@ -311,23 +287,18 @@ path "rds/access/*" {
 EOF
 ```
 
-## Step 6: Get a Connection String
+## Step 7: Get a Connection String
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
-Pass the JWT directly — no login step needed:
+Pass the JWT directly — no login step needed — and name the role with the `role` query parameter:
 
 ```bash
 curl -s -H "Authorization: Bearer $JWT_TOKEN" \
-  "${WARDEN_ADDR}/v1/rds/access/readonly" | jq
+  "${WARDEN_ADDR}/v1/rds/access/readonly?role=db-user" | jq
 ```
 
-The auth method's `default_role` determines which policies apply. To use a specific auth role, pass the `role` query parameter:
-
-```bash
-curl -s -H "Authorization: Bearer $JWT_TOKEN" \
-  "${WARDEN_ADDR}/v1/rds/access/readonly?role=data-team" | jq
-```
+An access path has no `default_role`: a request names its role with `?role=` or the `X-Warden-Role` header, or it is refused with `400`. An operator can present a service token or a ticket from `warden login` on `X-Warden-Token` instead of a JWT; Warden then skips implicit authentication and checks that token.
 
 Response:
 
@@ -345,12 +316,12 @@ The connection string is ready-to-use — no assembly required:
 **psql:**
 ```bash
 psql "$(curl -s -H "Authorization: Bearer $JWT_TOKEN" \
-  "${WARDEN_ADDR}/v1/rds/access/readonly" | jq -r .connection_string)"
+  "${WARDEN_ADDR}/v1/rds/access/readonly?role=db-user" | jq -r .connection_string)"
 ```
 
 **Go:**
 ```go
-req, _ := http.NewRequest("GET", wardenAddr+"/v1/rds/access/readonly", nil)
+req, _ := http.NewRequest("GET", wardenAddr+"/v1/rds/access/readonly?role=db-user", nil)
 req.Header.Set("Authorization", "Bearer "+jwtToken)
 
 resp, _ := http.DefaultClient.Do(req)
@@ -365,7 +336,7 @@ db, err := sql.Open("postgres", result["connection_string"].(string))
 import psycopg2, requests
 
 resp = requests.get(
-    f"{WARDEN_ADDR}/v1/rds/access/readonly",
+    f"{WARDEN_ADDR}/v1/rds/access/readonly?role=db-user",
     headers={"Authorization": f"Bearer {jwt_token}"},
 ).json()
 
@@ -375,7 +346,7 @@ conn = psycopg2.connect(resp["connection_string"])
 **Node.js:**
 ```javascript
 const { Client } = require('pg');
-const resp = await fetch(`${WARDEN_ADDR}/v1/rds/access/readonly`, {
+const resp = await fetch(`${WARDEN_ADDR}/v1/rds/access/readonly?role=db-user`, {
   headers: { 'Authorization': `Bearer ${jwtToken}` },
 }).then(r => r.json());
 

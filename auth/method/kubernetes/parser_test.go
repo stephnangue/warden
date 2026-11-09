@@ -54,7 +54,6 @@ func TestMapToKubernetesAuthConfig_AllFieldsRoundTrip(t *testing.T) {
 		"issuer":                 "https://kubernetes.default.svc",
 		"disable_iss_validation": false,
 		"token_ttl":              "45m",
-		"default_role":           "ops-reader",
 	}
 	cfg, err := mapToKubernetesAuthConfig(in)
 	if err != nil {
@@ -80,8 +79,5 @@ func TestMapToKubernetesAuthConfig_AllFieldsRoundTrip(t *testing.T) {
 	}
 	if cfg.TokenTTL != 45*time.Minute {
 		t.Errorf("token_ttl: %v", cfg.TokenTTL)
-	}
-	if cfg.DefaultRole != in["default_role"] {
-		t.Errorf("default_role: %q", cfg.DefaultRole)
 	}
 }

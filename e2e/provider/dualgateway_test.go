@@ -42,7 +42,8 @@ const (
 )
 
 // setupDualGateway mounts scaleway pointed at upstreamURL and rigs the agent leg
-// that lets a request through it: a cert role bound to a credential spec, and a
+// that lets a request through it: a role bound to a credential spec and granted
+// to the agent's certificate, and a
 // policy granting the gateway path.
 //
 // extraConfig is merged into the *mount-time* configuration, which is the point
@@ -95,12 +96,9 @@ func setupDualGateway(t *testing.T, port int, upstreamURL string, extraConfig ma
 	mustDG(t, port, "POST", "sys/policies/cbp/"+dgMount+"-access",
 		mustJSONBody(t, map[string]any{"policy": policy}), "create policy")
 
-	mustDG(t, port, "POST", "auth/cert/role/"+dgRole, mustJSONBody(t, map[string]any{
-		"allowed_common_names": []string{dgAgentCN},
-		"token_policies":       []string{dgMount + "-access"},
-		"cred_spec_name":       dgMount + "-cred",
-		"token_ttl":            3600,
-	}), "create cert role")
+	h.GrantRole(t, port, "auth/cert/", dgRole,
+		h.Role{Policies: []string{dgMount + "-access"}, CredSpec: dgMount + "-cred"},
+		h.Rule{"cn": {dgAgentCN}})
 
 	clientCertPEM, _ := h.GenerateClientCert(t, caCertPEM, caKey, dgAgentCN)
 	return clientCertPEM
@@ -111,8 +109,8 @@ func setupDualGateway(t *testing.T, port int, upstreamURL string, extraConfig ma
 // otherwise turn every later attempt into a 409 and hide the original failure.
 func teardownDualGateway(t *testing.T, port int) {
 	t.Helper()
+	h.RevokeRole(t, port, "auth/cert/", dgRole)
 	for _, p := range []string{
-		"auth/cert/role/" + dgRole,
 		"sys/policies/cbp/" + dgMount + "-access",
 		"sys/cred/specs/" + dgMount + "-cred",
 		"sys/cred/sources/" + dgMount + "-src",

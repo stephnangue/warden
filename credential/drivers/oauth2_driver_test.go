@@ -37,13 +37,14 @@ func TestOAuth2DriverFactory_SensitiveConfigFields(t *testing.T) {
 	f := &OAuth2DriverFactory{}
 	fields := f.SensitiveConfigFields()
 	assert.Contains(t, fields, "client_secret")
+	assert.Contains(t, fields, "private_key")
 	assert.Contains(t, fields, "ca_data")
-	assert.Len(t, fields, 2)
+	assert.Len(t, fields, 3)
 }
 
 func TestOAuth2DriverFactory_InferCredentialType(t *testing.T) {
 	f := &OAuth2DriverFactory{}
-	ct, err := f.InferCredentialType(map[string]string{})
+	ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{}))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeOAuthBearerToken, ct)
 }
@@ -53,22 +54,22 @@ func TestOAuth2DriverFactory_ValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr bool
 		errMsg  string
 	}{
 		{
 			name: "valid config",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":     "test-client-id",
 				"client_secret": "test-client-secret",
 				"token_url":     "https://auth.example.com/oauth/token",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "valid config with all optional fields",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":        "test-client-id",
 				"client_secret":    "test-client-secret",
 				"token_url":        "https://auth.example.com/oauth/token",
@@ -77,7 +78,7 @@ func TestOAuth2DriverFactory_ValidateConfig(t *testing.T) {
 				"verify_method":    "GET",
 				"auth_header_type": "bearer",
 				"display_name":     "MyProvider",
-			},
+			}),
 			wantErr: false,
 		},
 		{
@@ -85,41 +86,41 @@ func TestOAuth2DriverFactory_ValidateConfig(t *testing.T) {
 			// authorization_code flow keeps them on the spec, and presence is
 			// checked at mint time.
 			name: "client_id optional at source level",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_secret": "test-client-secret",
 				"token_url":     "https://auth.example.com/oauth/token",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "client_secret optional at source level",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id": "test-client-id",
 				"token_url": "https://auth.example.com/oauth/token",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "source with only token_url (creds on spec)",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://auth.example.com/oauth/token",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "valid auth_url for authorization_code",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://github.com/login/oauth/access_token",
 				"auth_url":  "https://github.com/login/oauth/authorize",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "auth_url SSRF-blocked (metadata address)",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://auth.example.com/oauth/token",
 				"auth_url":  "https://169.254.169.254/latest/meta-data/",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "must not target a loopback/private/link-local address",
 		},
@@ -127,133 +128,179 @@ func TestOAuth2DriverFactory_ValidateConfig(t *testing.T) {
 			// token_url is server-fetched (the client secret is POSTed there),
 			// so it must be SSRF-guarded too.
 			name: "token_url SSRF-blocked (private address)",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"token_url": "https://10.0.0.5/oauth/token",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "must not target a loopback/private/link-local address",
 		},
 		{
 			name: "missing token_url",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":     "test-client-id",
 				"client_secret": "test-client-secret",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "token_url",
 		},
 		{
 			name:    "missing all required",
-			config:  map[string]string{},
+			config:  credential.NewConfig(map[string]string{}),
 			wantErr: true,
 		},
 		{
 			name: "invalid token_url - http scheme",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":     "test-client-id",
 				"client_secret": "test-client-secret",
 				"token_url":     "http://example.com/token",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "must use https://",
 		},
 		{
 			name: "invalid token_url - no host",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":     "test-client-id",
 				"client_secret": "test-client-secret",
 				"token_url":     "https://",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "must include a host",
 		},
 		{
 			name: "invalid verify_url - http scheme",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":     "test-client-id",
 				"client_secret": "test-client-secret",
 				"token_url":     "https://auth.example.com/token",
 				"verify_url":    "http://api.example.com/me",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "must use https://",
 		},
 		{
 			name: "invalid verify_method",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":     "test-client-id",
 				"client_secret": "test-client-secret",
 				"token_url":     "https://auth.example.com/token",
 				"verify_method": "DELETE",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "verify_method must be GET or POST",
 		},
 		{
 			name: "invalid auth_header_type",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":        "test-client-id",
 				"client_secret":    "test-client-secret",
 				"token_url":        "https://auth.example.com/token",
 				"auth_header_type": "basic",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "auth_header_type must be one of",
 		},
 		{
 			name: "custom_header without auth_header_name",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":        "test-client-id",
 				"client_secret":    "test-client-secret",
 				"token_url":        "https://auth.example.com/token",
 				"auth_header_type": "custom_header",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "auth_header_name is required",
 		},
 		{
 			name: "custom_header with auth_header_name",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":        "test-client-id",
 				"client_secret":    "test-client-secret",
 				"token_url":        "https://auth.example.com/token",
 				"auth_header_type": "custom_header",
 				"auth_header_name": "X-Api-Key",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "valid config with token_param extra params",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":            "test-client-id",
 				"client_secret":        "test-client-secret",
 				"token_url":            "https://auth.example.com/token",
 				"token_param.resource": "urn:dtaccount:abc123",
 				"token_param.audience": "https://api.example.com",
-			},
+			}),
 			wantErr: false,
 		},
 		{
 			name: "token_param overriding grant_type",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":              "test-client-id",
 				"client_secret":          "test-client-secret",
 				"token_url":              "https://auth.example.com/token",
 				"token_param.grant_type": "password",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "token_param.grant_type cannot override core OAuth2 field",
 		},
 		{
 			name: "token_param overriding client_id",
-			config: map[string]string{
+			config: credential.NewConfig(map[string]string{
 				"client_id":             "test-client-id",
 				"client_secret":         "test-client-secret",
 				"token_url":             "https://auth.example.com/token",
 				"token_param.client_id": "override",
-			},
+			}),
 			wantErr: true,
 			errMsg:  "token_param.client_id cannot override core OAuth2 field",
+		},
+		{
+			// A keyless source: neither half of the client credential is stored.
+			name: "chained, no inline client credential",
+			config: credential.NewConfig(map[string]string{
+				"token_url":        "https://auth.example.com/token",
+				"secret_spec":      "idp-client-credential",
+				"secret_field":     "client_secret",
+				"secret_cache_ttl": "30m",
+			}),
+			wantErr: false,
+		},
+		{
+			name: "chained, client_secret still inline",
+			config: credential.NewConfig(map[string]string{
+				"token_url":     "https://auth.example.com/token",
+				"client_secret": "test-client-secret",
+				"secret_spec":   "idp-client-credential",
+			}),
+			wantErr: true,
+			errMsg:  "client_secret must be omitted when secret_spec is set",
+		},
+		{
+			// The id follows the secret: the two authenticate as a pair, so an id kept
+			// here would name one client while presenting another's.
+			name: "chained, client_id still inline",
+			config: credential.NewConfig(map[string]string{
+				"token_url":   "https://auth.example.com/token",
+				"client_id":   "test-client-id",
+				"secret_spec": "idp-client-credential",
+			}),
+			wantErr: true,
+			errMsg:  "client_id must be omitted when secret_spec is set",
+		},
+		{
+			// auth_method resolves spec-over-source; the spec side is caught by the
+			// config store, which never sees source config. Catching it here keeps a
+			// source from creating cleanly and failing every mint beneath it.
+			name: "chained, source-level authorization_code",
+			config: credential.NewConfig(map[string]string{
+				"token_url":   "https://auth.example.com/token",
+				"auth_method": "authorization_code",
+				"secret_spec": "idp-client-credential",
+			}),
+			wantErr: true,
+			errMsg:  "auth_method=authorization_code is not supported when secret_spec is set",
 		},
 	}
 
@@ -275,11 +322,11 @@ func TestOAuth2DriverFactory_ValidateConfig(t *testing.T) {
 func TestOAuth2DriverFactory_Create(t *testing.T) {
 	f := &OAuth2DriverFactory{}
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"client_id":     "test-id",
 		"client_secret": "test-secret",
 		"token_url":     "https://auth.example.com/token",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	require.NotNil(t, driver)
 	assert.Equal(t, credential.SourceTypeOAuth2, driver.Type())
@@ -293,7 +340,7 @@ func createTestOAuth2Driver(t *testing.T, config map[string]string) *OAuth2Drive
 	t.Helper()
 	f := &OAuth2DriverFactory{}
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	driver, err := f.Create(config, log)
+	driver, err := f.Create(credential.NewConfig(config), log)
 	require.NoError(t, err)
 	return driver.(*OAuth2Driver)
 }
@@ -362,11 +409,11 @@ func TestOAuth2Driver_MintCredential(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"client_id":     "test-client-id",
 				"client_secret": "test-client-secret",
 				"token_url":     server.URL,
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
@@ -374,13 +421,13 @@ func TestOAuth2Driver_MintCredential(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:   "test",
 		Type:   credential.TypeOAuthBearerToken,
-		Config: map[string]string{"scope": "read write"},
+		Config: credential.NewConfig(map[string]string{"scope": "read write"}),
 	}
 
 	rawData, _, ttl, leaseID, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "eyJ-test-access-token", rawData["api_key"])
-	assert.Equal(t, 3600*time.Second, ttl)
+	assert.Equal(t, 3600*time.Second-exchangedTokenBuffer, ttl, "the lease ends a buffer before the token does")
 	assert.Empty(t, leaseID)
 }
 
@@ -402,12 +449,12 @@ func TestOAuth2Driver_MintCredential_DefaultScope(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"client_id":      "test-id",
 				"client_secret":  "test-secret",
 				"token_url":      server.URL,
 				"default_scopes": "default-scope",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
@@ -415,13 +462,13 @@ func TestOAuth2Driver_MintCredential_DefaultScope(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:   "test",
 		Type:   credential.TypeOAuthBearerToken,
-		Config: map[string]string{},
+		Config: credential.NewConfig(map[string]string{}),
 	}
 
 	rawData, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "test-token", rawData["api_key"])
-	assert.Equal(t, 1800*time.Second, ttl)
+	assert.Equal(t, 1800*time.Second-exchangedTokenBuffer, ttl)
 }
 
 func TestOAuth2Driver_MintCredential_ExtraTokenParams(t *testing.T) {
@@ -449,13 +496,13 @@ func TestOAuth2Driver_MintCredential_ExtraTokenParams(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"client_id":            "test-id",
 				"client_secret":        "test-secret",
 				"token_url":            server.URL,
 				"token_param.resource": "urn:dtaccount:abc123",
 				"token_param.audience": "https://api.example.com",
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
@@ -463,7 +510,7 @@ func TestOAuth2Driver_MintCredential_ExtraTokenParams(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name:   "test",
 		Type:   credential.TypeOAuthBearerToken,
-		Config: map[string]string{},
+		Config: credential.NewConfig(map[string]string{}),
 	}
 
 	rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
@@ -484,34 +531,36 @@ func TestOAuth2Driver_MintCredential_NoExpiresIn(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"client_id":     "test-id",
 				"client_secret": "test-secret",
 				"token_url":     server.URL,
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
 
 	spec := &credential.CredSpec{
 		Name:   "test",
-		Config: map[string]string{},
+		Config: credential.NewConfig(map[string]string{}),
 	}
 
 	_, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
-	assert.Equal(t, time.Duration(0), ttl)
+	// With no expires_in the token was cached for the whole session and served
+	// past its expiry. It now takes the short fallback, less the buffer.
+	assert.Equal(t, exchangedTokenTTL-exchangedTokenBuffer, ttl)
 }
 
 func TestOAuth2Driver_MintCredential_MissingCredentials(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeOAuth2,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{})}
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing client_id or client_secret")
@@ -527,16 +576,16 @@ func TestOAuth2Driver_MintCredential_TokenEndpointError(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"client_id":     "bad-id",
 				"client_secret": "bad-secret",
 				"token_url":     server.URL,
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
 
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{})}
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "token exchange failed")
@@ -555,16 +604,16 @@ func TestOAuth2Driver_MintCredential_EmptyAccessToken(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"client_id":     "test-id",
 				"client_secret": "test-secret",
 				"token_url":     server.URL,
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
 
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{})}
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing access_token")
@@ -580,16 +629,16 @@ func TestOAuth2Driver_MintCredential_MalformedJSON(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"client_id":     "test-id",
 				"client_secret": "test-secret",
 				"token_url":     server.URL,
-			},
+			}),
 		},
 		httpClient: server.Client(),
 	}
 
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{})}
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode")
@@ -599,13 +648,13 @@ func TestOAuth2Driver_MintCredential_DisplayName(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"display_name": "PagerDuty",
-			},
+			}),
 		},
 	}
 
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{})}
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "PagerDuty OAuth2 source missing")
@@ -637,20 +686,20 @@ func TestOAuth2Driver_VerifySpec(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"client_id":     "test-id",
 				"client_secret": "test-secret",
 				"token_url":     tokenServer.URL,
 				"verify_url":    verifyServer.URL,
 				"verify_method": "GET",
-			},
+			}),
 		},
 		httpClient: tokenServer.Client(),
 	}
 	// Use the same TLS client for both servers
 	d.httpClient.Transport = tokenServer.Client().Transport
 
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{})}
 	err := d.VerifySpec(context.Background(), spec)
 	assert.NoError(t, err)
 }
@@ -669,16 +718,16 @@ func TestOAuth2Driver_VerifySpec_NoVerifyURL(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"client_id":     "test-id",
 				"client_secret": "test-secret",
 				"token_url":     tokenServer.URL,
-			},
+			}),
 		},
 		httpClient: tokenServer.Client(),
 	}
 
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{})}
 	err := d.VerifySpec(context.Background(), spec)
 	assert.NoError(t, err)
 }
@@ -687,11 +736,11 @@ func TestOAuth2Driver_VerifySpec_MintFails(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeOAuth2,
-			Config: map[string]string{}, // Missing credentials
+			Config: credential.NewConfig(map[string]string{}), // Missing credentials
 		},
 	}
 
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{})}
 	err := d.VerifySpec(context.Background(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "spec verification failed")
@@ -717,20 +766,20 @@ func TestOAuth2Driver_VerifySpec_CustomHeader(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"client_id":        "test-id",
 				"client_secret":    "test-secret",
 				"token_url":        tokenServer.URL,
 				"verify_url":       verifyServer.URL,
 				"auth_header_type": "custom_header",
 				"auth_header_name": "X-Api-Key",
-			},
+			}),
 		},
 		httpClient: tokenServer.Client(),
 	}
 	d.httpClient.Transport = tokenServer.Client().Transport
 
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{})}
 	err := d.VerifySpec(context.Background(), spec)
 	assert.NoError(t, err)
 }
@@ -754,19 +803,19 @@ func TestOAuth2Driver_VerifySpec_TokenAuthHeader(t *testing.T) {
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"client_id":        "test-id",
 				"client_secret":    "test-secret",
 				"token_url":        tokenServer.URL,
 				"verify_url":       verifyServer.URL,
 				"auth_header_type": "token",
-			},
+			}),
 		},
 		httpClient: tokenServer.Client(),
 	}
 	d.httpClient.Transport = tokenServer.Client().Transport
 
-	spec := &credential.CredSpec{Name: "test", Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "test", Config: credential.NewConfig(map[string]string{})}
 	err := d.VerifySpec(context.Background(), spec)
 	assert.NoError(t, err)
 }
@@ -778,7 +827,7 @@ func TestOAuth2Driver_VerifySpec_TokenAuthHeader(t *testing.T) {
 func TestBuildOAuth2AuthHeaders(t *testing.T) {
 	tests := []struct {
 		name          string
-		config        map[string]string
+		config        credential.Config
 		token         string
 		expectHeader  string
 		expectValue   string
@@ -786,28 +835,28 @@ func TestBuildOAuth2AuthHeaders(t *testing.T) {
 	}{
 		{
 			name:         "default bearer",
-			config:       map[string]string{},
+			config:       credential.NewConfig(map[string]string{}),
 			token:        "tok-123",
 			expectHeader: "Authorization",
 			expectValue:  "Bearer tok-123",
 		},
 		{
 			name:         "explicit bearer",
-			config:       map[string]string{"auth_header_type": "bearer"},
+			config:       credential.NewConfig(map[string]string{"auth_header_type": "bearer"}),
 			token:        "tok-123",
 			expectHeader: "Authorization",
 			expectValue:  "Bearer tok-123",
 		},
 		{
 			name:         "token type",
-			config:       map[string]string{"auth_header_type": "token"},
+			config:       credential.NewConfig(map[string]string{"auth_header_type": "token"}),
 			token:        "tok-123",
 			expectHeader: "Authorization",
 			expectValue:  "Token tok-123",
 		},
 		{
 			name:          "custom header",
-			config:        map[string]string{"auth_header_type": "custom_header", "auth_header_name": "X-Api-Key"},
+			config:        credential.NewConfig(map[string]string{"auth_header_type": "custom_header", "auth_header_name": "X-Api-Key"}),
 			token:         "tok-123",
 			expectHeader:  "X-Api-Key",
 			expectValue:   "tok-123",
@@ -908,13 +957,13 @@ func TestOAuth2Driver_ExchangeAuthorizationCode(t *testing.T) {
 	defer server.Close()
 
 	d := &OAuth2Driver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeOAuth2, Config: map[string]string{"token_url": server.URL}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeOAuth2, Config: credential.NewConfig(map[string]string{"token_url": server.URL})},
 		httpClient: server.Client(),
 	}
 	spec := &credential.CredSpec{
 		Name:   "gh",
 		Type:   credential.TypeOAuthBearerToken,
-		Config: map[string]string{"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret"},
+		Config: credential.NewConfig(map[string]string{"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret"}),
 	}
 
 	sealed, err := d.ExchangeAuthorizationCode(context.Background(), spec, "the-code", "http://127.0.0.1:8765/callback", "the-verifier")
@@ -936,8 +985,8 @@ func TestOAuth2Driver_ExchangeAuthorizationCode_ProviderError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"client_id": "cid", "client_secret": "csecret"}}
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": server.URL})}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{"client_id": "cid", "client_secret": "csecret"})}
 
 	_, err := d.ExchangeAuthorizationCode(context.Background(), spec, "bad", "http://127.0.0.1:1/cb", "")
 	require.Error(t, err)
@@ -952,8 +1001,8 @@ func TestOAuth2Driver_ExchangeAuthorizationCode_NoRefreshToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"client_id": "cid", "client_secret": "csecret"}}
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": server.URL})}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{"client_id": "cid", "client_secret": "csecret"})}
 
 	sealed, err := d.ExchangeAuthorizationCode(context.Background(), spec, "c", "http://127.0.0.1:1/cb", "")
 	require.NoError(t, err)
@@ -980,15 +1029,15 @@ func TestOAuth2Driver_MintFromRefreshToken_Rotating(t *testing.T) {
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": server.URL})}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-old",
-	}}
+	})}
 
 	rawData, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
 	assert.Equal(t, "at-new", rawData["api_key"])
-	assert.Equal(t, 28800*time.Second, ttl)
+	assert.Equal(t, 28800*time.Second-exchangedTokenBuffer, ttl)
 	// Rotated token is surfaced under the reserved key for the minting layer.
 	assert.Equal(t, "rt-new", rawData[credential.RawRotatedRefreshTokenKey])
 	// The reset refresh-token window is surfaced too, as a future RFC3339 expiry.
@@ -1011,10 +1060,10 @@ func TestOAuth2Driver_MintFromRefreshToken_RotatingWithoutExpiry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": server.URL})}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-old",
-	}}
+	})}
 
 	rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
@@ -1032,10 +1081,10 @@ func TestOAuth2Driver_MintFromRefreshToken_NonRotating(t *testing.T) {
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
-	spec := &credential.CredSpec{Name: "g", Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": server.URL})}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "g", Config: credential.NewConfig(map[string]string{
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-stable",
-	}}
+	})}
 
 	rawData, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
@@ -1045,8 +1094,8 @@ func TestOAuth2Driver_MintFromRefreshToken_NonRotating(t *testing.T) {
 }
 
 func TestOAuth2Driver_MintFromRefreshToken_NotConnected(t *testing.T) {
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": "https://example.invalid/token"}}, httpClient: http.DefaultClient}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret"}}
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": "https://example.invalid/token"})}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret"})}
 
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
@@ -1055,8 +1104,8 @@ func TestOAuth2Driver_MintFromRefreshToken_NotConnected(t *testing.T) {
 
 func TestOAuth2Driver_MintFromRefreshToken_StaticAccessToken(t *testing.T) {
 	// No refresh_token but a sealed static access_token (no-refresh provider): no HTTP call.
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": "https://example.invalid/token"}}, httpClient: http.DefaultClient}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"auth_method": "authorization_code", "access_token": "static-token"}}
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": "https://example.invalid/token"})}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{"auth_method": "authorization_code", "access_token": "static-token"})}
 
 	rawData, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
@@ -1073,10 +1122,10 @@ func TestOAuth2Driver_MintFromRefreshToken_InvalidGrant_HTTP400(t *testing.T) {
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": server.URL})}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-dead",
-	}}
+	})}
 
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
@@ -1091,10 +1140,10 @@ func TestOAuth2Driver_MintFromRefreshToken_InvalidGrant_HTTP200(t *testing.T) {
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": server.URL})}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt-dead",
-	}}
+	})}
 
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
@@ -1110,10 +1159,10 @@ func TestOAuth2Driver_MintFromRefreshToken_NonGrantError_NotRejection(t *testing
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": server.URL})}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt",
-	}}
+	})}
 
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
@@ -1130,10 +1179,10 @@ func TestOAuth2Driver_MintFromRefreshToken_InvalidClient_NotRejection(t *testing
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": server.URL})}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "wrong", "refresh_token": "rt",
-	}}
+	})}
 
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
@@ -1150,10 +1199,10 @@ func TestOAuth2Driver_MintFromRefreshToken_SlowDown400_NotRejection(t *testing.T
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: server.Client()}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": server.URL})}, httpClient: server.Client()}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{
 		"auth_method": "authorization_code", "client_id": "cid", "client_secret": "csecret", "refresh_token": "rt",
-	}}
+	})}
 
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
@@ -1161,12 +1210,12 @@ func TestOAuth2Driver_MintFromRefreshToken_SlowDown400_NotRejection(t *testing.T
 }
 
 func TestOAuth2Driver_BuildAuthorizeURL(t *testing.T) {
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{
 		"auth_url": "https://github.com/login/oauth/authorize",
-	}}}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+	})}}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{
 		"auth_method": "authorization_code", "client_id": "cid", "scopes": "repo,read:org",
-	}}
+	})}
 
 	raw, err := d.BuildAuthorizeURL(spec, "http://127.0.0.1:8765/callback", "the-state", "the-challenge")
 	require.NoError(t, err)
@@ -1185,8 +1234,8 @@ func TestOAuth2Driver_BuildAuthorizeURL(t *testing.T) {
 }
 
 func TestOAuth2Driver_BuildAuthorizeURL_MissingAuthURL(t *testing.T) {
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{}}}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"client_id": "cid"}}
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{})}}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{"client_id": "cid"})}
 
 	_, err := d.BuildAuthorizeURL(spec, "http://127.0.0.1:1/cb", "s", "c")
 	require.Error(t, err)
@@ -1194,12 +1243,12 @@ func TestOAuth2Driver_BuildAuthorizeURL_MissingAuthURL(t *testing.T) {
 }
 
 func TestOAuth2Driver_BuildAuthorizeURL_PKCEDisabled(t *testing.T) {
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{
 		"auth_url": "https://github.com/login/oauth/authorize",
-	}}}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+	})}}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{
 		"auth_method": "authorization_code", "client_id": "cid", "pkce": "false",
-	}}
+	})}
 
 	raw, err := d.BuildAuthorizeURL(spec, "http://127.0.0.1:8765/callback", "s", "the-challenge")
 	require.NoError(t, err)
@@ -1212,10 +1261,10 @@ func TestOAuth2Driver_BuildAuthorizeURL_PKCEDisabled(t *testing.T) {
 
 func TestOAuth2Driver_MintFromRefreshToken_StaticAccessToken_Expiring(t *testing.T) {
 	exp := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": "https://example.invalid/token"}}, httpClient: http.DefaultClient}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": "https://example.invalid/token"})}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{
 		"auth_method": "authorization_code", "access_token": "static-token", "access_token_expires_at": exp,
-	}}
+	})}
 
 	rawData, _, ttl, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
@@ -1227,10 +1276,10 @@ func TestOAuth2Driver_MintFromRefreshToken_StaticAccessToken_Expiring(t *testing
 func TestOAuth2Driver_MintFromRefreshToken_MissingClientCreds(t *testing.T) {
 	// A connected spec (refresh_token sealed) but no client credentials must fail
 	// fast with a clear error instead of a wasted token-endpoint round-trip.
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": "https://example.invalid/token"}}, httpClient: http.DefaultClient}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": "https://example.invalid/token"})}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{
 		"auth_method": "authorization_code", "refresh_token": "rt",
-	}}
+	})}
 
 	_, _, _, _, err := d.MintCredential(context.Background(), spec)
 	require.Error(t, err)
@@ -1253,8 +1302,8 @@ func TestOAuth2Driver_ExtractMetadata_JWTDefaultSub(t *testing.T) {
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: http.DefaultClient}
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"client_id": "c", "client_secret": "x"}}
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": server.URL})}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"client_id": "c", "client_secret": "x"})}
 
 	_, metadata, _, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
@@ -1271,10 +1320,10 @@ func TestOAuth2Driver_ExtractMetadata_JWTConfiguredFields(t *testing.T) {
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{
 		"token_url": server.URL, "metadata_fields": "sub,email",
-	}}, httpClient: http.DefaultClient}
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"client_id": "c", "client_secret": "x"}}
+	})}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"client_id": "c", "client_secret": "x"})}
 
 	_, metadata, _, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
@@ -1298,10 +1347,10 @@ func TestOAuth2Driver_ExtractMetadata_Introspection(t *testing.T) {
 	}))
 	defer tokenSrv.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{
 		"token_url": tokenSrv.URL, "introspection_url": userinfo.URL, "metadata_fields": "login,email,id",
-	}}, httpClient: http.DefaultClient}
-	spec := &credential.CredSpec{Name: "gh", Config: map[string]string{"client_id": "c", "client_secret": "x"}}
+	})}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "gh", Config: credential.NewConfig(map[string]string{"client_id": "c", "client_secret": "x"})}
 
 	_, metadata, _, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
@@ -1318,8 +1367,8 @@ func TestOAuth2Driver_ExtractMetadata_OpaqueNoIntrospection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": server.URL}}, httpClient: http.DefaultClient}
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{"client_id": "c", "client_secret": "x"}}
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": server.URL})}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"client_id": "c", "client_secret": "x"})}
 
 	_, metadata, _, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
@@ -1328,10 +1377,10 @@ func TestOAuth2Driver_ExtractMetadata_OpaqueNoIntrospection(t *testing.T) {
 
 func TestOAuth2DriverFactory_ValidateConfig_IntrospectionURL_SSRF(t *testing.T) {
 	f := &OAuth2DriverFactory{}
-	err := f.ValidateConfig(map[string]string{
+	err := f.ValidateConfig(credential.NewConfig(map[string]string{
 		"token_url":         "https://auth.example.com/token",
 		"introspection_url": "https://169.254.169.254/latest/meta-data/",
-	})
+	}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must not target a loopback/private/link-local address")
 }
@@ -1351,12 +1400,12 @@ func TestOAuth2Driver_ExtractMetadata_IntrospectionURL_SpecLevelIgnored(t *testi
 	}))
 	defer tokenSrv.Close()
 
-	d := &OAuth2Driver{credSource: &credential.CredSource{Config: map[string]string{"token_url": tokenSrv.URL}}, httpClient: http.DefaultClient}
-	spec := &credential.CredSpec{Name: "s", Config: map[string]string{
+	d := &OAuth2Driver{credSource: &credential.CredSource{Config: credential.NewConfig(map[string]string{"token_url": tokenSrv.URL})}, httpClient: http.DefaultClient}
+	spec := &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{
 		"client_id": "c", "client_secret": "x",
 		"introspection_url": userinfo.URL, // spec-level — must be ignored
 		"metadata_fields":   "login",
-	}}
+	})}
 
 	_, metadata, _, _, err := d.MintCredential(context.Background(), spec)
 	require.NoError(t, err)
@@ -1364,48 +1413,332 @@ func TestOAuth2Driver_ExtractMetadata_IntrospectionURL_SpecLevelIgnored(t *testi
 	assert.Nil(t, metadata, "opaque token + no source introspection_url → no metadata")
 }
 
-// TestOAuth2Driver_MintFromSecret covers the ChainedSecretMinter path: minting a
-// Slack-style access token from a refresh token supplied as chained secret
-// material (e.g. a per-user refresh token read from Vault), not from spec config.
-func TestOAuth2Driver_MintFromSecret(t *testing.T) {
+// chainedClientCredential builds the payload a referenced spec yields for a keyless
+// oauth2 source: both halves together, the secret named by secret_field.
+func chainedClientCredential(clientID, secret string) credential.SecretMaterial {
+	return credential.SecretMaterial{
+		Data:  map[string]string{"client_id": clientID, "client_secret": secret},
+		Field: "client_secret",
+	}
+}
+
+// keylessOAuth2Driver builds a driver over a source that stores neither half of the
+// client credential — everything comes from the fetched payload.
+func keylessOAuth2Driver(t *testing.T, tokenURL string, client *http.Client) *OAuth2Driver {
+	t.Helper()
+	return &OAuth2Driver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeOAuth2,
+			Config: credential.NewConfig(map[string]string{
+				"token_url":   tokenURL,
+				"secret_spec": "idp-client-credential",
+			}),
+		},
+		httpClient: client,
+	}
+}
+
+func TestOAuth2Driver_MintFromSecret_ChainedClientCredential(t *testing.T) {
+	var gotForm url.Values
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, r.ParseForm())
-		assert.Equal(t, "refresh_token", r.Form.Get("grant_type"))
-		assert.Equal(t, "chained-refresh-token", r.Form.Get("refresh_token"))
-		assert.Equal(t, "test-id", r.Form.Get("client_id"))
+		gotForm = r.Form
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token": "slack-access-token",
+			"access_token": "pagerduty-access-token",
 			"token_type":   "Bearer",
 			"expires_in":   3600,
 		})
 	}))
 	defer server.Close()
 
+	d := keylessOAuth2Driver(t, server.URL, server.Client())
+	d.credSource.Config = d.credSource.Config.With("default_scopes", "read")
+	d.credSource.Config = d.credSource.Config.With("token_param.account", "acct-1")
+	spec := &credential.CredSpec{Name: "pagerduty-api", Type: credential.TypeOAuthBearerToken, Config: credential.NewConfig(map[string]string{})}
+
+	rawData, _, ttl, _, err := d.MintFromSecret(context.Background(), spec, chainedClientCredential("agent-client-id", "agent-client-secret"))
+	require.NoError(t, err)
+	assert.Equal(t, "pagerduty-access-token", rawData["api_key"])
+	assert.Equal(t, 3600*time.Second-exchangedTokenBuffer, ttl)
+
+	// The pair travels together, and the rest of the source config still applies.
+	assert.Equal(t, "client_credentials", gotForm.Get("grant_type"))
+	assert.Equal(t, "agent-client-id", gotForm.Get("client_id"))
+	assert.Equal(t, "agent-client-secret", gotForm.Get("client_secret"))
+	assert.Equal(t, "read", gotForm.Get("scope"))
+	assert.Equal(t, "acct-1", gotForm.Get("account"))
+}
+
+// The pair is resolved per mint, not pinned to the source, so one source and one spec
+// serve a distinct OAuth client per caller.
+func TestOAuth2Driver_MintFromSecret_PairIsPerMint(t *testing.T) {
+	var seen []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		seen = append(seen, r.Form.Get("client_id")+":"+r.Form.Get("client_secret"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "expires_in": 60})
+	}))
+	defer server.Close()
+
+	d := keylessOAuth2Driver(t, server.URL, server.Client())
+	spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: credential.NewConfig(map[string]string{})}
+
+	for _, agent := range []string{"alice", "bob"} {
+		_, _, _, _, err := d.MintFromSecret(context.Background(), spec, chainedClientCredential(agent+"-id", agent+"-secret"))
+		require.NoError(t, err)
+	}
+	assert.Equal(t, []string{"alice-id:alice-secret", "bob-id:bob-secret"}, seen)
+}
+
+func TestOAuth2Driver_MintFromSecret_IncompletePayload(t *testing.T) {
+	// No request must be sent for any of these — the payload is judged first.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("token endpoint must not be called for an incomplete payload")
+	}))
+	defer server.Close()
+
+	d := keylessOAuth2Driver(t, server.URL, server.Client())
+	spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: credential.NewConfig(map[string]string{})}
+
+	tests := []struct {
+		name     string
+		material credential.SecretMaterial
+		errMsg   string
+	}{
+		{
+			// A single-key payload resolves its lone key as the secret field; without
+			// the guard the id would be spent as both halves.
+			name:     "id resolved as the secret field",
+			material: credential.SecretMaterial{Data: map[string]string{"client_id": "abc"}, Field: "client_id"},
+			errMsg:   "'client_id', which names the id and never the secret",
+		},
+		{
+			name:     "named field empty",
+			material: credential.SecretMaterial{Data: map[string]string{"client_id": "abc", "client_secret": ""}, Field: "client_secret"},
+			errMsg:   `secret_field "client_secret" is empty or absent`,
+		},
+		{
+			// A resolved field that named nothing is a misconfigured source, not an
+			// invitation to look elsewhere.
+			name:     "named field absent, conventional key present",
+			material: credential.SecretMaterial{Data: map[string]string{"client_id": "abc", "client_secret": "s"}, Field: "secret"},
+			errMsg:   `secret_field "secret" is empty or absent`,
+		},
+		{
+			name:     "no secret at all",
+			material: credential.SecretMaterial{Data: map[string]string{"client_id": "abc"}},
+			errMsg:   "no client secret in fetched secret material",
+		},
+		{
+			name:     "secret without an id",
+			material: credential.SecretMaterial{Data: map[string]string{"client_secret": "s"}, Field: "client_secret"},
+			errMsg:   "no client id in fetched secret material",
+		},
+		{
+			name:     "empty material",
+			material: credential.SecretMaterial{},
+			errMsg:   "no client secret in fetched secret material",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, _, err := d.MintFromSecret(context.Background(), spec, tt.material)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errMsg)
+			// The sentinel asks the manager to refetch once: a cached payload that
+			// predates a key it now has to hold should not fail for its whole TTL.
+			assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+		})
+	}
+}
+
+// With no secret_field resolved at all, the conventional key is the fallback.
+func TestOAuth2Driver_MintFromSecret_ConventionalKeys(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Equal(t, "conv-id", r.Form.Get("client_id"))
+		assert.Equal(t, "conv-secret", r.Form.Get("client_secret"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "expires_in": 60})
+	}))
+	defer server.Close()
+
+	d := keylessOAuth2Driver(t, server.URL, server.Client())
+	spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: credential.NewConfig(map[string]string{})}
+
+	_, _, _, _, err := d.MintFromSecret(context.Background(), spec,
+		credential.SecretMaterial{Data: map[string]string{"client_id": "conv-id", "client_secret": "conv-secret"}})
+	require.NoError(t, err)
+}
+
+func TestOAuth2Driver_MintFromSecret_RejectionSentinel(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantsRetry bool
+	}{
+		{
+			name:       "invalid_client at 400",
+			status:     http.StatusBadRequest,
+			body:       `{"error":"invalid_client","error_description":"bad secret"}`,
+			wantsRetry: true,
+		},
+		{
+			name:       "invalid_client at 401",
+			status:     http.StatusUnauthorized,
+			body:       `{"error":"invalid_client"}`,
+			wantsRetry: true,
+		},
+		{
+			// RFC 6749 §5.2: a 401 at the token endpoint is client-authentication
+			// specific, so a nonstandard IdP omitting the code still means the pair.
+			name:       "bare 401 with no code",
+			status:     http.StatusUnauthorized,
+			body:       `not json`,
+			wantsRetry: true,
+		},
+		{
+			// A bare 400 is far more likely invalid_scope or unsupported_grant_type;
+			// refetching the secret cannot fix either.
+			name:       "bare 400 with no code",
+			status:     http.StatusBadRequest,
+			body:       `not json`,
+			wantsRetry: false,
+		},
+		{
+			name:       "invalid_scope",
+			status:     http.StatusBadRequest,
+			body:       `{"error":"invalid_scope"}`,
+			wantsRetry: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			d := keylessOAuth2Driver(t, server.URL, server.Client())
+			spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: credential.NewConfig(map[string]string{})}
+
+			_, _, _, _, err := d.MintFromSecret(context.Background(), spec, chainedClientCredential("id", "stale-secret"))
+			require.Error(t, err)
+			if tt.wantsRetry {
+				assert.ErrorIs(t, err, credential.ErrChainedSecretRejected)
+			} else {
+				assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+			}
+		})
+	}
+}
+
+// The consent steps run without a caller, so they cannot fetch the chained pair.
+// Validation refuses the combination; this is the guard behind it.
+func TestOAuth2Driver_MintFromSecret_AuthorizationCodeRejected(t *testing.T) {
+	d := keylessOAuth2Driver(t, "https://auth.example.com/token", nil)
+	spec := &credential.CredSpec{
+		Name: "api", Type: credential.TypeOAuthBearerToken,
+		Config: credential.NewConfig(map[string]string{"auth_method": "authorization_code"}),
+	}
+
+	_, _, _, _, err := d.MintFromSecret(context.Background(), spec, chainedClientCredential("id", "secret"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "supports auth_method=client_credentials only")
+	// A source-config error: refetching cannot change the answer, so the manager must
+	// not be asked to try again.
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
+
+// Chaining on an oauth2 spec used to mean "the material is a refresh token". A spec
+// written before that changed still carries the key; say what has to move.
+func TestOAuth2Driver_MintFromSecret_SpecLevelRefIsRetired(t *testing.T) {
+	d := keylessOAuth2Driver(t, "https://auth.example.com/token", nil)
+	spec := &credential.CredSpec{
+		Name: "slack-access", Type: credential.TypeOAuthBearerToken,
+		Config: credential.NewConfig(map[string]string{"secret_spec": "user-refresh-token"}),
+	}
+
+	_, _, _, _, err := d.MintFromSecret(context.Background(), spec,
+		credential.SecretMaterial{Data: map[string]string{"refresh_token": "rt"}, Field: "refresh_token"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "chaining a refresh token is no longer supported")
+	assert.Contains(t, err.Error(), "belongs on the source")
+}
+
+// A chained source holds no client credential, so the direct path has nothing to mint
+// with; fail closed naming the cause rather than reporting a missing pair.
+func TestOAuth2Driver_MintCredential_ChainedSourceFailsClosed(t *testing.T) {
+	d := keylessOAuth2Driver(t, "https://auth.example.com/token", nil)
+	spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: credential.NewConfig(map[string]string{})}
+
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must mint from fetched secret material, not directly")
+}
+
+// The consent steps run on the system backend with no caller, so a chained source must
+// refuse them outright: without this an operator could complete a whole consent dance and
+// seal tokens that no mint could ever spend.
+func TestOAuth2Driver_ConsentRefusedOnChainedSource(t *testing.T) {
+	d := keylessOAuth2Driver(t, "https://auth.example.com/token", nil)
+	d.credSource.Config = d.credSource.Config.With("auth_url", "https://auth.example.com/authorize")
+	spec := &credential.CredSpec{
+		Name: "api", Type: credential.TypeOAuthBearerToken,
+		Config: credential.NewConfig(map[string]string{"auth_method": "authorization_code"}),
+	}
+
+	_, err := d.BuildAuthorizeURL(spec, "http://127.0.0.1:9999/cb", "state", "challenge")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot fetch the chained client credential")
+
+	_, err = d.ExchangeAuthorizationCode(context.Background(), spec, "code", "http://127.0.0.1:9999/cb", "verifier")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot fetch the chained client credential")
+}
+
+// The rejection sentinel belongs to the chained path alone: a non-chained mint that the
+// endpoint refuses must not ask the manager to evict a secret it never fetched.
+func TestOAuth2Driver_InvalidClientIsNotASentinelWhenUnchained(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"invalid_client"}`))
+	}))
+	defer server.Close()
+
 	d := &OAuth2Driver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeOAuth2,
-			Config: map[string]string{
-				"client_id":     "test-id",
-				"client_secret": "test-secret",
-				"token_url":     server.URL,
-			},
+			Config: credential.NewConfig(map[string]string{
+				"client_id": "id", "client_secret": "secret", "token_url": server.URL,
+			}),
 		},
 		httpClient: server.Client(),
 	}
-	spec := &credential.CredSpec{Name: "slack-access", Type: credential.TypeOAuthBearerToken, Config: map[string]string{}}
+	spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: credential.NewConfig(map[string]string{})}
 
-	t.Run("mints access token from chained refresh token", func(t *testing.T) {
-		material := credential.SecretMaterial{Data: map[string]string{"refresh_token": "chained-refresh-token"}, Field: "refresh_token"}
-		rawData, _, ttl, _, err := d.MintFromSecret(context.Background(), spec, material)
-		require.NoError(t, err)
-		assert.Equal(t, "slack-access-token", rawData["api_key"])
-		assert.Equal(t, 3600*time.Second, ttl)
-	})
+	_, _, _, _, err := d.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
 
-	t.Run("empty material fails closed", func(t *testing.T) {
-		_, _, _, _, err := d.MintFromSecret(context.Background(), spec, credential.SecretMaterial{})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no refresh token")
-	})
+// Config drifting past validation must not present a pair half from config and half
+// from the chain.
+func TestOAuth2Driver_MintFromSecret_InlinePairRefused(t *testing.T) {
+	d := keylessOAuth2Driver(t, "https://auth.example.com/token", nil)
+	d.credSource.Config = d.credSource.Config.With("client_id", "stale-inline-id")
+	spec := &credential.CredSpec{Name: "api", Type: credential.TypeOAuthBearerToken, Config: credential.NewConfig(map[string]string{})}
+
+	_, _, _, _, err := d.MintFromSecret(context.Background(), spec, chainedClientCredential("chained-id", "chained-secret"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not be configured when secret_spec is set")
 }

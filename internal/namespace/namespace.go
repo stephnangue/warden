@@ -33,6 +33,12 @@ type Namespace struct {
 	Locked         bool              `json:"locked"`
 	UnlockKey      string            `json:"unlock_key,omitempty"`
 	CustomMetadata map[string]string `json:"custom_metadata,omitempty"`
+
+	// EnableBuiltinRoles makes the built-in operator roles resolvable in this
+	// namespace. Written by the parent through sys/namespaces, never
+	// inherited by children. The root namespace has them always and does not
+	// read this field.
+	EnableBuiltinRoles bool `json:"enable_builtin_roles,omitempty"`
 }
 
 // RootNamespace is the root namespace singleton.
@@ -57,11 +63,12 @@ func (n *Namespace) String() string {
 // If withUnlock is true, the UnlockKey is included in the clone.
 func (n *Namespace) Clone(withUnlock bool) *Namespace {
 	clone := &Namespace{
-		ID:      n.ID,
-		UUID:    n.UUID,
-		Path:    n.Path,
-		Tainted: n.Tainted,
-		Locked:  n.Locked,
+		ID:                 n.ID,
+		UUID:               n.UUID,
+		Path:               n.Path,
+		Tainted:            n.Tainted,
+		Locked:             n.Locked,
+		EnableBuiltinRoles: n.EnableBuiltinRoles,
 	}
 
 	if withUnlock {
@@ -96,6 +103,13 @@ func (n *Namespace) HasParent(parent *Namespace) bool {
 	}
 }
 
+// Within reports whether ns is tokenNs or one of its descendants: the
+// namespaces a token issued in tokenNs may act in. Every token kind is checked
+// against this one rule.
+func Within(ns, tokenNs *Namespace) bool {
+	return ns.UUID == tokenNs.UUID || ns.HasParent(tokenNs)
+}
+
 // ParentPath returns the path of the parent namespace and whether a parent exists.
 func (n *Namespace) ParentPath() (string, bool) {
 	return ParentOf(n.Path)
@@ -109,8 +123,13 @@ func (n *Namespace) Validate() error {
 	if !strings.HasSuffix(n.Path, "/") {
 		return fmt.Errorf("namespace path %q must end with /", n.Path)
 	}
-	if strings.Contains(n.Path, "..") {
-		return fmt.Errorf("namespace path %q must not contain '..'", n.Path)
+	for _, segment := range strings.Split(strings.TrimSuffix(n.Path, "/"), "/") {
+		switch segment {
+		case "":
+			return fmt.Errorf("namespace path %q must not contain an empty segment", n.Path)
+		case ".", "..":
+			return fmt.Errorf("namespace path %q must not contain a %q segment", n.Path, segment)
+		}
 	}
 	return nil
 }

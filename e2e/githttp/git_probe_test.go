@@ -114,15 +114,20 @@ func TestGitPerUserAttribution(t *testing.T) {
 // agent on X-Warden-Agent-Token is authenticated rather than passed through, so
 // no upstream response will be relayed. Warden must issue the challenge itself,
 // or git is told a request failed with no indication that retrying would help.
+//
+// It then completes the exchange as git does: the retry carries the role as the
+// Basic username (and the user credential as the password), the agent still on
+// its header, and is granted the role and served.
 func TestGitHeaderAgentProbeIsChallenged(t *testing.T) {
 	ensureEnv(t)
 	defer restoreEnv(t)
 
 	// Repoint the agent leg at JWT so the header channel is the one in play.
 	h.SetGitAgentPath(t, leaderPort, upstream.URL, "auth/jwt/", h.GitUserAuthMount, "")
+	agentJWT := h.GetDefaultJWT(t)
 
 	status, body, respHeaders := h.DoRequestWithResponseHeaders(t, "GET", gitURL(),
-		map[string]string{"X-Warden-Agent-Token": h.GetDefaultJWT(t)}, "")
+		map[string]string{"X-Warden-Agent-Token": agentJWT}, "")
 
 	require.Equal(t, http.StatusUnauthorized, status,
 		"a probe with no resolvable role must fail: %s", string(body))
@@ -132,6 +137,15 @@ func TestGitHeaderAgentProbeIsChallenged(t *testing.T) {
 
 	assert.Empty(t, upstream.Requests(),
 		"an authenticated agent must not be passed through to the upstream")
+
+	status, body = h.DoRequest(t, "GET", gitURL(), map[string]string{
+		"X-Warden-Agent-Token": agentJWT,
+		"Authorization":        basicAuth(h.GitAgentJWTRole, h.UserJWT(t)),
+	}, "")
+	require.Equal(t, http.StatusOK, status,
+		"the retry with the role as the Basic username must be served: %s", string(body))
+	assert.Equal(t, basicAuth("x-access-token", h.GitPAT), upstream.Last(t).Authorization,
+		"the retry reaches the upstream with the credential minted for the role")
 }
 
 // TestGitProbeCompatibilityOffUserLeg pins the unchanged behaviour of a mount

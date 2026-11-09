@@ -225,6 +225,32 @@ func TestErrorResponse(t *testing.T) {
 	assert.Equal(t, err, resp.Err)
 }
 
+func TestErrorMessages(t *testing.T) {
+	denied := fmt.Errorf("role %q is not assumable: %w", "ops", sdklogical.ErrPermissionDenied)
+	gathered := multierror.Append(nil, denied)
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want []string
+	}{
+		{"nil", nil, nil},
+		{"plain error", errors.New("plain"), []string{"plain"}},
+		{"one gathered error reads as itself", gathered, []string{denied.Error()}},
+		{"several gathered errors are each kept", multierror.Append(errors.New("first"), errors.New("second")), []string{"first", "second"}},
+		{"nested multierrors flatten", &multierror.Error{Errors: []error{&multierror.Error{Errors: []error{errors.New("inner")}}, errors.New("outer")}}, []string{"inner", "outer"}},
+		{"an empty multierror keeps its text", &multierror.Error{}, []string{(&multierror.Error{}).Error()}},
+		{"a wrapped multierror keeps its context", fmt.Errorf("context: %w", gathered), []string{fmt.Errorf("context: %w", gathered).Error()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ErrorMessages(tc.err))
+		})
+	}
+
+	// Unpacking the messages leaves the status alone.
+	assert.Equal(t, http.StatusForbidden, ErrorResponse(gathered).StatusCode)
+}
+
 // --- BackendClass tests ---
 
 func TestBackendClass_String(t *testing.T) {

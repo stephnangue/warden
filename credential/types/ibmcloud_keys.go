@@ -40,9 +40,9 @@ func (t *IBMCloudKeysCredType) ConfigSchema() []*credential.FieldValidator {
 			Example("eyJraWQiOiIyMDI..."),
 
 		credential.StringField("mint_method").
-			OneOf("iam_with_cos", "dynamic_ibm").
-			Describe("Mint method for credential minting").
-			Example("iam_with_cos"),
+			OneOf("iam_token", "access_keys", "dynamic_ibm").
+			Describe("Mint method for credential minting; 'iam_token' (or omitted) on an ibm source is the bearer-only API-mode spec").
+			Example("access_keys"),
 
 		// Dynamic IBM fields (for Vault IBM secrets engine)
 		credential.StringField("ibm_mount").
@@ -60,7 +60,7 @@ func (t *IBMCloudKeysCredType) ConfigSchema() []*credential.FieldValidator {
 }
 
 // ValidateConfig validates the Config for an IBM Cloud credential spec
-func (t *IBMCloudKeysCredType) ValidateConfig(config map[string]string, sourceType string) error {
+func (t *IBMCloudKeysCredType) ValidateConfig(config credential.Config, sourceType string) error {
 	switch sourceType {
 	case credential.SourceTypeVault, credential.SourceTypeIBM:
 		// Supported
@@ -75,25 +75,62 @@ func (t *IBMCloudKeysCredType) ValidateConfig(config map[string]string, sourceTy
 
 	switch sourceType {
 	case credential.SourceTypeVault:
-		if config["mint_method"] != "dynamic_ibm" {
-			return fmt.Errorf("'mint_method' must be 'dynamic_ibm' for vault source, got: %s", config["mint_method"])
+		if config.Get("mint_method") != "dynamic_ibm" {
+			return fmt.Errorf("'mint_method' must be 'dynamic_ibm' for vault source, got: %s", config.Get("mint_method"))
 		}
-		if config["ibm_mount"] == "" {
+		if config.Get("ibm_mount") == "" {
 			return fmt.Errorf("'ibm_mount' is required when mint_method is dynamic_ibm")
 		}
-		if config["role_name"] == "" {
+		if config.Get("role_name") == "" {
 			return fmt.Errorf("'role_name' is required when mint_method is dynamic_ibm")
 		}
 	case credential.SourceTypeIBM:
-		if config["mint_method"] != "iam_with_cos" && config["mint_method"] != "" {
-			return fmt.Errorf("'mint_method' must be 'iam_with_cos' for ibm source, got: %s", config["mint_method"])
-		}
-		// COS HMAC keys are optional — API-only mode is valid
-		if config["access_key_id"] != "" && config["secret_access_key"] == "" {
-			return fmt.Errorf("'secret_access_key' is required when 'access_key_id' is set")
-		}
-		if config["secret_access_key"] != "" && config["access_key_id"] == "" {
-			return fmt.Errorf("'access_key_id' is required when 'secret_access_key' is set")
+		switch config.Get("mint_method") {
+		case "", "iam_token":
+			// Bearer-only: the IAM token minted from the source, which is the
+			// gateway's API mode. iam_token is accepted explicitly as well as by
+			// omission — the driver's own errors name it, and a spec that must be
+			// typed ibmcloud_keys for the gateway to accept it should be able to
+			// say which method it uses rather than relying on a silent default.
+			//
+			// An inline COS pair was only ever consumed by iam_with_cos, and that
+			// method existed to serve a standing secret out of spec config.
+			for _, key := range []string{"access_key_id", "secret_access_key"} {
+				if config.Get(key) != "" {
+					return fmt.Errorf("'%s' must be omitted; a COS pair is served by an access_keys spec from its %s, never stored inline",
+						key, credential.ConfigSecretSpec)
+				}
+			}
+			// The grant runs with the source's api key, so a reference here would
+			// describe a secret this spec never spends. On an ibm source a
+			// spec-level reference means access_keys and nothing else.
+			if config.Get(credential.ConfigSecretSpec) != "" {
+				return fmt.Errorf("for a bearer-only spec, '%s' belongs on the source: the chained api key authenticates the source's own IAM token grant; a spec-level reference is for access_keys", credential.ConfigSecretSpec)
+			}
+
+		case "access_keys":
+			// The pair is the credential itself, so the spec must name where it
+			// comes from. Nothing mints it: this method exists precisely so that
+			// no key pair is stored here or created at IBM.
+			if config.Get(credential.ConfigSecretSpec) == "" {
+				return fmt.Errorf("'access_keys' requires '%s' naming a spec that yields its access_key_id and secret_access_key", credential.ConfigSecretSpec)
+			}
+			// Refuse an inline pair rather than quietly preferring one over the
+			// other: a pair sitting in spec config is the standing secret this
+			// method exists to avoid, and nothing here would ever rotate it.
+			for _, key := range []string{"access_key_id", "secret_access_key"} {
+				if config.Get(key) != "" {
+					return fmt.Errorf("'%s' must be omitted for access_keys; the referenced spec supplies the whole pair", key)
+				}
+			}
+			// secret_field selects a single secret, and a pair is not one. Both
+			// halves are read by name, so a field here could only mislead.
+			if config.Get(credential.ConfigSecretField) != "" {
+				return fmt.Errorf("'%s' does not apply to access_keys: the referenced credential must hold both 'access_key_id' and 'secret_access_key', read by name", credential.ConfigSecretField)
+			}
+
+		default:
+			return fmt.Errorf("'mint_method' must be 'iam_token' or 'access_keys' for ibm source (iam_token may be omitted), got: %s", config.Get("mint_method"))
 		}
 	}
 
@@ -136,12 +173,15 @@ func (t *IBMCloudKeysCredType) Parse(rawData, metadata map[string]interface{}, l
 	}
 
 	return &credential.Credential{
-		Type:      credential.TypeIBMCloudKeys,
-		Category:  credential.CategoryCloudIAM,
-		LeaseTTL:  leaseTTL,
-		LeaseID:   leaseID,
-		IssuedAt:  time.Now(),
-		Revocable: leaseTTL > 0,
+		Type:     credential.TypeIBMCloudKeys,
+		Category: credential.CategoryCloudIAM,
+		LeaseTTL: leaseTTL,
+		LeaseID:  leaseID,
+		IssuedAt: time.Now(),
+		// Revoking means releasing a lease at the source, which needs a handle to
+		// release. The IBM driver's own IAM-token paths return no leaseID; only the
+		// Vault dynamic_ibm path carries one.
+		Revocable: leaseTTL > 0 && leaseID != "",
 		Data:      data,
 		Metadata:  meta,
 	}, nil
@@ -190,6 +230,11 @@ func (t *IBMCloudKeysCredType) RequiresSpecRotation() bool {
 // SensitiveConfigFields returns spec config keys that should be masked in output
 func (t *IBMCloudKeysCredType) SensitiveConfigFields() []string {
 	return []string{"secret_access_key", "access_token"}
+}
+
+// StoredSecrets reports the secret config keys this spec holds.
+func (t *IBMCloudKeysCredType) StoredSecrets(config credential.Config) []string {
+	return config.Present("secret_access_key", "access_token")
 }
 
 // FieldSchemas returns metadata about the credential's data fields

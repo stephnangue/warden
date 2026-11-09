@@ -3,6 +3,7 @@ package httpproxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
@@ -280,7 +282,9 @@ func TestValidateConfig(t *testing.T) {
 		{"valid string timeout", map[string]any{"timeout": "30s"}, ""},
 		{"valid int timeout", map[string]any{"timeout": 30}, ""},
 		{"valid float timeout", map[string]any{"timeout": 30.0}, ""},
-		{"negative float timeout", map[string]any{"timeout": -1.0}, "greater than 0"},
+		{"negative float timeout", map[string]any{"timeout": -1.0}, "at least 1s"},
+		{"zero int timeout", map[string]any{"timeout": 0}, "at least 1s"},
+		{"zero string timeout", map[string]any{"timeout": "0s"}, "greater than 0"},
 		{"bad timeout type", map[string]any{"timeout": true}, "duration string"},
 		{"auto_auth_path not string", map[string]any{"auto_auth_path": 123}, "must be a string"},
 		{"default_role not string", map[string]any{"default_role": 123}, "must be a string"},
@@ -361,6 +365,13 @@ func TestNewTransport(t *testing.T) {
 	assert.Equal(t, 50, transport.MaxIdleConnsPerHost)
 	assert.True(t, transport.ForceAttemptHTTP2)
 	assert.Equal(t, 90*time.Second, transport.IdleConnTimeout)
+	// No header timeout of its own: the mount's timeout bounds the request,
+	// and a fixed one would cut a long non-streaming generation short of it.
+	assert.Zero(t, transport.ResponseHeaderTimeout)
+
+	tlsTransport, err := NewTransportWithTLS("", true)
+	require.NoError(t, err)
+	assert.Zero(t, tlsTransport.ResponseHeaderTimeout)
 }
 
 func TestShutdownTransport(t *testing.T) {
@@ -467,6 +478,54 @@ func TestNewFactory_OnInitialize(t *testing.T) {
 	assert.Equal(t, "hello", pb.extraState["extra_field"])
 }
 
+// user_auth_role was removed. A mount enabled with it, or a stored config
+// that names it, loads and refuses every user credential; a config write
+// naming it is refused; any other write stores the config without it.
+func TestUserAuthRole_Removed(t *testing.T) {
+	ctx := context.Background()
+	factory := NewFactory(testSpec())
+
+	enabled, err := factory(ctx, &logical.BackendConfig{
+		StorageView: newInmemStorage(),
+		Logger:      testLogger(),
+		Config: map[string]any{
+			"test_url": "https://ok.com", "auto_auth_path": "auth/jwt/",
+			"user_auth_path": "auth/user-jwt/", "user_auth_role": "slack-user",
+		},
+	})
+	require.NoError(t, err, "a mount enabled with it still loads")
+	assert.ErrorIs(t, enabled.(*proxyBackend).UserAuthRefusal(), framework.ErrUserAuthRoleRemoved)
+
+	storage := newInmemStorage()
+	entry, err := sdklogical.StorageEntryJSON("config", map[string]any{
+		"test_url": "https://ok.com", "auto_auth_path": "auth/jwt/",
+		"user_auth_path": "auth/user-jwt/", "user_auth_role": "slack-user",
+	})
+	require.NoError(t, err)
+	require.NoError(t, storage.Put(ctx, entry))
+	b, err := factory(ctx, &logical.BackendConfig{StorageView: storage, Logger: testLogger()})
+	require.NoError(t, err)
+	pb := b.(*proxyBackend)
+	require.NoError(t, pb.Initialize(ctx))
+	assert.ErrorIs(t, pb.UserAuthRefusal(), framework.ErrUserAuthRoleRemoved)
+
+	write := func(raw map[string]any) *logical.Response {
+		resp, _ := pb.handleConfigWrite(ctx, nil, &framework.FieldData{Raw: raw, Schema: pb.pathConfig().Fields})
+		return resp
+	}
+	resp := write(map[string]any{"user_auth_role": "slack-user"})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.EqualError(t, resp.Err, framework.ErrUserAuthRoleRemoved.Error())
+	assert.ErrorIs(t, pb.UserAuthRefusal(), framework.ErrUserAuthRoleRemoved, "a refused write changes nothing")
+
+	require.Equal(t, http.StatusOK, write(map[string]any{"timeout": 60}).StatusCode)
+	assert.NoError(t, pb.UserAuthRefusal())
+	assert.Equal(t, "auth/user-jwt/", pb.GetUserAuthPath())
+	stored, err := storage.Get(ctx, "config")
+	require.NoError(t, err)
+	assert.False(t, framework.StoredUserAuthRole(stored))
+}
+
 func TestNewFactory_ShutdownHook(t *testing.T) {
 	spec := testSpec()
 	var hookCalled bool
@@ -570,6 +629,113 @@ func TestInitialize_WithExtraState(t *testing.T) {
 	assert.Equal(t, "v2", pb.extraState["version"])
 }
 
+// OnFirstConfig runs only for a mount with no persisted config, and what it stamps is
+// persisted. A mount whose persisted config predates the key keeps it absent.
+func TestInitialize_OnFirstConfig(t *testing.T) {
+	newSpec := func(calls *int) *ProviderSpec {
+		spec := testSpec()
+		spec.OnFirstConfig = func(state map[string]any) map[string]any {
+			*calls++
+			if _, ok := state["feature"]; !ok {
+				state["feature"] = true
+			}
+			return state
+		}
+		spec.OnInitialize = func(config map[string]any, state map[string]any) map[string]any {
+			if v, ok := config["feature"].(bool); ok {
+				state["feature"] = v
+			}
+			return state
+		}
+		spec.OnConfigRead = func(state map[string]any) map[string]any {
+			v, _ := state["feature"].(bool)
+			return map[string]any{"feature": v}
+		}
+		return spec
+	}
+
+	t.Run("new mount gets the default and persists it", func(t *testing.T) {
+		var calls int
+		storage := newInmemStorage()
+		pb := setupBackend(t, newSpec(&calls)).(*proxyBackend)
+		pb.StorageView = storage
+
+		require.NoError(t, pb.Initialize(context.Background()))
+		assert.Equal(t, 1, calls)
+		assert.Equal(t, true, pb.extraState["feature"])
+
+		entry, err := storage.Get(context.Background(), "config")
+		require.NoError(t, err)
+		var persisted map[string]any
+		require.NoError(t, entry.DecodeJSON(&persisted))
+		assert.Equal(t, true, persisted["feature"])
+	})
+
+	t.Run("existing mount without the key stays off", func(t *testing.T) {
+		var calls int
+		storage := newInmemStorage()
+		entry, _ := sdklogical.StorageEntryJSON("config", map[string]any{"test_url": "https://saved.com"})
+		require.NoError(t, storage.Put(context.Background(), entry))
+		pb := setupBackend(t, newSpec(&calls)).(*proxyBackend)
+		pb.StorageView = storage
+
+		require.NoError(t, pb.Initialize(context.Background()))
+		assert.Equal(t, 0, calls, "OnFirstConfig must not run for a mount with persisted config")
+		_, present := pb.extraState["feature"]
+		assert.False(t, present)
+	})
+
+	t.Run("mount-time config wins over the default", func(t *testing.T) {
+		var calls int
+		storage := newInmemStorage()
+		b, err := NewFactory(newSpec(&calls))(context.Background(), &logical.BackendConfig{
+			StorageView: storage,
+			Logger:      testLogger(),
+			Config:      map[string]any{"test_url": "https://ok.com", "feature": false},
+		})
+		require.NoError(t, err)
+		pb := b.(*proxyBackend)
+
+		require.NoError(t, pb.Initialize(context.Background()))
+		assert.Equal(t, 1, calls)
+		assert.Equal(t, false, pb.extraState["feature"])
+	})
+}
+
+// StreamBodyLimit reports the cap the gateway will enforce for the request, so core
+// parses no more than would be forwarded.
+func TestStreamBodyLimit(t *testing.T) {
+	upload := httptest.NewRequest(http.MethodPost, "/v1/test/gateway/upload", nil)
+	other := httptest.NewRequest(http.MethodPost, "/v1/test/gateway/items", nil)
+
+	t.Run("mount max_body_size", func(t *testing.T) {
+		pb := setupBackend(t, testSpec()).(*proxyBackend)
+		pb.SetMaxBodySize(2048)
+		assert.Equal(t, int64(2048), pb.StreamBodyLimit(other))
+	})
+
+	t.Run("default when the mount sets none", func(t *testing.T) {
+		pb := setupBackend(t, testSpec()).(*proxyBackend)
+		pb.SetMaxBodySize(0)
+		assert.Equal(t, framework.DefaultMaxBodySize, pb.StreamBodyLimit(other))
+	})
+
+	t.Run("dispatch override for this request", func(t *testing.T) {
+		spec := testSpec()
+		spec.ResolveUpstream = func(r *http.Request, _ string, _ map[string]any) (Dispatch, bool) {
+			if strings.HasSuffix(r.URL.Path, "/upload") {
+				return Dispatch{MaxBodySize: 50 << 20}, true
+			}
+			return Dispatch{}, true
+		}
+		pb := setupBackend(t, spec).(*proxyBackend)
+		pb.SetMaxBodySize(2048)
+		assert.Equal(t, int64(50<<20), pb.StreamBodyLimit(upload))
+		assert.Equal(t, int64(2048), pb.StreamBodyLimit(other))
+		assert.Equal(t, int64(2048), pb.StreamBodyLimit(nil), "no request: the mount cap")
+	})
+}
+
 // --- SensitiveConfigFields tests ---
 
 func TestSensitiveConfigFields(t *testing.T) {
@@ -660,6 +826,47 @@ func TestConfigWrite_ZeroMaxBodySize(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
+// The timeout is the only bound on how long an upstream may take, so a write
+// that would remove it is refused. "500ms" truncates to zero seconds.
+func TestConfigWrite_ZeroTimeout(t *testing.T) {
+	for _, timeout := range []any{0, "0s", "500ms"} {
+		b := setupBackend(t, testSpec())
+		resp, err := b.HandleRequest(context.Background(), &logical.Request{
+			Operation: logical.UpdateOperation,
+			Path:      "config",
+			Data: map[string]any{
+				"timeout":        timeout,
+				"auto_auth_path": "auth/jwt/",
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "timeout %v", timeout)
+		assert.Contains(t, resp.Err.Error(), "timeout must be at least 1s")
+		assert.Equal(t, testSpec().DefaultTimeout, b.(*proxyBackend).Timeout())
+	}
+}
+
+// A zero timeout already in storage keeps the spec's default rather than
+// leaving the mount with no deadline.
+func TestInitialize_StoredZeroTimeoutKeepsDefault(t *testing.T) {
+	spec := testSpec()
+	storage := newInmemStorage()
+	entry, _ := sdklogical.StorageEntryJSON("config", map[string]any{
+		"timeout":        "0s",
+		"auto_auth_path": "auth/jwt/",
+	})
+	_ = storage.Put(context.Background(), entry)
+
+	b, err := NewFactory(spec)(context.Background(), &logical.BackendConfig{
+		StorageView: storage,
+		Logger:      testLogger(),
+	})
+	require.NoError(t, err)
+	pb := b.(*proxyBackend)
+	require.NoError(t, pb.Initialize(context.Background()))
+	assert.Equal(t, spec.DefaultTimeout, pb.Timeout())
+}
+
 func TestConfigWrite_OversizedMaxBodySize(t *testing.T) {
 	b := setupBackend(t, testSpec())
 	resp, err := b.HandleRequest(context.Background(), &logical.Request{
@@ -719,6 +926,85 @@ func TestConfigWrite_WithExtraFields(t *testing.T) {
 		Path:      "config",
 	})
 	assert.Equal(t, "v2", resp.Data["version"])
+}
+
+// failingStorage refuses every write.
+type failingStorage struct{ *inmemStorage }
+
+func (failingStorage) Put(context.Context, *sdklogical.StorageEntry) error {
+	return errors.New("storage unavailable")
+}
+
+// A write the provider's own hook refuses, or one that cannot be persisted,
+// changes nothing: not the URL, the limits, the TLS settings, the transparent
+// config, nor the provider's extra state. Before, everything but the extra
+// state was live by the time the hook refused, and everything was by the time
+// the storage write failed.
+func TestConfigWrite_RefusedOrUnpersistedChangesNothing(t *testing.T) {
+	spec := testSpec()
+	spec.ExtraConfigFields = map[string]*framework.FieldSchema{
+		"version": {Type: framework.TypeString},
+	}
+	spec.OnConfigWrite = func(d *framework.FieldData, state map[string]any) (map[string]any, error) {
+		if val, ok := d.GetOk("version"); ok {
+			if val.(string) == "bad" {
+				return nil, errors.New("unsupported version")
+			}
+			state["version"] = val.(string)
+		}
+		return state, nil
+	}
+	write := func(b logical.Backend, data map[string]any) *logical.Response {
+		resp, err := b.HandleRequest(context.Background(), &logical.Request{
+			Operation: logical.UpdateOperation, Path: "config", Data: data,
+		})
+		require.NoError(t, err)
+		return resp
+	}
+	unchanged := func(t *testing.T, pb *proxyBackend) {
+		t.Helper()
+		pb.mu.RLock()
+		defer pb.mu.RUnlock()
+		assert.Equal(t, "https://original.example.com", pb.providerURL)
+		assert.False(t, pb.tlsSkipVerify)
+		assert.Equal(t, "v1", pb.extraState["version"])
+		assert.Equal(t, 30*time.Second, pb.Timeout())
+		assert.Equal(t, "auth/jwt/", pb.TransparentConfig().AutoAuthPath)
+	}
+	change := map[string]any{
+		"test_url": "https://changed.example.com", "timeout": 99, "tls_skip_verify": true,
+		"auto_auth_path": "auth/other/",
+	}
+
+	t.Run("hook refuses", func(t *testing.T) {
+		b := setupBackend(t, spec)
+		require.Equal(t, http.StatusOK, write(b, map[string]any{
+			"test_url": "https://original.example.com", "auto_auth_path": "auth/jwt/", "version": "v1",
+		}).StatusCode)
+
+		data := map[string]any{"version": "bad"}
+		for k, v := range change {
+			data[k] = v
+		}
+		require.Equal(t, http.StatusBadRequest, write(b, data).StatusCode)
+		unchanged(t, b.(*proxyBackend))
+	})
+
+	t.Run("storage fails", func(t *testing.T) {
+		b := setupBackend(t, spec)
+		require.Equal(t, http.StatusOK, write(b, map[string]any{
+			"test_url": "https://original.example.com", "auto_auth_path": "auth/jwt/", "version": "v1",
+		}).StatusCode)
+		pb := b.(*proxyBackend)
+		pb.StorageView = failingStorage{newInmemStorage()}
+
+		data := map[string]any{"version": "v2"}
+		for k, v := range change {
+			data[k] = v
+		}
+		require.Equal(t, http.StatusInternalServerError, write(b, data).StatusCode)
+		unchanged(t, pb)
+	})
 }
 
 // --- Gateway proxy tests ---
@@ -957,7 +1243,7 @@ func TestBuildTargetURL(t *testing.T) {
 				assert.Error(t, err)
 			} else {
 				require.NoError(t, err)
-				assert.Equal(t, tc.expected, result)
+				assert.Equal(t, tc.expected, result.String())
 			}
 		})
 	}
@@ -982,10 +1268,14 @@ func TestPrepareHeaders(t *testing.T) {
 		req.Header.Set("X-Warden-Subject-Token", "eyJ.subject")
 		req.Header.Set("X-Warden-Actor-Token", "eyJ.actor")
 		req.Header.Set("X-Warden-User-Token", "user-credential")
+		req.Header.Set("X-Warden-Namespace", "team-payments")
+		req.Header.Set("X-Warden-Agent", "billing-agent")
 		req.Header.Set("X-Custom-Remove", "should-go")
 		req.Header.Set("X-Keep", "keep-me")
 
 		pb.prepareHeaders(req, map[string]string{"Authorization": "Bearer real-key"}, Dispatch{})
+		// The namespace selector names a tenant the upstream has no use for.
+		assert.Empty(t, req.Header.Get("X-Warden-Namespace"))
 
 		assert.Equal(t, "Bearer real-key", req.Header.Get("Authorization"))
 		assert.Empty(t, req.Header.Get("X-Warden-Token"))
@@ -994,6 +1284,8 @@ func TestPrepareHeaders(t *testing.T) {
 		assert.Empty(t, req.Header.Get("X-Warden-Actor-Token"))
 		// The secondary user credential is a bearer secret and must not proxy upstream.
 		assert.Empty(t, req.Header.Get("X-Warden-User-Token"))
+		// Reserved for agent selection; no upstream may come to rely on it.
+		assert.Empty(t, req.Header.Get("X-Warden-Agent"))
 		assert.Empty(t, req.Header.Get("X-Custom-Remove"))
 		assert.Equal(t, "keep-me", req.Header.Get("X-Keep"))
 	})
@@ -1043,6 +1335,31 @@ func TestPrepareHeaders(t *testing.T) {
 		assert.Empty(t, req.Header.Get("X-Real-Ip"))
 		assert.Empty(t, req.Header.Get("Forwarded"))
 	})
+}
+
+// A header family whose names the client chooses is stripped by prefix, whatever
+// the case it arrives in; a name that only shares the stem is kept.
+func TestPrepareHeaders_RemovesHeaderPrefixes(t *testing.T) {
+	spec := testSpec()
+	spec.ExtraHeaderPrefixesToRemove = []string{"Impersonate-Extra-"}
+	pb := setupBackend(t, spec).(*proxyBackend)
+
+	req, _ := http.NewRequest("GET", "https://api.test.com/api/v1/pods", nil)
+	req.Header.Set("Impersonate-Extra-Scopes", "admin")
+	req.Header.Add("Impersonate-Extra-Scopes", "root")
+	req.Header.Set("Impersonate-Extra-Reason", "x")
+	// Not canonicalised, as a header set by key would be.
+	req.Header["impersonate-extra-acme.com/project"] = []string{"y"}
+	req.Header.Set("Impersonate-Extras", "keep-me")
+	req.Header.Set("X-Keep", "keep-me")
+
+	pb.prepareHeaders(req, nil, Dispatch{})
+
+	for name := range req.Header {
+		assert.NotContains(t, strings.ToLower(name), "impersonate-extra-", "header %q reached the upstream", name)
+	}
+	assert.Equal(t, "keep-me", req.Header.Get("Impersonate-Extras"))
+	assert.Equal(t, "keep-me", req.Header.Get("X-Keep"))
 }
 
 func TestPrepareHeaders_DynamicHeaders(t *testing.T) {
@@ -1439,4 +1756,273 @@ func TestCloneExtraState(t *testing.T) {
 		_, hasC := src["c"]
 		assert.False(t, hasC, "original must not gain new keys")
 	})
+}
+
+// =============================================================================
+// SelectTimeout — per-request deadline by request shape
+// =============================================================================
+
+// selectTimeoutProbe stands up a backend whose credential extractor reports
+// the deadline actually in force. The extractor runs after handleGateway has
+// applied the timeout to the outgoing request, so it observes the deadline
+// the proxied call will really live under.
+func selectTimeoutProbe(t *testing.T, spec *ProviderSpec) (*proxyBackend, *time.Duration) {
+	t.Helper()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	var seen time.Duration
+	spec.DefaultURL = upstream.URL
+	spec.ExtractCredentials = func(req *logical.Request) (map[string]string, error) {
+		if dl, ok := req.HTTPRequest.Context().Deadline(); ok {
+			seen = time.Until(dl)
+		}
+		return map[string]string{"Authorization": "Bearer test"}, nil
+	}
+
+	pb := setupBackend(t, spec).(*proxyBackend)
+	pb.providerURL = upstream.URL
+	pb.SetTimeout(30 * time.Second)
+	return pb, &seen
+}
+
+func gatewayCall(pb *proxyBackend, calls ...string) {
+	desc := &logical.MCPRequestDescriptor{}
+	for i, m := range calls {
+		desc.Calls = append(desc.Calls, logical.MCPCall{Method: m, BatchIndex: i})
+	}
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest:    httptest.NewRequest("POST", "/v1/test/gateway/", nil),
+		ResponseWriter: httptest.NewRecorder(),
+		MCPDescriptor:  desc,
+	})
+}
+
+func TestHandleGateway_SelectTimeout_ListenTakesTheLongerDeadline(t *testing.T) {
+	spec := testSpec()
+	spec.SelectTimeout = SelectListenTimeout
+	pb, seen := selectTimeoutProbe(t, spec)
+	pb.extraState = map[string]any{ListenTimeoutKey: time.Hour}
+
+	gatewayCall(pb, "subscriptions/listen")
+
+	assert.Greater(t, *seen, 55*time.Minute,
+		"a subscriptions/listen stream must answer to listen_timeout, not the unary ceiling")
+}
+
+// This is the row that fails if the shape-aware deadline is ever collapsed
+// back into a single knob: a hung tool call on the same mount must still die
+// at the unary timeout, whatever listen_timeout says.
+func TestHandleGateway_SelectTimeout_UnaryKeepsTheMountTimeout(t *testing.T) {
+	spec := testSpec()
+	spec.SelectTimeout = SelectListenTimeout
+	pb, seen := selectTimeoutProbe(t, spec)
+	pb.extraState = map[string]any{ListenTimeoutKey: time.Hour}
+
+	gatewayCall(pb, "tools/call")
+
+	assert.Greater(t, *seen, 20*time.Second)
+	assert.LessOrEqual(t, *seen, 30*time.Second)
+}
+
+// A batch is not characterised by one of its elements, and the body-less
+// GET/DELETE sentinel carries no method at all. Both take the unary ceiling.
+func TestHandleGateway_SelectTimeout_BatchAndSentinelKeepTheMountTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		calls []string
+	}{
+		{"batch containing a listen", []string{"tools/call", "subscriptions/listen"}},
+		{"empty sentinel", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := testSpec()
+			spec.SelectTimeout = SelectListenTimeout
+			pb, seen := selectTimeoutProbe(t, spec)
+			pb.extraState = map[string]any{ListenTimeoutKey: time.Hour}
+
+			gatewayCall(pb, tc.calls...)
+
+			assert.LessOrEqual(t, *seen, 30*time.Second)
+		})
+	}
+}
+
+// Every non-MCP provider leaves the hook unset and must be untouched.
+func TestHandleGateway_SelectTimeout_UnsetHookIsANoOp(t *testing.T) {
+	spec := testSpec()
+	require.Nil(t, spec.SelectTimeout)
+	pb, seen := selectTimeoutProbe(t, spec)
+
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest:    httptest.NewRequest("POST", "/v1/test/gateway/", nil),
+		ResponseWriter: httptest.NewRecorder(),
+	})
+
+	assert.Greater(t, *seen, 20*time.Second)
+	assert.LessOrEqual(t, *seen, 30*time.Second)
+}
+
+// Returning 0 is the hook's "keep the mount timeout" answer, and must not be
+// mistaken for "no deadline".
+func TestHandleGateway_SelectTimeout_ZeroKeepsTheMountTimeout(t *testing.T) {
+	spec := testSpec()
+	spec.SelectTimeout = func(*logical.Request, map[string]any) time.Duration { return 0 }
+	pb, seen := selectTimeoutProbe(t, spec)
+
+	gatewayCall(pb, "subscriptions/listen")
+
+	assert.Greater(t, *seen, 20*time.Second)
+	assert.LessOrEqual(t, *seen, 30*time.Second)
+}
+
+// A request the spec refuses is answered in the gateway with the spec's status,
+// before any credential is extracted and without reaching the upstream; one it
+// lets through carries on as usual.
+func TestHandleGateway_RefuseRequest(t *testing.T) {
+	var hits int
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	refusal := fmt.Errorf("not through this gateway")
+	var gotURL string
+	spec := testSpec()
+	spec.RefuseRequest = func(r *http.Request, providerURL string, _ map[string]any) (int, error) {
+		gotURL = providerURL
+		if strings.HasSuffix(r.URL.Path, "/refused") {
+			return http.StatusBadRequest, refusal
+		}
+		return 0, nil
+	}
+	pb := setupBackend(t, spec).(*proxyBackend)
+	pb.providerURL = upstream.URL
+	pb.StreamingBackend.InitProxy(upstream.Client().Transport)
+
+	send := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		pb.handleGateway(context.Background(), &logical.Request{
+			HTTPRequest: httptest.NewRequest("GET", path, nil), ResponseWriter: rec,
+			// A credential the extractor rejects proves the refusal comes first.
+			Credential: &credential.Credential{Type: "unknown"},
+		})
+		return rec
+	}
+
+	rec := send("/test/gateway/v1/refused")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), refusal.Error())
+	assert.Equal(t, 0, hits, "a refused request never reaches the upstream")
+	assert.Equal(t, upstream.URL, gotURL, "the hook sees the resolved upstream")
+
+	// Let through: it reaches credential extraction, which fails here (401).
+	rec = send("/test/gateway/v1/fine")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, 0, hits)
+}
+
+// The rewrite prefix is the client's own gateway URL: Warden's configured base,
+// the namespace and mount, and the role segment only when the client put it in
+// the path. Without a base there is nothing to rewrite onto.
+func TestRewritePrefix(t *testing.T) {
+	const base = "https://warden.example.com"
+	pb := &proxyBackend{externalBaseURL: func(context.Context) string { return base + "/" }}
+	root := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	child := namespace.ContextWithNamespace(context.Background(), &namespace.Namespace{ID: "c", Path: "team-a/"})
+
+	cases := []struct {
+		ctx       context.Context
+		auditPath string
+		want      string
+	}{
+		{root, "role/m365/gateway/v1.0/me/messages", base + "/v1/msgraph/role/m365/gateway"},
+		{root, "gateway/v1.0/me", base + "/v1/msgraph/gateway"},
+		{root, "role/gateway/gateway/v1.0/me", base + "/v1/msgraph/role/gateway/gateway"},
+		{child, "gateway/v1.0/me", base + "/v1/team-a/msgraph/gateway"},
+		{root, "config", ""},
+		{root, "role//gateway/v1.0", ""},
+	}
+	for _, tc := range cases {
+		got := pb.rewritePrefix(tc.ctx, &logical.Request{MountPoint: "msgraph/", AuditPath: tc.auditPath})
+		assert.Equal(t, tc.want, got, tc.auditPath)
+	}
+
+	assert.Empty(t, (&proxyBackend{}).rewritePrefix(root, &logical.Request{MountPoint: "m/", AuditPath: "gateway/x"}),
+		"no external base: nothing to rewrite onto")
+	empty := &proxyBackend{externalBaseURL: func(context.Context) string { return "" }}
+	assert.Empty(t, empty.rewritePrefix(root, &logical.Request{MountPoint: "m/", AuditPath: "gateway/x"}))
+}
+
+// A spec that asks for it gets the upstream response, with the prefix, through
+// the proxy's response hook; without an external base the response is untouched.
+func TestHandleGateway_RewriteResponse(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"next":"upstream"}`))
+	}))
+	defer upstream.Close()
+
+	var seen []RewriteContext
+	spec := testSpec()
+	spec.RewriteResponse = func(r *http.Request, _ map[string]any) bool { return r.Method == http.MethodGet }
+	spec.ModifyResponse = func(resp *http.Response, rc RewriteContext) error {
+		seen = append(seen, rc)
+		resp.Body = io.NopCloser(strings.NewReader(`{"next":"rewritten"}`))
+		resp.ContentLength = -1
+		resp.Header.Del("Content-Length")
+		return nil
+	}
+
+	call := func(pb *proxyBackend) string {
+		rec := httptest.NewRecorder()
+		ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+		httpReq := httptest.NewRequest(http.MethodGet, "/test/role/r/gateway/v1/list", nil).WithContext(ctx)
+		pb.handleGateway(ctx, &logical.Request{
+			HTTPRequest: httpReq, ResponseWriter: rec,
+			MountPoint: "test/", AuditPath: "role/r/gateway/v1/list",
+			Credential: &credential.Credential{Type: credential.TypeAPIKey, Data: map[string]string{"api_key": "sk-test"}},
+		})
+		return rec.Body.String()
+	}
+
+	pb := setupBackend(t, spec).(*proxyBackend)
+	pb.providerURL = upstream.URL
+	pb.StreamingBackend.InitProxy(upstream.Client().Transport)
+	pb.installMCPListFilter()
+	assert.JSONEq(t, `{"next":"upstream"}`, call(pb), "no external base: untouched")
+	assert.Empty(t, seen)
+
+	pb.externalBaseURL = func(context.Context) string { return "https://warden.example.com" }
+	assert.JSONEq(t, `{"next":"rewritten"}`, call(pb))
+	require.Len(t, seen, 1)
+	assert.Equal(t, "https://warden.example.com/v1/test/role/r/gateway", seen[0].Prefix)
+	assert.Positive(t, seen[0].MaxBodySize)
+}
+
+// With a renderer the refusal is answered in the provider's error shape.
+func TestHandleGateway_RefuseRequestRendered(t *testing.T) {
+	spec := testSpec()
+	spec.RefuseRequest = func(*http.Request, string, map[string]any) (int, error) {
+		return http.StatusBadRequest, fmt.Errorf("no")
+	}
+	var got *logical.GatewayFailure
+	spec.RenderGatewayError = func(_ *http.Request, f *logical.GatewayFailure) *logical.Response {
+		got = f
+		return &logical.Response{StatusCode: f.Status, Body: []byte(`{"rendered":true}`)}
+	}
+	pb := setupBackend(t, spec).(*proxyBackend)
+
+	rec := httptest.NewRecorder()
+	pb.handleGateway(context.Background(), &logical.Request{
+		HTTPRequest: httptest.NewRequest("GET", "/test/gateway/v1/x", nil), ResponseWriter: rec,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.JSONEq(t, `{"rendered":true}`, rec.Body.String())
+	require.NotNil(t, got)
+	assert.Equal(t, logical.GatewayFailureBadRequest, got.Class)
 }

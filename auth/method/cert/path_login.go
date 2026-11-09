@@ -3,13 +3,11 @@ package cert
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net/http"
-	"path"
-	"strings"
 	"time"
 
-	"github.com/stephnangue/warden/auth/helper"
 	"github.com/stephnangue/warden/framework"
 	lgr "github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -23,12 +21,7 @@ var errCertAuthFailed = fmt.Errorf("authentication failed")
 func (b *certAuthBackend) pathLogin() *framework.Path {
 	return &framework.Path{
 		Pattern: "login",
-		Fields: map[string]*framework.FieldSchema{
-			"role": {
-				Type:        framework.TypeString,
-				Description: "Role to assume after authentication (falls back to default_role if configured)",
-			},
-		},
+		Fields:  map[string]*framework.FieldSchema{},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.UpdateOperation: &framework.PathOperation{
 				Callback: b.handleLogin,
@@ -39,15 +32,28 @@ func (b *certAuthBackend) pathLogin() *framework.Path {
 				Summary:  "Authenticate using a TLS client certificate",
 			},
 		},
-		HelpSynopsis:    "Authenticate using a TLS client certificate",
-		HelpDescription: "This endpoint authenticates using a client certificate presented via TLS or forwarded by a trusted load balancer.",
+		HelpSynopsis: "Authenticate using a TLS client certificate",
+		HelpDescription: "This endpoint admits a client certificate presented via TLS or forwarded by a trusted load balancer " +
+			"against the mount's trusted CAs and revocation settings. It selects no role: the role a request runs under " +
+			"is granted per request.",
 	}
 }
 
-// handleLogin handles the certificate login operation
+// handleLogin admits the client certificate against the mount's configuration
+// with admitCert, the check introspect/admit runs too (the chain against the
+// mount's trusted CAs, a principal under the mount's principal_claim), then
+// checks its revocation, and returns the admission: the principal and a TTL of
+// the mount's token_ttl capped by the certificate's NotAfter. It carries no
+// role, no policies, no credential spec and no metadata.
 func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	// Snapshot config under the lock, then release it: the lock is NOT held
+	// across the OCSP/CRL round-trip, so a config write neither waits on
+	// in-flight logins nor, while it waits, stalls new ones. The snapshot
+	// carries its own CA pool and revocation checker, so one login is judged
+	// by one configuration throughout.
 	b.configMu.RLock()
-	defer b.configMu.RUnlock()
+	config := b.config
+	b.configMu.RUnlock()
 
 	// Extract client certificate from TLS connection or forwarded header
 	cert := extractClientCert(req)
@@ -55,48 +61,15 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 		return logical.ErrorResponse(logical.ErrBadRequest("no client certificate provided")), nil
 	}
 
-	// Get role name — fall back to default_role if configured
-	roleName := d.Get("role").(string)
-	if roleName == "" && b.config != nil && b.config.DefaultRole != "" {
-		roleName = b.config.DefaultRole
-	}
-	if roleName == "" {
-		return logical.ErrorResponse(logical.ErrBadRequest("missing role")), nil
-	}
-
-	// Look up the role
-	role, err := b.getRole(ctx, roleName)
-	if err != nil {
-		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
-	}
-	if role == nil {
-		b.logger.Warn("login failed: role not found", lgr.String("role", roleName))
-		return &logical.Response{
-			StatusCode: http.StatusUnauthorized,
-			Err:        errCertAuthFailed,
-		}, nil
-	}
-
-	// Build CA pool: role-specific overrides global
-	caPool, err := b.getCAPool(role)
-	if err != nil {
-		return logical.ErrorResponse(logical.ErrInternal(err.Error())), nil
-	}
-	if caPool == nil {
+	verifiedChains, err := admitCert(config, cert)
+	if errors.Is(err, errNoTrustedCA) {
 		return &logical.Response{
 			StatusCode: http.StatusInternalServerError,
-			Err:        fmt.Errorf("no trusted CA certificates configured"),
+			Err:        err,
 		}, nil
 	}
-
-	// Verify certificate chain
-	verifyOpts := x509.VerifyOptions{
-		Roots:     caPool,
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-	verifiedChains, err := cert.Verify(verifyOpts)
 	if err != nil {
-		b.logger.Warn("login failed: certificate verification error", lgr.Err(err), lgr.String("role", roleName))
+		b.logger.Warn("login failed: certificate not admitted", lgr.Err(err))
 		return &logical.Response{
 			StatusCode: http.StatusUnauthorized,
 			Err:        errCertAuthFailed,
@@ -104,10 +77,9 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 	}
 
 	// Check certificate revocation status if configured
-	if b.revocationChecker != nil && b.config != nil &&
-		b.config.RevocationMode != "" && b.config.RevocationMode != "none" {
-		if err := b.revocationChecker.checkRevocation(cert, verifiedChains, b.config.RevocationMode); err != nil {
-			b.logger.Warn("login failed: certificate revocation check", lgr.Err(err), lgr.String("role", roleName))
+	if config.revocationChecker != nil {
+		if err := config.revocationChecker.checkRevocation(cert, verifiedChains, config.RevocationMode); err != nil {
+			b.logger.Warn("login failed: certificate revocation check", lgr.Err(err))
 			return &logical.Response{
 				StatusCode: http.StatusUnauthorized,
 				Err:        errCertAuthFailed,
@@ -115,213 +87,53 @@ func (b *certAuthBackend) handleLogin(ctx context.Context, req *logical.Request,
 		}
 	}
 
-	// Validate role constraints
-	if err := validateCertConstraints(cert, role); err != nil {
-		b.logger.Warn("login failed: certificate constraint check", lgr.Err(err), lgr.String("role", roleName))
-		return &logical.Response{
-			StatusCode: http.StatusUnauthorized,
-			Err:        errCertAuthFailed,
-		}, nil
-	}
-
-	// Determine principal claim source: role overrides global config
-	principalClaim := role.PrincipalClaim
-	if principalClaim == "" && b.config != nil {
-		principalClaim = b.config.PrincipalClaim
-	}
-	if principalClaim == "" {
-		principalClaim = "cn"
-	}
-
-	// Extract principal identity from the certificate
-	principalID := extractPrincipal(cert, principalClaim)
-	if principalID == "" {
-		b.logger.Warn("login failed: no principal identity in certificate",
-			lgr.String("principal_claim", principalClaim), lgr.String("role", roleName))
-		return &logical.Response{
-			StatusCode: http.StatusUnauthorized,
-			Err:        errCertAuthFailed,
-		}, nil
-	}
-
-	// Calculate effective TTL
-	effectiveTTL := b.calculateTTL(cert, role)
-
-	tokenType := "cert_role"
+	// admitCert checked that the principal is there.
+	principalID := extractPrincipal(cert, principalClaimOf(config))
 
 	// Certificate fingerprint for token caching in transparent mode
 	fingerprint := certFingerprint(cert)
 
+	// The leaf's fields, and the anchors of the chains it verified along.
+	admission := newAdmission(cert, verifiedChains, b.mountFacts)
+	admission.PrincipalID = principalID
+
 	return &logical.Response{
 		StatusCode: http.StatusOK,
 		Auth: &logical.Auth{
-			PrincipalID:    principalID,
-			RoleName:       roleName,
-			Policies:       role.TokenPolicies,
-			CredentialSpec: role.CredSpecName,
-			TokenType:      tokenType,
-			TokenTTL:       effectiveTTL,
-			ClientIP:       req.ClientIP,
-			ClientToken:    fingerprint, // Cert fingerprint for token type caching
-			Metadata:       extractCertMetadata(cert, role.MetadataMappings),
+			PrincipalID: principalID,
+			TokenType:   logical.TokenTypeIdentity,
+			TokenTTL:    calculateTTL(config, cert, time.Now()),
+			ClientIP:    req.ClientIP,
+			ClientToken: fingerprint, // Cert fingerprint for token type caching
+			Admission:   admission,
 		},
 		Data: map[string]any{
 			"principal_id": principalID,
-			"role":         roleName,
 			"fingerprint":  fingerprint,
 		},
 	}, nil
 }
 
-// getCAPool returns the CA pool to use for cert verification.
-// Role-specific CA overrides the global trusted CAs.
-func (b *certAuthBackend) getCAPool(role *CertRole) (*x509.CertPool, error) {
-	if role.Certificate != "" {
-		return buildCAPool(role.Certificate)
+// getCAPool returns the mount's trusted CA pool, or nil when it has none.
+func getCAPool(config *CertAuthConfig) *x509.CertPool {
+	if config == nil {
+		return nil
 	}
-	if b.config != nil && b.config.caPool != nil {
-		return b.config.caPool, nil
-	}
-	return nil, nil
+	return config.caPool
 }
 
-// calculateTTL returns the effective TTL, capped by the certificate's NotAfter.
-func (b *certAuthBackend) calculateTTL(cert *x509.Certificate, role *CertRole) time.Duration {
-	// Start with the certificate's remaining validity
-	certTTL := time.Until(cert.NotAfter)
+// calculateTTL returns the TTL of a certificate's admission at now: the
+// mount's token_ttl, capped by the certificate's NotAfter (0 once it has
+// passed). A zero token_ttl is no cap from the mount.
+func calculateTTL(config *CertAuthConfig, cert *x509.Certificate, now time.Time) time.Duration {
+	certTTL := cert.NotAfter.Sub(now)
 	if certTTL <= 0 {
 		return 0
 	}
-
-	// Role TTL
-	roleTTL, err := role.ParseTokenTTL()
-	if err != nil {
-		roleTTL = time.Hour
+	if config != nil && config.TokenTTL > 0 && config.TokenTTL < certTTL {
+		return config.TokenTTL
 	}
-
-	// Global config TTL
-	var configTTL time.Duration
-	if b.config != nil {
-		configTTL = b.config.TokenTTL
-	}
-
-	// Pick the smallest positive TTL among: certTTL, roleTTL, configTTL
-	effectiveTTL := certTTL
-	if roleTTL > 0 && roleTTL < effectiveTTL {
-		effectiveTTL = roleTTL
-	}
-	if configTTL > 0 && configTTL < effectiveTTL {
-		effectiveTTL = configTTL
-	}
-
-	return effectiveTTL
-}
-
-// validateCertConstraints checks whether the certificate satisfies the role constraints.
-// If a constraint list is empty, it is not enforced.
-func validateCertConstraints(cert *x509.Certificate, role *CertRole) error {
-	if len(role.AllowedCommonNames) > 0 {
-		if !matchesGlob(cert.Subject.CommonName, role.AllowedCommonNames) {
-			return fmt.Errorf("certificate CN %q not allowed by role", cert.Subject.CommonName)
-		}
-	}
-
-	if len(role.AllowedDNSSANs) > 0 {
-		if !matchesAnyGlob(cert.DNSNames, role.AllowedDNSSANs) {
-			return fmt.Errorf("certificate DNS SANs not allowed by role")
-		}
-	}
-
-	if len(role.AllowedEmailSANs) > 0 {
-		if !matchesAnyGlob(cert.EmailAddresses, role.AllowedEmailSANs) {
-			return fmt.Errorf("certificate email SANs not allowed by role")
-		}
-	}
-
-	if len(role.AllowedURISANs) > 0 {
-		matched := false
-		for _, u := range cert.URIs {
-			if helper.MatchAny(u.String(), role.AllowedURISANs) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return fmt.Errorf("certificate URI SANs not allowed by role")
-		}
-	}
-
-	if len(role.AllowedOrganizationalUnits) > 0 {
-		if !matchesAnyExact(cert.Subject.OrganizationalUnit, role.AllowedOrganizationalUnits) {
-			return fmt.Errorf("certificate OU not allowed by role")
-		}
-	}
-
-	if len(role.AllowedOrganizations) > 0 {
-		if !matchesAnyExact(cert.Subject.Organization, role.AllowedOrganizations) {
-			return fmt.Errorf("certificate organization not allowed by role")
-		}
-	}
-
-	return nil
-}
-
-// validCertMetadataFields lists the certificate field selectors usable in a
-// role's metadata_mappings.
-var validCertMetadataFields = map[string]bool{
-	"cn":        true,
-	"serial":    true,
-	"ou":        true,
-	"org":       true,
-	"dns_san":   true,
-	"email_san": true,
-	"uri_san":   true,
-}
-
-// extractCertMetadata builds the token metadata map from verified certificate
-// fields using the role's mappings (cert field selector -> metadata key, source
-// -> key). Empty fields are skipped. Returns nil when nothing was mapped.
-func extractCertMetadata(cert *x509.Certificate, mappings map[string]string) map[string]string {
-	if len(mappings) == 0 {
-		return nil
-	}
-	md := make(map[string]string)
-	for source, target := range mappings {
-		if v := certFieldValue(cert, source); v != "" {
-			md[target] = v
-		}
-	}
-	if len(md) == 0 {
-		return nil
-	}
-	return md
-}
-
-// certFieldValue renders a certificate field selector to a string. Multi-valued
-// fields (OU, Org, and the SAN lists) are comma-joined so the result is a single
-// deterministic metadata value.
-func certFieldValue(cert *x509.Certificate, field string) string {
-	switch field {
-	case "cn":
-		return cert.Subject.CommonName
-	case "serial":
-		return cert.SerialNumber.String()
-	case "ou":
-		return strings.Join(cert.Subject.OrganizationalUnit, ",")
-	case "org":
-		return strings.Join(cert.Subject.Organization, ",")
-	case "dns_san":
-		return strings.Join(cert.DNSNames, ",")
-	case "email_san":
-		return strings.Join(cert.EmailAddresses, ",")
-	case "uri_san":
-		uris := make([]string, len(cert.URIs))
-		for i, u := range cert.URIs {
-			uris[i] = u.String()
-		}
-		return strings.Join(uris, ",")
-	}
-	return ""
+	return certTTL
 }
 
 // extractPrincipal extracts the principal identity from the certificate based on the claim type.
@@ -345,38 +157,4 @@ func extractPrincipal(cert *x509.Certificate, claim string) string {
 		return cert.SerialNumber.String()
 	}
 	return ""
-}
-
-// matchesGlob checks if a value matches any of the glob patterns.
-func matchesGlob(value string, patterns []string) bool {
-	for _, pattern := range patterns {
-		if matched, _ := path.Match(pattern, value); matched {
-			return true
-		}
-	}
-	return false
-}
-
-// matchesAnyGlob checks if any of the values matches any of the glob patterns.
-func matchesAnyGlob(values []string, patterns []string) bool {
-	for _, v := range values {
-		if matchesGlob(v, patterns) {
-			return true
-		}
-	}
-	return false
-}
-
-// matchesAnyExact checks if any of the values matches any of the allowed values exactly.
-func matchesAnyExact(values []string, allowed []string) bool {
-	allowedSet := make(map[string]struct{}, len(allowed))
-	for _, a := range allowed {
-		allowedSet[a] = struct{}{}
-	}
-	for _, v := range values {
-		if _, ok := allowedSet[v]; ok {
-			return true
-		}
-	}
-	return false
 }

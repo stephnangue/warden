@@ -99,7 +99,12 @@ type ProviderSpec struct {
 	// ExtraHeadersToRemove are provider-specific headers to strip beyond the base set.
 	ExtraHeadersToRemove []string
 
-	// DefaultHeaders are static headers always set on proxied requests (e.g., "anthropic-version").
+	// ExtraHeaderPrefixesToRemove strips every header whose name begins with one
+	// of these prefixes, compared case-insensitively — for a header family whose
+	// names the client chooses, such as Kubernetes' Impersonate-Extra-<key>.
+	ExtraHeaderPrefixesToRemove []string
+
+	// DefaultHeaders are static headers always set on proxied requests (e.g., tfe's "Content-Type").
 	DefaultHeaders map[string]string
 
 	// DynamicHeaders returns headers to set based on current config state.
@@ -123,6 +128,15 @@ type ProviderSpec struct {
 	// OnInitialize is called during Initialize to load extra fields from persisted config.
 	OnInitialize func(config map[string]any, state map[string]any) map[string]any
 
+	// OnFirstConfig is called once in a mount's life: when Initialize finds no
+	// persisted config, just before it persists the defaults. It stamps
+	// create-time defaults into state, and only there, so a setting a new mount
+	// gets on by default can stay off for a mount created before the setting
+	// existed (whose persisted config simply lacks the key). It receives a copy
+	// of the state and must leave keys already set (from mount-time config)
+	// alone.
+	OnFirstConfig func(state map[string]any) map[string]any
+
 	// ValidateExtraConfig is called during config validation for extra fields.
 	// If nil, no extra validation is performed beyond the standard fields.
 	ValidateExtraConfig func(conf map[string]any) error
@@ -145,7 +159,38 @@ type ProviderSpec struct {
 	// map (concurrent writers replace the reference under the write lock, so
 	// in-place mutation here would race). Reads are safe because OnConfigWrite
 	// receives a clone, so the live map is never mutated in place.
+	//
+	// It may run several times for one request (ShouldParseStreamBody,
+	// StreamBodyLimit and the gateway each resolve it), so it must be cheap,
+	// deterministic for a given request and state, and free of side effects.
 	ResolveUpstream func(r *http.Request, providerURL string, state map[string]any) (Dispatch, bool)
+
+	// RefuseRequest optionally refuses a request the provider will not forward —
+	// an operation it does not support, or an upstream it no longer trusts — by
+	// returning the status to answer with and the client-facing reason. A nil
+	// error lets the request through, and so does an unset hook.
+	//
+	// It runs in the gateway, after authentication, policy and credential
+	// issuance, with providerURL already resolved by ResolveUpstream and before
+	// any credential is extracted, so nothing reaches the upstream for a refused
+	// request. It only ever narrows what policy allowed. The same rules as
+	// ResolveUpstream apply: cheap, side-effect free, state read and never mutated.
+	RefuseRequest func(r *http.Request, providerURL string, state map[string]any) (int, error)
+
+	// RewriteResponse and ModifyResponse optionally let a provider rewrite an
+	// upstream response — Graph's absolute paging links, say, back onto the
+	// gateway. RewriteResponse decides per request (state as for ResolveUpstream:
+	// read, never mutate); when it returns true and Warden knows its external base
+	// URL, the gateway asks the upstream for an uncompressed body and hands the
+	// response to ModifyResponse with a RewriteContext. Both must be set for
+	// either to take effect; a provider that sets neither pays nothing.
+	//
+	// ModifyResponse runs on the proxy's response path for every rewritten
+	// request, concurrently, so it must be safe for concurrent use and should fail
+	// open: a body it cannot rewrite is better passed through than refused. An
+	// error it returns is answered by the proxy as a 502.
+	RewriteResponse func(r *http.Request, state map[string]any) bool
+	ModifyResponse  func(resp *http.Response, rc RewriteContext) error
 
 	// GetAuthRoleFromRequest optionally extracts the auth role from request
 	// context. The shared httpproxy backend wires this into the core's
@@ -179,8 +224,8 @@ type ProviderSpec struct {
 	// StreamUnauthenticated guard).
 	IsUnauthenticatedRequest func(r *http.Request, path string) bool
 
-	// ShouldEnforceMCPPolicy optionally opts this provider into CBP
-	// `mcp { }` body-authoritative policy enforcement. When set, the
+	// ShouldEnforceMCPPolicy optionally opts this provider into
+	// body-authoritative MCP policy enforcement. When set, the
 	// core handler calls this hook on every request matched to this
 	// backend; if it returns true the request body is buffered and
 	// strict-parsed as JSON-RPC before policy evaluation runs. The
@@ -196,6 +241,43 @@ type ProviderSpec struct {
 	// the framework's stream-body parser would consume the body before
 	// the MCP extractor runs.
 	ShouldEnforceMCPPolicy func(req *logical.Request) bool
+
+	// SelectTimeout optionally picks a per-request deadline in place of the
+	// mount's timeout, from whatever the gateway already knows about the
+	// request — for MCP providers, the parsed method on req.MCPDescriptor.
+	//
+	// Return 0 for "use the mount timeout"; that is also the behaviour when
+	// the hook is unset, so a provider that does not set it is untouched.
+	// state is the backend's extraState, handed off under the same read-lock
+	// snapshot as ResolveUpstream and subject to the same rule: read it,
+	// never mutate it.
+	//
+	// This exists so one mount can bound an open-ended subscription and an
+	// ordinary call differently. Raising the mount timeout to hold a stream
+	// open would instead give every hung call on the mount that same
+	// ceiling.
+	SelectTimeout func(req *logical.Request, state map[string]any) time.Duration
+
+	// RenderGatewayError optionally answers a gateway request Warden failed
+	// itself — authentication, policy, credential issuance — in the upstream's
+	// native error shape, so the provider's SDKs read it as they would one of
+	// the upstream's own errors instead of failing to parse Warden's generic
+	// {"errors": [...]} body. It is never called for an error the upstream sent:
+	// those pass through untouched.
+	//
+	// Return nil to keep Warden's generic body; that is also the behaviour when
+	// the hook is unset, so a provider that does not set it is untouched. The
+	// response must carry StatusCode, Headers and Body, and StatusCode must be
+	// f.Status: the status is Warden's decision about retryability, and the
+	// renderer only changes how it is worded. The one exception is a failure
+	// whose protocol prescribes its own status, as MCP does a header
+	// mismatch's 400; core only ever raises those itself, never the gateway.
+	//
+	// It takes the HTTP request rather than the logical one so the gateway's
+	// own failures, which have only the HTTP request, can be rendered by the
+	// same hook. On an MCP mount that request carries the id of the call
+	// being answered; see WithMCPCallID.
+	RenderGatewayError func(r *http.Request, f *logical.GatewayFailure) *logical.Response
 }
 
 // proxyBackend is the concrete backend type created by NewFactory.
@@ -207,6 +289,14 @@ type proxyBackend struct {
 	mu            sync.RWMutex
 	tlsSkipVerify bool
 	caData        string
+
+	// externalBaseURL is core's ExternalBaseURL, for RewriteContext.Prefix. Nil
+	// outside core, which turns response rewriting off.
+	externalBaseURL func(ctx context.Context) string
+
+	// configWriteMu serializes config writes, so each one validates, persists
+	// and applies against the configuration the previous one left.
+	configWriteMu sync.Mutex
 }
 
 // ValidateSpec checks that required ProviderSpec fields are set.
@@ -255,8 +345,9 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 			sharedTransport, shutdownFn = newTransport()
 		})
 		b := &proxyBackend{
-			spec:       spec,
-			extraState: make(map[string]any),
+			spec:            spec,
+			extraState:      make(map[string]any),
+			externalBaseURL: conf.ExternalBaseURL,
 		}
 
 		tokenExtractor := spec.ExtractToken
@@ -309,6 +400,12 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 		// if conf.Config carries non-empty values.
 		b.StreamingBackend.SetTransparentConfig(&framework.TransparentConfig{})
 
+		// A spec that renders its errors answers the proxy's own failures (502,
+		// 504) the same way. Set before InitProxy: the proxy reads it unlocked.
+		if spec.RenderGatewayError != nil {
+			b.StreamingBackend.ProxyErrorWriter = b.writeProxyFailure
+		}
+
 		// Initialize reverse proxy with provider-type shared transport
 		b.StreamingBackend.InitProxy(sharedTransport)
 
@@ -350,7 +447,8 @@ func NewFactory(spec *ProviderSpec) logical.Factory {
 				AutoAuthPath:    parsedConfig.AutoAuthPath,
 				DefaultAuthRole: parsedConfig.DefaultAuthRole,
 				UserAuthPath:    parsedConfig.UserAuthPath,
-				UserAuthRole:    parsedConfig.UserAuthRole,
+
+				UserAuthRoleStored: parsedConfig.UserAuthRoleStored,
 			})
 
 			// Apply TLS configuration if provided
@@ -379,6 +477,10 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 	if b.StorageView == nil {
 		return nil
 	}
+	// The mount is routed before it is initialized, so a config write can
+	// arrive now; it must not interleave with loading the stored config.
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
 
 	entry, err := b.StorageView.Get(ctx, "config")
 	if err != nil {
@@ -403,15 +505,20 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 		}
 
 		if timeoutStr, ok := config["timeout"].(string); ok && timeoutStr != "" {
-			if timeout, err := time.ParseDuration(timeoutStr); err == nil {
+			// A stored zero keeps the default: the timeout is the only bound
+			// on how long an upstream may take.
+			if timeout, err := time.ParseDuration(timeoutStr); err == nil && timeout > 0 {
 				b.SetTimeout(timeout)
+			} else if err == nil {
+				b.Logger.Warn("ignoring stored timeout that is not positive; keeping the default",
+					logger.String("timeout", timeoutStr),
+					logger.String("default", b.Timeout().String()))
 			}
 		}
 
 		autoAuthPath, _ := config["auto_auth_path"].(string)
 		defaultRole, _ := config["default_role"].(string)
 		userAuthPath, _ := config["user_auth_path"].(string)
-		userAuthRole, _ := config["user_auth_role"].(string)
 		// A persisted user_token_header from a pre-0.20 config is ignored: the
 		// user credential now always rides Authorization.
 		if hdr, _ := config["user_token_header"].(string); hdr != "" {
@@ -422,7 +529,8 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 			AutoAuthPath:    autoAuthPath,
 			DefaultAuthRole: defaultRole,
 			UserAuthPath:    userAuthPath,
-			UserAuthRole:    userAuthRole,
+
+			UserAuthRoleStored: framework.HasUserAuthRole(config),
 		})
 
 		// Load TLS configuration
@@ -445,6 +553,14 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 		}
 		b.mu.Unlock()
 	} else {
+		// No persisted config: this mount is new. Stamp the spec's create-time
+		// defaults before persisting, so they land in storage and survive reloads.
+		if b.spec.OnFirstConfig != nil {
+			b.mu.Lock()
+			b.extraState = b.spec.OnFirstConfig(cloneExtraState(b.extraState))
+			b.mu.Unlock()
+		}
+
 		// No persisted config — persist defaults
 		tc := b.TransparentConfig()
 		b.mu.RLock()
@@ -455,7 +571,6 @@ func (b *proxyBackend) Initialize(ctx context.Context) error {
 			"auto_auth_path":    tc.AutoAuthPath,
 			"default_role":      tc.DefaultAuthRole,
 			"user_auth_path":    tc.UserAuthPath,
-			"user_auth_role":    tc.UserAuthRole,
 			"tls_skip_verify":   b.tlsSkipVerify,
 			"ca_data":           b.caData,
 		}
@@ -520,6 +635,22 @@ var _ logical.TransparentAuthRoleExtractor = (*proxyBackend)(nil)
 // assertion catches regressions where someone changes the override
 // signature in a way that breaks interface satisfaction.
 var _ logical.TransparentModeProvider = (*proxyBackend)(nil)
+
+// Compile-time assertion that proxyBackend satisfies GatewayErrorRenderer. The
+// implementation delegates to spec.RenderGatewayError; providers that leave the
+// hook nil decline, which keeps Warden's generic error exactly as before.
+var _ logical.GatewayErrorRenderer = (*proxyBackend)(nil)
+
+// RenderGatewayError delegates to the optional spec hook. See
+// ProviderSpec.RenderGatewayError for the contract. Core calls it only for a
+// streamed gateway request, which always carries its HTTP request, and always
+// with a failure.
+func (b *proxyBackend) RenderGatewayError(req *logical.Request, f *logical.GatewayFailure) *logical.Response {
+	if b.spec.RenderGatewayError == nil {
+		return nil
+	}
+	return b.spec.RenderGatewayError(WithMCPCallID(req), f)
+}
 
 // GetAuthRoleFromRequest delegates to the optional spec hook. See
 // ProviderSpec.GetAuthRoleFromRequest for the contract.
@@ -615,4 +746,29 @@ func (b *proxyBackend) ShouldParseStreamBody(r *http.Request) bool {
 		}
 	}
 	return b.ParseStreamBody
+}
+
+// Compile-time assertion that proxyBackend reports its body cap to core.
+var _ logical.StreamBodyLimiter = (*proxyBackend)(nil)
+
+// StreamBodyLimit overrides the embedded StreamingBackend's mount-wide cap with
+// the cap the gateway will enforce for this request: a ResolveUpstream dispatch's
+// MaxBodySize when it sets one, else the mount's max_body_size, else the default.
+// It mirrors the gateway's own computation (handleGateway) so the bytes core
+// buffers to parse for policy never exceed what the gateway would forward.
+func (b *proxyBackend) StreamBodyLimit(r *http.Request) int64 {
+	limit := b.MaxBodySize()
+	if b.spec.ResolveUpstream != nil && r != nil {
+		b.mu.RLock()
+		providerURL := b.providerURL
+		state := b.extraState
+		b.mu.RUnlock()
+		if d, ok := b.spec.ResolveUpstream(r, providerURL, state); ok && d.MaxBodySize > 0 {
+			limit = d.MaxBodySize
+		}
+	}
+	if limit <= 0 {
+		limit = framework.DefaultMaxBodySize
+	}
+	return limit
 }

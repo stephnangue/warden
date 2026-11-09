@@ -66,12 +66,11 @@ Supported seal types (the `type` label of the [seal stanza](#configuring-the-sea
 
 | `type` | Backing service |
 |--------|-----------------|
-| `transit` | A Vault/OpenBao Transit mount |
+| `transit` | A Vault/OpenBao Transit mount, whose key an HSM can back ([A key held in an HSM](/configuration/seal/transit/#a-key-held-in-an-hsm)) |
 | `awskms` | AWS KMS |
-| `gcpkms` | Google Cloud KMS |
+| `gcpckms` | Google Cloud KMS |
 | `azurekeyvault` | Azure Key Vault |
 | `ocikms` | Oracle Cloud KMS |
-| `pkcs11` | A PKCS#11 HSM |
 | `kmip` | A KMIP server |
 | `static` | A static key supplied directly in the config (`current_key` / `current_key_id`, with optional `previous_*` for rotation) |
 | `shamir` | Shamir secret sharing (the root key split into shares) — see below |
@@ -79,7 +78,7 @@ Supported seal types (the `type` label of the [seal stanza](#configuring-the-sea
 ## Initialization
 
 A new server is **initialized once**. Initialization generates the root key,
-sets up the barrier, and issues the first [root token](/concepts/tokens/):
+sets up the barrier, and issues the first [root token](/identity/tokens/):
 
 ```bash
 warden operator init
@@ -166,5 +165,5 @@ which is exactly why dev mode is never for production.
 
 - [Storage](/concepts/storage/) — the backend the barrier encrypts.
 - [High Availability](/concepts/high-availability/) — why auto-unseal matters for a cluster.
-- [Tokens](/concepts/tokens/) — the root token that initialization issues.
+- [Tokens](/identity/tokens/) — the root token that initialization issues.
 - [Dev Server](/concepts/dev-server/) — auto-init and auto-unseal for local work.

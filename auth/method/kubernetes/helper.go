@@ -17,59 +17,62 @@ var errAuthFailed = fmt.Errorf("authentication failed")
 const serviceAccountUsernamePrefix = "system:serviceaccount:"
 
 // parseSAUsername splits a TokenReview status.user.username into the
-// namespace and service account name. Returns false if the username
-// doesn't start with the mandatory prefix or is otherwise malformed
-// (e.g. system:anonymous, system:node:..., or an OIDC user).
+// namespace and service account name, as the API server splits its own
+// service-account usernames: after the mandatory prefix, exactly two
+// ":"-separated parts, the namespace a DNS-1123 label and the name a DNS-1123
+// subdomain. Anything else is not a service account and returns false (e.g.
+// system:anonymous, system:node:..., an OIDC user, or ns:name:extra).
 func parseSAUsername(username string) (namespace, name string, ok bool) {
 	rest, found := strings.CutPrefix(username, serviceAccountUsernamePrefix)
 	if !found {
 		return "", "", false
 	}
-	parts := strings.SplitN(rest, ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	namespace, name, found = strings.Cut(rest, ":")
+	if !found || strings.Contains(name, ":") {
 		return "", "", false
 	}
-	return parts[0], parts[1], true
+	if !isDNS1123Label(namespace) || !isDNS1123Subdomain(name) {
+		return "", "", false
+	}
+	return namespace, name, true
 }
 
-// matchBoundList returns true if want is in the bound list, or if the
-// list contains "*" (wildcard). Empty bound list rejects everything —
-// the caller is responsible for refusing role configs with both
-// bound_service_account_names and bound_service_account_namespaces empty.
-func matchBoundList(bound []string, want string) bool {
-	for _, b := range bound {
-		if b == "*" || b == want {
-			return true
+// isDNS1123Label reports whether s is a DNS-1123 label: 1 to 63 characters of
+// lowercase letters, digits and '-', starting and ending with a letter or
+// digit.
+func isDNS1123Label(s string) bool {
+	return len(s) <= 63 && isLabelText(s)
+}
+
+// isDNS1123Subdomain reports whether s is a DNS-1123 subdomain: at most 253
+// characters of DNS-1123 labels joined by '.'. As in the API server, only the
+// whole is bounded; a label is not held to 63 characters here.
+func isDNS1123Subdomain(s string) bool {
+	if len(s) == 0 || len(s) > 253 {
+		return false
+	}
+	for label := range strings.SplitSeq(s, ".") {
+		if !isLabelText(label) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
-// matchRoleBindings returns nil if the (namespace, name) pair satisfies
-// the role's bound_service_account_namespaces and bound_service_account_names.
-// Returns a descriptive error for server-side logging; callers should
-// return errAuthFailed to clients.
-func matchRoleBindings(role *KubernetesRole, namespace, name string) error {
-	if !matchBoundList(role.BoundServiceAccountNamespaces, namespace) {
-		return fmt.Errorf("service account namespace %q not in role's bound list", namespace)
+// isLabelText reports whether s is one or more lowercase letters, digits and
+// '-', starting and ending with a letter or digit, of any length.
+func isLabelText(s string) bool {
+	if len(s) == 0 {
+		return false
 	}
-	if !matchBoundList(role.BoundServiceAccountNames, name) {
-		return fmt.Errorf("service account name %q not in role's bound list", name)
-	}
-	return nil
-}
-
-// audienceMatches returns true if want is empty (role declared no
-// audience requirement) or want appears in the TokenReview's returned
-// status.audiences slice.
-func audienceMatches(want string, got []string) bool {
-	if want == "" {
-		return true
-	}
-	for _, a := range got {
-		if a == want {
-			return true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '-' && i > 0 && i < len(s)-1:
+		default:
+			return false
 		}
 	}
-	return false
+	return true
 }

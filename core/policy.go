@@ -11,7 +11,6 @@ import (
 	"github.com/hashicorp/go-secure-stdlib/parseutil"
 	"github.com/hashicorp/hcl"
 	"github.com/hashicorp/hcl/hcl/ast"
-	"github.com/mitchellh/copystructure"
 	"github.com/openbao/openbao/sdk/v2/helper/hclutil"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/stephnangue/warden/internal/namespace"
@@ -44,15 +43,23 @@ const (
 
 type PolicyType uint32
 
-// CPB is meant for Capability-Based Policy
+// CBP is meant for Capability-Based Policy. MCP policies are purely
+// restrictive: they grant nothing on their own and are ANDed with the CBP
+// decision at request time.
+//
+// These values are persisted verbatim in PolicyEntry.Type, so the ordering is
+// storage-stable: append new types at the end, never reorder or reuse a value.
 const (
 	PolicyTypeCBP PolicyType = iota
+	PolicyTypeMCP
 )
 
 func (p PolicyType) String() string {
 	switch p {
 	case PolicyTypeCBP:
 		return "cbp"
+	case PolicyTypeMCP:
+		return "mcp"
 	}
 
 	return ""
@@ -82,6 +89,55 @@ type Policy struct {
 	Expiration  time.Time
 	Modified    time.Time
 	namespace   *namespace.Namespace
+
+	// info is the one-element granting-policies answer of every request this
+	// policy alone grants. Built by finalize, before the policy is published
+	// to the cache, so the request path never allocates it. Shared and read
+	// only once published; nil on a policy that was never finalized.
+	info []sdklogical.PolicyInfo
+}
+
+// grantRef is one policy merged into a compiled path entry after the first,
+// with the capabilities its stanza brought and the condition they answer to.
+type grantRef struct {
+	policy *Policy
+	caps   uint32
+	cond   *compiledCondition
+}
+
+// policyInfo is the granting-policies record naming p.
+func policyInfo(p *Policy) sdklogical.PolicyInfo {
+	info := sdklogical.PolicyInfo{Name: p.Name, Type: "cbp"}
+	if p.namespace != nil {
+		info.NamespaceId, info.NamespacePath = p.namespace.ID, p.namespace.Path
+	}
+	return info
+}
+
+// grantInfo returns the slice naming p as sole granter: the shared one built
+// by finalize, or, for a policy never finalized, a fresh one.
+func (p *Policy) grantInfo() []sdklogical.PolicyInfo {
+	if p.info != nil {
+		return p.info
+	}
+	return []sdklogical.PolicyInfo{policyInfo(p)}
+}
+
+// finalize prepares a freshly built policy for sharing, once, before it is
+// published to the policy cache: it builds the granting-policies slice and
+// stamps each MCP rule-set with the policy's name. NewCBP then indexes the
+// parsed objects as they are, without copying them; nothing writes them
+// afterwards.
+func (p *Policy) finalize() {
+	p.info = []sdklogical.PolicyInfo{policyInfo(p)}
+	for _, pc := range p.Paths {
+		if pc == nil || pc.Permissions == nil {
+			continue
+		}
+		for _, m := range pc.Permissions.MCP {
+			m.SourcePolicy = p.Name
+		}
+	}
 }
 
 // ShallowClone returns a shallow clone of the policy. This should not be used
@@ -108,6 +164,11 @@ type PathRules struct {
 	HasSegmentWildcards bool
 	Capabilities        []string
 
+	// segments is a segment-wildcard path split on "/", its trailing "*"
+	// dropped. Split once at parse, since a deny rule compares it on every
+	// request and NewCBP runs on every request.
+	segments []string
+
 	ExpirationRaw string    `hcl:"expiration"`
 	Expiration    time.Time `hcl:"-"`
 
@@ -122,19 +183,21 @@ type PathRules struct {
 
 	// ConditionHCL is the optional path-level CEL condition expression. The
 	// rule applies only if it evaluates true (in addition to the structured
-	// gates). Compiled at parse time into pc.Permissions.Conditions.
+	// gates). Compiled at parse time into pc.Permissions.Condition.
 	ConditionHCL string `hcl:"condition"`
 
-	// MCPHCL is the parsed `mcp { }` block. Nil when no such block is
-	// present on this path stanza. Stored on PathRules as the HCL
-	// decode target; the parser then validates it and appends a
-	// CBPMCPRules entry to pc.Permissions.MCP.
+	// MCPHCL is the decode target for the removed `mcp { }` block. It exists
+	// only so parsePaths can detect a policy still carrying one and reject it
+	// with a directed error pointing at sys/policies/mcp/<name>; a non-nil
+	// value never reaches canonicalisation.
 	MCPHCL *MCPRulesHCL `hcl:"mcp"`
 }
 
-// MCPRulesHCL is the HCL decode shape of one `mcp { }` block. Each
-// field corresponds to one operator-facing key inside the block; the
-// parser canonicalises (lowercases) all entries and validates wildcard
+// MCPRulesHCL is the canonical decode shape of one MCP rule-set. An MCP
+// policy's path stanza flattens into it (see mcpPolicyPathHCL.flatten), and
+// it is also the decode target for the removed `mcp { }` block so that block
+// can be detected and rejected. Each field corresponds to one
+// operator-facing key; the parser canonicalises (lowercases) all entries and validates wildcard
 // patterns before populating the internal CBPMCPRules form.
 type MCPRulesHCL struct {
 	AllowedMethods   []string            `hcl:"allowed_methods"`
@@ -153,24 +216,33 @@ type MCPRulesHCL struct {
 type CBPPermissions struct {
 	CapabilitiesBitmap     uint32
 	PaginationLimit        int
-	GrantingPoliciesMap    map[uint32][]sdklogical.PolicyInfo
 	ResponseKeysFilterPath string
-	// Conditions holds compiled path-level CEL conditions from all merged
-	// policies for this path. nil means no condition (unconditional at this
-	// layer). Non-nil: the gate passes if at least one program evaluates true
-	// (OR across policies). Programs are immutable and shared (not deep-copied)
-	// across merged CBPs.
-	Conditions []*compiledCondition
-	// MCP holds mcp { } rule-sets from all merged policies for this path.
+	// owner is the policy whose stanza created this compiled entry, ownerCaps
+	// the capabilities that stanza brought, and extra the policies merged in
+	// after it. Together they answer grantingFor. Set by NewCBP on its own
+	// copy; nil on a parsed stanza.
+	owner     *Policy
+	ownerCaps uint32
+	extra     []grantRef
+	// unconditionalCaps is the capabilities some stanza at this path brought
+	// with no condition. A capability in it is granted without evaluating
+	// anything. Set by NewCBP on its own copy.
+	unconditionalCaps uint32
+	// Condition is the compiled path-level CEL condition of the stanza these
+	// permissions came from, gating that stanza's capabilities and no others.
+	// On a compiled entry it is the owner's; extra holds the others. nil means
+	// no condition. Programs are immutable and shared across merged CBPs.
+	Condition *compiledCondition
+	// MCP holds MCP rule-sets from all merged policies for this path.
 	// nil/empty means no MCP enforcement applies. Non-nil: each entry is one
-	// source stanza's mcp block; a request is allowed if at least one set
+	// source stanza's rules; a request is allowed if at least one set
 	// allows it (OR between sets), with the strongest-reason audit picked
 	// on full deny. Populated by parsePaths via append per stanza so multiple
 	// `path` blocks at the same path layer naturally into multiple rule-sets.
 	MCP []*CBPMCPRules
 }
 
-// CBPMCPRules holds one merged mcp { } rule-set after validation and
+// CBPMCPRules holds one merged MCP rule-set after validation and
 // canonicalisation. All list entries are lowercased; param-name keys
 // are lowercased and hyphens preserved. Patterns use trailing-`*` only
 // per the policy Semantics; the parser rejects leading or internal `*`
@@ -188,108 +260,78 @@ type CBPMCPRules struct {
 	// compiled against the MCP env (call.* available). The set allows a call
 	// only if its structural gates pass AND this condition evaluates true.
 	Condition *compiledCondition
+
+	// SourcePolicy names the MCP policy this rule-set came from, stamped onto
+	// the decision for audit. Contracts are separately-owned documents, so
+	// "which policy denied this?" is not answerable from the matched rule
+	// alone. Set by the index at compile time, not by the parser.
+	SourcePolicy string
 }
 
-// Clone returns a deep copy of the CBPMCPRules. Safe to call on a nil
-// receiver (returns nil). All slices and maps are independently
-// allocated so mutating the clone never affects the original.
-func (m *CBPMCPRules) Clone() *CBPMCPRules {
-	if m == nil {
+// grantingFor names the policies whose stanzas granted capability cap on this
+// request, owner first, then merged policies in insertion order. passed is the
+// condition that admitted the request, nil when an unconditional stanza did:
+// only the stanzas answering to it granted anything. When the owner alone
+// granted, the answer is the owner's shared slice and costs no allocation; only
+// a grant shared by several policies builds a new one.
+func (p *CBPPermissions) grantingFor(cap uint32, passed *compiledCondition) []sdklogical.PolicyInfo {
+	if p.owner == nil {
 		return nil
 	}
-	clone := &CBPMCPRules{}
-	if m.AllowedMethods != nil {
-		clone.AllowedMethods = append([]string(nil), m.AllowedMethods...)
+	ownerGranted := p.ownerCaps&cap != 0 && p.Condition == passed
+	n := 0
+	if ownerGranted {
+		n++
 	}
-	if m.DeniedMethods != nil {
-		clone.DeniedMethods = append([]string(nil), m.DeniedMethods...)
+	for _, g := range p.extra {
+		if g.caps&cap != 0 && g.cond == passed {
+			n++
+		}
 	}
-	if m.AllowedTools != nil {
-		clone.AllowedTools = append([]string(nil), m.AllowedTools...)
+	switch {
+	case n == 0:
+		return nil
+	case n == 1 && ownerGranted:
+		return p.owner.grantInfo()
 	}
-	if m.DeniedTools != nil {
-		clone.DeniedTools = append([]string(nil), m.DeniedTools...)
+	out := make([]sdklogical.PolicyInfo, 0, n)
+	if ownerGranted {
+		out = append(out, policyInfo(p.owner))
 	}
-	if m.AllowedResources != nil {
-		clone.AllowedResources = append([]string(nil), m.AllowedResources...)
+	for _, g := range p.extra {
+		if g.caps&cap != 0 && g.cond == passed {
+			out = append(out, policyInfo(g.policy))
+		}
 	}
-	if m.DeniedResources != nil {
-		clone.DeniedResources = append([]string(nil), m.DeniedResources...)
-	}
-	if m.AllowedPrompts != nil {
-		clone.AllowedPrompts = append([]string(nil), m.AllowedPrompts...)
-	}
-	if m.DeniedPrompts != nil {
-		clone.DeniedPrompts = append([]string(nil), m.DeniedPrompts...)
-	}
-	// Program is immutable; share the pointer.
-	clone.Condition = m.Condition
-	return clone
+	return out
 }
 
-func (p *CBPPermissions) Clone() (*CBPPermissions, error) {
-	ret := &CBPPermissions{
-		CapabilitiesBitmap:     p.CapabilitiesBitmap,
-		PaginationLimit:        p.PaginationLimit,
-		ResponseKeysFilterPath: p.ResponseKeysFilterPath,
+// conditionsFor appends to buf the conditions of the conditional stanzas that
+// bring capability cap. A caller passes a stack buffer, so the common case
+// allocates nothing.
+func (p *CBPPermissions) conditionsFor(cap uint32, buf []*compiledCondition) []*compiledCondition {
+	if p.ownerCaps&cap != 0 && p.Condition != nil {
+		buf = append(buf, p.Condition)
 	}
-
-	switch {
-	case p.GrantingPoliciesMap == nil:
-	case len(p.GrantingPoliciesMap) == 0:
-		ret.GrantingPoliciesMap = make(map[uint32][]sdklogical.PolicyInfo)
-	default:
-		clonedGrantingPoliciesMap, err := copystructure.Copy(p.GrantingPoliciesMap)
-		if err != nil {
-			return nil, err
-		}
-		ret.GrantingPoliciesMap = clonedGrantingPoliciesMap.(map[uint32][]sdklogical.PolicyInfo)
-	}
-
-	switch {
-	case p.Conditions == nil:
-	case len(p.Conditions) == 0:
-		ret.Conditions = make([]*compiledCondition, 0)
-	default:
-		// Programs are immutable; copy the slice of pointers, not the programs.
-		ret.Conditions = append([]*compiledCondition(nil), p.Conditions...)
-	}
-
-	switch {
-	case p.MCP == nil:
-	case len(p.MCP) == 0:
-		ret.MCP = make([]*CBPMCPRules, 0)
-	default:
-		ret.MCP = make([]*CBPMCPRules, len(p.MCP))
-		for i, m := range p.MCP {
-			ret.MCP[i] = m.Clone()
+	for i := range p.extra {
+		if g := &p.extra[i]; g.caps&cap != 0 && g.cond != nil {
+			buf = append(buf, g.cond)
 		}
 	}
-
-	return ret, nil
+	return buf
 }
 
-func addGrantingPoliciesToMap(m map[uint32][]sdklogical.PolicyInfo, policy *Policy, capabilitiesBitmap uint32) map[uint32][]sdklogical.PolicyInfo {
-	if m == nil {
-		m = make(map[uint32][]sdklogical.PolicyInfo)
+// carries reports whether a stanza answering to condition cond brings cap.
+func (p *CBPPermissions) carries(cond *compiledCondition, cap uint32) bool {
+	if p.ownerCaps&cap != 0 && p.Condition == cond {
+		return true
 	}
-
-	// For all possible policies, check if the provided capabilities include
-	// them
-	for _, capability := range cap2Int {
-		if capabilitiesBitmap&capability == 0 {
-			continue
+	for i := range p.extra {
+		if g := &p.extra[i]; g.caps&cap != 0 && g.cond == cond {
+			return true
 		}
-
-		m[capability] = append(m[capability], sdklogical.PolicyInfo{
-			Name:          policy.Name,
-			NamespaceId:   policy.namespace.ID,
-			NamespacePath: policy.namespace.Path,
-			Type:          "cbp",
-		})
 	}
-
-	return m
+	return false
 }
 
 // ParseCBPPolicy is used to parse the specified CBP rules into an
@@ -336,6 +378,12 @@ func parseCBPPolicy(ns *namespace.Namespace, rules string) (*Policy, error) {
 			return nil, fmt.Errorf("failed to parse policy: %w", err)
 		}
 	}
+	// A parsed policy always carries Paths, empty for a body with no stanza:
+	// nil reads as "never parsed" to PolicyStore.CBP, which would parse the
+	// body again on every request that names this policy.
+	if p.Paths == nil {
+		p.Paths = []*PathRules{}
+	}
 
 	return &p, nil
 }
@@ -377,6 +425,25 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			return multierror.Prefix(err, fmt.Sprintf("path %q:", key))
 		}
 
+		// Checked before the deny capability's `goto PathFinished`, which would
+		// skip a check placed later in the loop body and let a denying stanza
+		// carry the removed block forever. Because this rejects every non-nil
+		// MCPHCL, no `mcp { }` block ever reaches canonicalisation — MCPHCL is
+		// a detector, not a decode path (see its field doc).
+		if pc.MCPHCL != nil {
+			return fmt.Errorf("path %q: the mcp { } block has been removed from capability policies — "+
+				"MCP rules now live in their own policy, written to sys/policies/mcp/<name>, whose "+
+				"path stanzas group rules by what they govern:\n"+
+				"    path %q {\n"+
+				"      methods { allowed = [\"tools/call\"] }\n"+
+				"      tools {\n"+
+				"        allowed = [\"get_repository\"]\n"+
+				"        denied  = [\"delete_*\"]\n"+
+				"      }\n"+
+				"    }\n"+
+				"Create one and attach it to the token alongside this policy", key, key)
+		}
+
 		if len(pc.ExpirationRaw) > 0 {
 			expiration, err := parseutil.ParseAbsoluteTime(pc.ExpirationRaw)
 			if err != nil {
@@ -394,30 +461,27 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			}
 		}
 
-		// Strip a leading '/' as paths in Vault start after the / in the API path
-		if len(pc.Path) > 0 && pc.Path[0] == '/' {
-			pc.Path = pc.Path[1:]
+		normPath, isPrefix, hasSegmentWildcards, segments, err := normalizePathPattern(result.namespace, pc.Path)
+		if err != nil {
+			return err
 		}
+		pc.Path = normPath
+		pc.IsPrefix = isPrefix
+		pc.HasSegmentWildcards = hasSegmentWildcards
+		pc.segments = segments
 
-		// Ensure we are using the full request path internally
-		pc.Path = result.namespace.Path + pc.Path
-
-		if strings.Contains(pc.Path, "+*") {
-			return fmt.Errorf("path %q: invalid use of wildcards ('+*' is forbidden)", pc.Path)
-		}
-
-		if pc.Path == "+" || strings.Count(pc.Path, "/+") > 0 || strings.HasPrefix(pc.Path, "+/") {
-			pc.HasSegmentWildcards = true
-		}
-
-		if strings.HasSuffix(pc.Path, "*") {
-			// If there are segment wildcards, don't actually strip the
-			// trailing asterisk, but don't want to hit the default case
-			if !pc.HasSegmentWildcards {
-				// Strip the glob character if found
-				pc.Path = strings.TrimSuffix(pc.Path, "*")
-				pc.IsPrefix = true
+		// Compiled before the capabilities, whose deny case jumps past the
+		// rest of the stanza: a deny's condition decides when it applies.
+		if pc.ConditionHCL != "" {
+			env, err := baseCELEnv()
+			if err != nil {
+				return fmt.Errorf("path %q: cel env: %w", key, err)
 			}
+			cond, err := compileCELCondition(env, pc.ConditionHCL)
+			if err != nil {
+				return fmt.Errorf("path %q condition: %w", key, err)
+			}
+			pc.Permissions.Condition = cond
 		}
 
 		// Initialize the map
@@ -485,27 +549,7 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 				"source_ip → cidrContains(\"…\", request.client_ip); "+
 				"time_window → now.getHours(tz)/getMinutes(tz); "+
 				"day_of_week → now.getDayOfWeek(\"UTC\"); "+
-				"token_metadata → token.metadata.<key>", key)
-		}
-
-		if pc.ConditionHCL != "" {
-			env, err := baseCELEnv()
-			if err != nil {
-				return fmt.Errorf("path %q: cel env: %w", key, err)
-			}
-			cond, err := compileCELCondition(env, pc.ConditionHCL)
-			if err != nil {
-				return fmt.Errorf("path %q condition: %w", key, err)
-			}
-			pc.Permissions.Conditions = []*compiledCondition{cond}
-		}
-
-		if pc.MCPHCL != nil {
-			rules, err := canonicaliseMCPRules(pc.MCPHCL)
-			if err != nil {
-				return fmt.Errorf("path %q: %w", key, err)
-			}
-			pc.Permissions.MCP = append(pc.Permissions.MCP, rules)
+				"token_metadata → agent.metadata.<key>", key)
 		}
 	PathFinished:
 		paths = append(paths, &pc)
@@ -515,7 +559,50 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 	return nil
 }
 
-// canonicaliseMCPRules converts a parsed mcp { } HCL block into the
+// normalizePathPattern canonicalises a `path "..."` stanza key into the form
+// the policy indexes are keyed on: leading slash stripped, namespace path
+// prefixed, segment wildcards and trailing-glob prefixes detected.
+//
+// Both the CBP and the MCP parser call this. Sharing it is what guarantees the
+// two indexes can never disagree on a path key — a divergence there would make
+// MCP stanzas silently miss the requests they were written for.
+func normalizePathPattern(ns *namespace.Namespace, key string) (path string, isPrefix, hasSegmentWildcards bool, segments []string, err error) {
+	path = key
+
+	// Strip a leading '/' as paths start after the / in the API path
+	if len(path) > 0 && path[0] == '/' {
+		path = path[1:]
+	}
+
+	// Ensure we are using the full request path internally
+	path = ns.Path + path
+
+	if strings.Contains(path, "+*") {
+		return "", false, false, nil, fmt.Errorf("path %q: invalid use of wildcards ('+*' is forbidden)", path)
+	}
+
+	if path == "+" || strings.Count(path, "/+") > 0 || strings.HasPrefix(path, "+/") {
+		hasSegmentWildcards = true
+	}
+
+	if strings.HasSuffix(path, "*") {
+		// If there are segment wildcards, don't actually strip the trailing
+		// asterisk, but don't want to hit the default case
+		if !hasSegmentWildcards {
+			// Strip the glob character if found
+			path = strings.TrimSuffix(path, "*")
+			isPrefix = true
+		}
+	}
+
+	if hasSegmentWildcards {
+		segments = strings.Split(strings.TrimSuffix(path, "*"), "/")
+	}
+
+	return path, isPrefix, hasSegmentWildcards, segments, nil
+}
+
+// canonicaliseMCPRules converts a parsed MCP rule-set into the
 // internal CBPMCPRules form, validating wildcard patterns and
 // lowercasing all entries so AllowOperation can do case-insensitive
 // equality and prefix matching at request time without re-canonicalising.

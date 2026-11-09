@@ -40,11 +40,12 @@ func newMCPRequest(tb testing.TB, path, body string) *logical.Request {
 	return req
 }
 
-// synthesizeMCPDescriptorFromBody mirrors what extractMCPDescriptor
-// does on the production streaming branch: strict-parse the body,
-// then map every parsed JSONRPCRequest to an MCPCall. Lives next to
-// the matcher tests so they exercise the real pipeline without
-// dragging in the request_handler extractor's I/O concerns.
+// synthesizeMCPDescriptorFromBody runs the production pipeline on a body —
+// the strict parser, then the same mcpCallsFromParsed mapping
+// extractMCPDescriptor uses — without dragging in that extractor's I/O
+// concerns. It calls the real mapping rather than restating it, so a field
+// added to the descriptor cannot be gated in tests while production sees a
+// zero value.
 func synthesizeMCPDescriptorFromBody(body []byte) *logical.MCPRequestDescriptor {
 	desc := &logical.MCPRequestDescriptor{}
 	reqs, perr := ParseJSONRPCStrict(body)
@@ -55,15 +56,7 @@ func synthesizeMCPDescriptorFromBody(body []byte) *logical.MCPRequestDescriptor 
 		}
 		return desc
 	}
-	desc.Calls = make([]logical.MCPCall, len(reqs))
-	for i, r := range reqs {
-		desc.Calls[i] = logical.MCPCall{
-			Method:     r.Method,
-			Name:       r.Name,
-			MatchArgs:  classifyArgs(r.Arguments),
-			BatchIndex: i,
-		}
-	}
+	desc.Calls = mcpCallsFromParsed(reqs)
 	return desc
 }
 
@@ -77,17 +70,60 @@ func mustCBP(t testing.TB, rules string) *CBP {
 	return cbp
 }
 
+// mustCBPWithMCP compiles one capability document and one MCP document into a
+// single CBP, which is how a governed mount is configured: the first grants the
+// path, the second constrains what may be called on it.
+func mustCBPWithMCP(t testing.TB, cbpRules, mcpRules string) *CBP {
+	t.Helper()
+	policies := []*Policy{testParsePolicy(t, cbpRules)}
+	if mcpRules != "" {
+		mcp := testParseMCPPolicy(t, mcpRules)
+		mcp.Name = "mcp-contract"
+		policies = append(policies, mcp)
+	}
+	cbp, err := NewCBP(testContext(), policies)
+	require.NoError(t, err)
+	return cbp
+}
+
+// mustCBPWithMCPPolicies compiles one capability document and several named
+// MCP documents into a single CBP, which is how a token carrying more than
+// one contract on the same path evaluates: the rule-sets OR together.
+func mustCBPWithMCPPolicies(t testing.TB, cbpRules string, mcpRules map[string]string) *CBP {
+	t.Helper()
+	policies := []*Policy{testParsePolicy(t, cbpRules)}
+	for name, rules := range mcpRules {
+		mcp := testParseMCPPolicy(t, rules)
+		mcp.Name = name
+		policies = append(policies, mcp)
+	}
+	cbp, err := NewCBP(testContext(), policies)
+	require.NoError(t, err)
+	return cbp
+}
+
+// mustMCPGateway is the shape almost every MCP test needs: the standard gateway
+// grant paired with a tool contract on the same path. body is the inside of the
+// MCP stanza.
+func mustMCPGateway(t testing.TB, body string) *CBP {
+	t.Helper()
+	return mustCBPWithMCP(t,
+		"path \"mcp/gateway/*\" {\n  capabilities = [\"update\"]\n}\n",
+		"path \"mcp/gateway/*\" {\n"+body+"\n}\n")
+}
+
 // =============================================================================
 // Method gate
 // =============================================================================
 
 func TestMCPEval_AllowedMethods_Match(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -106,12 +142,13 @@ path "mcp/gateway/*" {
 }
 
 func TestMCPEval_AllowedMethods_NoMatch(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -138,16 +175,22 @@ func TestMCPEval_LifecycleMethods_ExemptFromMethodGate(t *testing.T) {
 	// initialize / ping / notifications/* must pass even though the block
 	// allow-lists only data-plane methods — otherwise the MCP handshake
 	// breaks. The exemption skips the allowed_methods gate for them.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list"]
-    allowed_tools   = ["*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list"] }
+  tools { allowed = ["*"] }
 }
 `)
-	for _, method := range []string{"initialize", "ping", "notifications/initialized"} {
+	// server/discover joins the set from the 2026-07-28 revision: a modern
+	// client sends it as the first request of every HTTP connection, so
+	// without the exemption every one of them is forced into a legacy
+	// downgrade to initialize — or fails outright against a modern-only
+	// upstream.
+	for _, method := range []string{"initialize", "ping", "notifications/initialized", "server/discover"} {
 		body := `{"jsonrpc":"2.0","method":"` + method + `","id":1}`
 		if strings.HasPrefix(method, "notifications/") {
 			body = `{"jsonrpc":"2.0","method":"` + method + `"}` // notification, no id
@@ -164,12 +207,15 @@ path "mcp/gateway/*" {
 func TestMCPEval_LifecycleMethod_ExplicitDenyStillBlocks(t *testing.T) {
 	// The deny gate runs before the exemption: an operator can still block
 	// a lifecycle method by naming it in denied_methods.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list"]
-    denied_methods  = ["ping"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods {
+    allowed = ["tools/list"]
+    denied = ["ping"]
   }
 }
 `)
@@ -184,12 +230,13 @@ path "mcp/gateway/*" {
 func TestMCPEval_ToolsCall_NeedsBothMethodAndToolAllow(t *testing.T) {
 	// Deny-by-default: allowing tools/call as a method is not enough — the
 	// tool name must also match allowed_tools. Empty allowed_tools ⇒ deny.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -206,13 +253,14 @@ path "mcp/gateway/*" {
 
 func TestMCPEval_StarOpensEverything(t *testing.T) {
 	// allowed_* = ["*"] restores fully-open behavior for a data-plane call.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["*"]
-    allowed_tools   = ["*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["*"] }
+  tools { allowed = ["*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -228,12 +276,13 @@ path "mcp/gateway/*" {
 }
 
 func TestMCPEval_DeniedMethods_Match(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    denied_methods = ["tools/call"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { denied = ["tools/call"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -251,9 +300,56 @@ path "mcp/gateway/*" {
 	assert.Equal(t, mcpRuleTypeDeniedMethods, res.MCPDecision.RuleType)
 }
 
-func TestMCPEval_NoMCPBlock_PassesThrough(t *testing.T) {
-	// A policy with no mcp { } block leaves MCPDecision nil — the
-	// MCP gate doesn't run, the request goes through to the proxy.
+func TestMCPEval_ServerDiscover_ExplicitDenyStillBlocks(t *testing.T) {
+	// The exemption only rescues server/discover from deny-by-default. An
+	// operator who names it in denied_methods still blocks it, because the
+	// deny gate runs first — that ordering is what makes the exemption narrow
+	// enough to be safe.
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods {
+    allowed = ["tools/list"]
+    denied  = ["server/discover"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"server/discover","id":1}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeDeniedMethods, res.MCPDecision.RuleType)
+	assert.Equal(t, "server/discover", res.MCPDecision.MatchedRule)
+}
+
+func TestMCPEval_ServerDiscover_AbsenceDenyStillRefuses(t *testing.T) {
+	// The lifecycle exemption is not an exemption from absence-deny. On a
+	// path with a capability grant but no contract, server/discover is
+	// refused like everything else — otherwise a caller holding no MCP
+	// contract could probe which mounts exist by watching which ones answer.
+	cbp := mustCBP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"server/discover","id":1}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
+}
+
+func TestMCPEval_NoMCPPolicy_Denies(t *testing.T) {
+	// A capability grant with no contract in scope refuses MCP-shaped traffic.
+	// The grant says the caller may reach the mount; nothing says which calls
+	// are permitted on it, so none are. (Was a clean pass-through before the
+	// absence flip — that default was indistinguishable from an operator
+	// forgetting to attach the contract.)
 	cbp := mustCBP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
@@ -266,8 +362,29 @@ path "mcp/gateway/*" {
 	}`)
 	res := cbp.AllowOperation(testContext(), req, nil, false)
 
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "deny", res.MCPDecision.Decision)
+	assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
+	assert.Empty(t, res.MCPDecision.MatchedRule, "no rule-set was chosen")
+	assert.Empty(t, res.MCPDecision.PolicyName, "no policy to name")
+}
+
+func TestMCPEval_NoMCPPolicy_NonMCPTrafficUnaffected(t *testing.T) {
+	// The absence deny keys on an MCP-shaped body, not on the path. A request
+	// with no descriptor at all — every non-MCP mount — is untouched.
+	cbp := mustCBP(t, `
+path "secret/data/*" {
+  capabilities = ["read"]
+}
+`)
+	res := cbp.AllowOperation(testContext(), &logical.Request{
+		Path:      "secret/data/app",
+		Operation: logical.ReadOperation,
+	}, nil, false)
+
 	assert.True(t, res.Allowed)
-	assert.Nil(t, res.MCPDecision, "no mcp block → no decision recorded")
+	assert.Nil(t, res.MCPDecision)
 }
 
 // =============================================================================
@@ -275,13 +392,14 @@ path "mcp/gateway/*" {
 // =============================================================================
 
 func TestMCPEval_AllowedTools_WildcardMatch(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["get_*", "list_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["get_*", "list_*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -301,13 +419,14 @@ path "mcp/gateway/*" {
 }
 
 func TestMCPEval_AllowedPrompts_BareStar(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["prompts/get"]
-    allowed_prompts = ["*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["prompts/get"] }
+  prompts { allowed = ["*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -328,13 +447,14 @@ func TestMCPEval_DeniedTools_Match(t *testing.T) {
 	// allowed_methods admits tools/call so the request reaches the name
 	// gate; denied_tools then fires. (Under deny-by-default a set without
 	// allowed_methods would deny at the method gate before the name gate.)
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    denied_tools    = ["delete_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { denied = ["delete_*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -356,13 +476,14 @@ func TestMCPEval_DeniedResources_Match(t *testing.T) {
 	// resources/read with a denied_resources pattern that matches the
 	// requested URI → deny with rule_type denied_resources. Mirrors
 	// denied_tools but on the resources/read name gate.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods   = ["resources/read"]
-    denied_resources  = ["github://secrets/*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["resources/read"] }
+  resources { denied = ["github://secrets/*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -383,13 +504,14 @@ path "mcp/gateway/*" {
 func TestMCPEval_DeniedPrompts_Match(t *testing.T) {
 	// prompts/get with a denied_prompts pattern that matches → deny
 	// with rule_type denied_prompts.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["prompts/get"]
-    denied_prompts  = ["sudo_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["prompts/get"] }
+  prompts { denied = ["sudo_*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -415,13 +537,14 @@ func TestMCPEval_DeniedResources_NoAllowList_Denies(t *testing.T) {
 	// Deny-by-default: allowed_methods admits resources/read, but with no
 	// allowed_resources every uri is denied — even one matching no
 	// denied_resources pattern. (Was allowed under allow-by-default.)
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods  = ["resources/read"]
-    denied_resources = ["github://secrets/*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["resources/read"] }
+  resources { denied = ["github://secrets/*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -442,13 +565,16 @@ path "mcp/gateway/*" {
 // both allow and deny lists, the deny wins per evaluateMCPSetForCall
 // step (d) (deny-list scanned before allow-list).
 func TestMCPEval_DeniedResources_BeatsAllowedResources(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods   = ["resources/read"]
-    allowed_resources = ["github://*"]
-    denied_resources  = ["github://secrets/*"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["resources/read"] }
+  resources {
+    allowed = ["github://*"]
+    denied = ["github://secrets/*"]
   }
 }
 `)
@@ -468,13 +594,14 @@ func TestMCPEval_NameNotRequired_ListMethod(t *testing.T) {
 	// tools/list is name-less; allowed_tools is irrelevant for it
 	// even when configured. The method gate runs, the name gate is
 	// skipped per Semantics.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["get_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["get_*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -491,14 +618,15 @@ path "mcp/gateway/*" {
 }
 
 func TestMCPEval_EmptyBlock_DeniesByDefault(t *testing.T) {
-	// Deny-by-default: an empty mcp { } block allow-lists nothing, so a
-	// data-plane method is denied at the method gate (empty allowed_methods
-	// matches nothing). (Was allow-any before the flip.)
-	cbp := mustCBP(t, `
+	// Deny-by-default: an MCP stanza with no family blocks allow-lists nothing,
+	// so a data-plane method is denied at the method gate (an empty allowed
+	// list matches nothing). (Was allow-any before the flip.)
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {}
 }
+`, `
+path "mcp/gateway/*" {}
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
 		"jsonrpc": "2.0",
@@ -518,24 +646,24 @@ path "mcp/gateway/*" {
 // Multi-set merge (OR-of-rule-sets across stanzas at the same path)
 // =============================================================================
 
-func TestMCPEval_MultiSet_FirstAllows(t *testing.T) {
+func TestMCPEval_MultiSet_DeniedBeatsAnAllow(t *testing.T) {
 	// Two stanzas at the same path: set 1 allows the request, set 2
-	// would deny it. OR semantics: any allow wins, and audit records
-	// the first allowing set.
-	cbp := mustCBP(t, `
+	// denies it by name. A denied list is final, whichever set holds it.
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["get_repository"]
-  }
 }
 
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    denied_methods = ["tools/call"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["get_repository"] }
+}
+path "mcp/gateway/*" {
+  methods { denied = ["tools/call"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -546,35 +674,213 @@ path "mcp/gateway/*" {
 	}`)
 	res := cbp.AllowOperation(testContext(), req, nil, false)
 
-	assert.True(t, res.Allowed, "set 1 allows, OR wins")
-	assert.Equal(t, "allow", res.MCPDecision.Decision)
-	assert.Equal(t, mcpRuleTypeAllowedTools, res.MCPDecision.RuleType)
+	assert.False(t, res.Allowed, "set 2's denied list is final")
+	assert.Equal(t, "deny", res.MCPDecision.Decision)
+	assert.Equal(t, mcpRuleTypeDeniedMethods, res.MCPDecision.RuleType)
+}
+
+const (
+	mcpGatewayGrant = `path "mcp/gateway/*" { capabilities = ["update"] }`
+	mcpOpenContract = `
+path "mcp/gateway/*" {
+  methods { allowed = ["*"] }
+  tools { allowed = ["*"] }
+  resources { allowed = ["*"] }
+  prompts { allowed = ["*"] }
+}
+`
+)
+
+func mcpToolCall(name string) string {
+	return `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"` + name + `"},"id":1}`
+}
+
+// TestMCPEval_DeniedListIsFinal: a denied list in one contract beats another
+// contract's allow, for every family, and names the contract that denied.
+func TestMCPEval_DeniedListIsFinal(t *testing.T) {
+	for _, tc := range []struct {
+		name, stanza, body, ruleType string
+	}{
+		{"tools", `tools { denied = ["delete_*"] }`, mcpToolCall("delete_repo"), mcpRuleTypeDeniedTools},
+		{"methods", `methods { denied = ["tools/call"] }`, mcpToolCall("delete_repo"), mcpRuleTypeDeniedMethods},
+		{"resources", `resources { denied = ["secret://*"] }`, `{"jsonrpc":"2.0","method":"resources/read","params":{"uri":"secret://a"},"id":1}`, mcpRuleTypeDeniedResources},
+		{"prompts", `prompts { denied = ["bad"] }`, `{"jsonrpc":"2.0","method":"prompts/get","params":{"name":"bad"},"id":1}`, mcpRuleTypeDeniedPrompts},
+		{"listen URIs", `resources { denied = ["secret://*"] }`, listenBody("repo://a", "secret://a"), mcpRuleTypeDeniedResources},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cbp := mustCBPWithMCPPolicies(t, mcpGatewayGrant, map[string]string{
+				"open":  mcpOpenContract,
+				"guard": "path \"mcp/gateway/*\" {\n" + tc.stanza + "\n}\n",
+			})
+			res := cbp.AllowOperation(testContext(), newMCPRequest(t, "mcp/gateway/", tc.body), nil, false)
+			assert.False(t, res.Allowed)
+			require.NotNil(t, res.MCPDecision)
+			assert.Equal(t, tc.ruleType, res.MCPDecision.RuleType)
+			assert.Equal(t, "guard", res.MCPDecision.PolicyName)
+		})
+	}
+
+	t.Run("a call it doesn't name is left to the allows", func(t *testing.T) {
+		cbp := mustCBPWithMCPPolicies(t, mcpGatewayGrant, map[string]string{
+			"open":  mcpOpenContract,
+			"guard": "path \"mcp/gateway/*\" {\n  tools { denied = [\"delete_*\"] }\n}\n",
+		})
+		assert.True(t, cbp.AllowOperation(testContext(), newMCPRequest(t, "mcp/gateway/", mcpToolCall("get_repo")), nil, false).Allowed)
+	})
+
+	t.Run("in a batch, one denied call refuses it", func(t *testing.T) {
+		cbp := mustCBPWithMCPPolicies(t, mcpGatewayGrant, map[string]string{
+			"open":  mcpOpenContract,
+			"guard": "path \"mcp/gateway/*\" {\n  tools { denied = [\"delete_*\"] }\n}\n",
+		})
+		body := `[{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_repo"},"id":1},
+			{"jsonrpc":"2.0","method":"tools/call","params":{"name":"delete_repo"},"id":2}]`
+		res := cbp.AllowOperation(testContext(), newMCPRequest(t, "mcp/gateway/", body), nil, false)
+		assert.False(t, res.Allowed)
+		require.NotNil(t, res.MCPDecision)
+		assert.Equal(t, mcpRuleTypeDeniedTools, res.MCPDecision.RuleType)
+		require.NotNil(t, res.MCPDecision.BatchIndex)
+		assert.Equal(t, 1, *res.MCPDecision.BatchIndex)
+	})
+
+	t.Run("a stanza's condition does not lift its own denied list", func(t *testing.T) {
+		cbp := mustCBPWithMCPPolicies(t, mcpGatewayGrant, map[string]string{"both": `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools {
+    allowed = ["*"]
+    denied  = ["delete_*"]
+  }
+  condition = "true"
+}
+`})
+		res := cbp.AllowOperation(testContext(), newMCPRequest(t, "mcp/gateway/", mcpToolCall("delete_repo")), nil, false)
+		assert.False(t, res.Allowed)
+		assert.Equal(t, mcpRuleTypeDeniedTools, res.MCPDecision.RuleType)
+	})
+}
+
+// TestMCPEval_DeniedReachesEveryMatchingPath: the single-winner lookup says
+// what is allowed; a denied list isn't part of it.
+func TestMCPEval_DeniedReachesEveryMatchingPath(t *testing.T) {
+	const guardAdmin = `
+path "mcp/gateway/admin" {
+  tools { denied = ["delete_*"] }
+}
+`
+	call := func(cbp *CBP, path, tool string) *CBPResults {
+		return cbp.AllowOperation(testContext(), newMCPRequest(t, path, mcpToolCall(tool)), nil, false)
+	}
+
+	t.Run("a broader denied list beats a more specific allow", func(t *testing.T) {
+		cbp := mustCBPWithMCPPolicies(t, mcpGatewayGrant, map[string]string{
+			"guard": "path \"mcp/gateway/*\" {\n  tools { denied = [\"delete_*\"] }\n}\n",
+			"admin": "path \"mcp/gateway/admin\" {\n  methods { allowed = [\"*\"] }\n  tools { allowed = [\"*\"] }\n}\n",
+		})
+		assert.False(t, call(cbp, "mcp/gateway/admin", "delete_repo").Allowed)
+		assert.True(t, call(cbp, "mcp/gateway/admin", "get_repo").Allowed)
+	})
+
+	t.Run("a narrower deny-only stanza does not shadow a broader allow", func(t *testing.T) {
+		cbp := mustCBPWithMCPPolicies(t, mcpGatewayGrant, map[string]string{"open": mcpOpenContract, "guard": guardAdmin})
+		assert.True(t, call(cbp, "mcp/gateway/admin", "get_repo").Allowed)
+		assert.False(t, call(cbp, "mcp/gateway/admin", "delete_repo").Allowed)
+		assert.True(t, call(cbp, "mcp/gateway/other", "delete_repo").Allowed, "the stanza doesn't reach another path")
+	})
+}
+
+// TestMCPEval_DenyOnlyStanzaIsNoContract: alone on a path it refuses what it
+// names, nothing allows the rest, and it says nothing about non-MCP requests.
+func TestMCPEval_DenyOnlyStanzaIsNoContract(t *testing.T) {
+	cbp := mustCBPWithMCPPolicies(t, mcpGatewayGrant, map[string]string{
+		"guard": "path \"mcp/gateway/*\" {\n  tools { denied = [\"delete_*\"] }\n}\n",
+	})
+	call := func(body string) *CBPResults {
+		return cbp.AllowOperation(testContext(), newMCPRequest(t, "mcp/gateway/", body), nil, false)
+	}
+
+	named := call(mcpToolCall("delete_repo"))
+	assert.False(t, named.Allowed)
+	assert.Equal(t, mcpRuleTypeDeniedTools, named.MCPDecision.RuleType)
+
+	for _, body := range []string{mcpToolCall("get_repo"), `{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}`} {
+		res := call(body)
+		assert.False(t, res.Allowed)
+		require.NotNil(t, res.MCPDecision)
+		assert.Equal(t, mcpRuleTypeNoMCPPolicy, res.MCPDecision.RuleType)
+	}
+
+	notMCP := cbp.AllowOperation(testContext(), &logical.Request{Operation: logical.UpdateOperation, Path: "mcp/gateway/x"}, nil, false)
+	assert.True(t, notMCP.Allowed, "a denied list only answers an MCP call")
+	assert.Nil(t, notMCP.MCPDecision)
+
+	bodyless := cbp.AllowOperation(testContext(), &logical.Request{
+		Operation: logical.UpdateOperation, Path: "mcp/gateway/x", MCPDescriptor: &logical.MCPRequestDescriptor{},
+	}, nil, false)
+	assert.True(t, bodyless.Allowed, "a verb with no JSON-RPC body has no call to deny")
+	assert.Nil(t, bodyless.MCPDecision)
+
+	malformed := cbp.AllowOperation(testContext(), &logical.Request{
+		Operation: logical.UpdateOperation, Path: "mcp/gateway/x",
+		MCPDescriptor: &logical.MCPRequestDescriptor{ParseErr: &logical.MCPParseError{Kind: mcpRuleTypeMalformedJSONRPC}},
+	}, nil, false)
+	assert.False(t, malformed.Allowed)
+	require.NotNil(t, malformed.MCPDecision)
+	assert.Equal(t, mcpRuleTypeMalformedJSONRPC, malformed.MCPDecision.RuleType)
+}
+
+// A denied list is checked first, so it is the reason reported even when the
+// same stanza's method gate would also have refused the call.
+func TestMCPEval_DeniedIsReportedBeforeTheMethodGate(t *testing.T) {
+	cbp := mustCBPWithMCPPolicies(t, mcpGatewayGrant, map[string]string{"mixed": `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list"] }
+  tools { denied = ["delete_*"] }
+}
+`})
+	res := cbp.AllowOperation(testContext(), newMCPRequest(t, "mcp/gateway/", mcpToolCall("delete_repo")), nil, false)
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeDeniedTools, res.MCPDecision.RuleType)
+	assert.Equal(t, "delete_*", res.MCPDecision.MatchedRule)
+}
+
+// A request that isn't an MCP call pays nothing for a denied list, however
+// broad the stanza holding it.
+func TestMCPEval_DeniedListCostsOtherRequestsNothing(t *testing.T) {
+	ctx := testContext()
+	const grant = `path "kv/*" { capabilities = ["read"] }`
+	with := mustCBPWithMCPPolicies(t, grant, map[string]string{
+		"guard": "path \"*\" {\n  tools { denied = [\"drop_*\"] }\n}\n",
+	})
+	without := mustCBPWithMCPPolicies(t, grant, nil)
+	req := &logical.Request{Operation: logical.ReadOperation, Path: "kv/x"}
+	allocs := func(cbp *CBP) float64 {
+		return testing.AllocsPerRun(200, func() { cbp.AllowOperation(ctx, req, nil, false) })
+	}
+	assert.Equal(t, allocs(without), allocs(with))
 }
 
 func TestMCPEval_MultiPolicy_AdditiveMerge(t *testing.T) {
-	// Two separate Policy objects bound to the same effective path,
-	// merged at NewCBP time. The MCP slice grows additively — the
-	// presence of a policy WITHOUT an mcp block does NOT clear
-	// enforcement contributed by the policy WITH one. This is the
-	// design call documented next to the merge code: MCP differs
-	// from CEL conditions (where "absent clears") because adding a
-	// broader catch-all policy shouldn't accidentally lift an
-	// existing MCP restriction.
-	policyWithMCP := testParsePolicy(t, `
+	// An MCP contract bound to the same effective path as a bare capability
+	// grant. The contract still applies: a policy that says nothing about MCP
+	// does NOT lift it. MCP differs from CEL conditions (where "absent clears")
+	// because adding a broader catch-all grant shouldn't accidentally free the
+	// tools an existing contract narrowed.
+	contract := testParseMCPPolicy(t, `
 path "mcp/gateway/*" {
-  capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["get_*"]
-  }
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["get_*"] }
 }
 `)
-	policyWithoutMCP := testParsePolicy(t, `
+	contract.Name = "contract"
+	bareGrant := testParsePolicy(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
 }
 `)
-	cbp, err := NewCBP(testContext(), []*Policy{policyWithMCP, policyWithoutMCP})
+	bareGrant.Name = "grant"
+	cbp, err := NewCBP(testContext(), []*Policy{contract, bareGrant})
 	require.NoError(t, err)
 
 	// Forbidden tool: MCP gate from the first policy denies, the
@@ -594,21 +900,22 @@ func TestMCPEval_MultiSet_StrongestReasonDenyList(t *testing.T) {
 	// Both sets deny: set 1 via not-in-allow-list (weaker reason),
 	// set 2 via explicit deny-list (stronger reason). Audit should
 	// record the deny-list reason.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["get_repository"]
-  }
 }
 
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    denied_tools    = ["delete_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["get_repository"] }
+}
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { denied = ["delete_*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -635,13 +942,14 @@ func TestMCPEval_Batch_AllAllowed(t *testing.T) {
 	// and then through the matcher; the decision is the last allow
 	// and BatchIndex stays nil because no element denied. No list method
 	// is present, so the response-filter batch guard does not fire.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["search_repos", "get_repo"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["search_repos", "get_repo"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `[
@@ -662,13 +970,14 @@ func TestMCPEval_Batch_WithListMethod_Denied(t *testing.T) {
 	// A batch that contains a list method is denied even when every call
 	// would otherwise pass: a batched JSON-RPC list response can't be
 	// pruned per element, so the response-filter guard fails closed.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["search_repos"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { allowed = ["search_repos"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `[
@@ -688,13 +997,16 @@ func TestMCPEval_Batch_OneDeniedFailsBatch(t *testing.T) {
 	// A batch where the third element denies — the entire batch
 	// denies (single-fail-all-fail) with the denying call's
 	// MCPDecision stamped including BatchIndex.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    allowed_tools   = ["search_repos"]
-    denied_tools    = ["delete_*"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools {
+    allowed = ["search_repos"]
+    denied = ["delete_*"]
   }
 }
 `)
@@ -721,13 +1033,14 @@ func TestMCPEval_Batch_TwoDenies_FirstWins(t *testing.T) {
 	// short-circuits at the FIRST denying call, so BatchIndex == 1.
 	// Pins the first-deny-wins contract independently from
 	// Batch_OneDeniedFailsBatch (which puts the only deny last).
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    denied_tools    = ["delete_*", "drop_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { denied = ["delete_*", "drop_*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `[
@@ -751,13 +1064,14 @@ path "mcp/gateway/*" {
 // code path BUT doesn't stamp BatchIndex — the matcher only stamps
 // for genuinely batched bodies (len > 1). Pins the boundary.
 func TestMCPEval_Batch_SingleElement_NoBatchIndex(t *testing.T) {
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-    denied_tools    = ["delete_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
+  tools { denied = ["delete_*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `[
@@ -776,12 +1090,13 @@ func TestMCPEval_Batch_Empty_Denies(t *testing.T) {
 	// An empty batch body `[]` is rejected by the strict parser with
 	// batch_empty. The matcher never runs; decideMCP maps the
 	// ParseErr.Kind 1:1 to MCPDecision.RuleType.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `[]`)
@@ -796,12 +1111,13 @@ path "mcp/gateway/*" {
 func TestMCPEval_Batch_DuplicateKey_Denies(t *testing.T) {
 	// A batch where one element has a duplicate key fails the WHOLE
 	// batch at parse time (strict-parser single-pass bail).
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `[
@@ -823,13 +1139,14 @@ func TestMCPEval_BodyCaseInsensitive(t *testing.T) {
 	// method and tool name in the body. The matcher lowercases
 	// descriptor method/name once at the boundary so the comparison
 	// succeeds and the decision records the lowercased form.
-	cbp := mustCBP(t, `
+	cbp := mustCBPWithMCP(t, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools   = ["get_*"]
-  }
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["get_*"] }
 }
 `)
 	req := newMCPRequest(t, "mcp/gateway/", `{
@@ -895,6 +1212,12 @@ func TestBuildMCPDenyDescription_PerRuleType(t *testing.T) {
 		decision *logical.MCPDecision
 		want     string
 	}{
+		{mcpRuleTypeBatchUnsupported,
+			&logical.MCPDecision{RuleType: mcpRuleTypeBatchUnsupported},
+			"Batched requests are not supported at the requested protocol version."},
+		{mcpRuleTypeHeaderMismatch,
+			&logical.MCPDecision{RuleType: mcpRuleTypeHeaderMismatch, MatchedRule: headerMismatchMethod},
+			"MCP transport headers do not match the request body."},
 		{mcpRuleTypeDeniedMethods,
 			&logical.MCPDecision{Method: "tools/call", RuleType: mcpRuleTypeDeniedMethods},
 			"Method 'tools/call' not allowed."},
@@ -1013,18 +1336,19 @@ path "secret/*" {
 }
 
 func BenchmarkAllowOperation_TypicalMCP(b *testing.B) {
-	cbp := buildBenchCBP(b, `
+	cbp := buildBenchCBPWithMCP(b, `
 path "mcp/gateway/*" {
   capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/list", "tools/call", "resources/list", "resources/read", "prompts/get"]
-    allowed_tools = [
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call", "resources/list", "resources/read", "prompts/get"] }
+  tools { allowed = [
       "get_repository", "get_pull_request", "list_issues", "list_pull_requests",
       "search_code", "search_issues", "search_repositories", "list_workflows",
       "list_commits", "get_file_contents",
-    ]
-    condition = "(!has(call.args.path) || call.args.path.startsWith('docs/')) && (!has(call.args.mode) || call.args.mode == '0644') && (!has(call.args.region) || call.args.region == 'us-west1')"
-  }
+    ] }
+  condition = "(!has(call.args.path) || call.args.path.startsWith('docs/')) && (!has(call.args.mode) || call.args.mode == '0644') && (!has(call.args.region) || call.args.region == 'us-west1')"
 }
 `)
 	req := newMCPRequest(b, "mcp/gateway/", `{
@@ -1047,12 +1371,35 @@ path "mcp/gateway/*" {
 	}
 }
 
+// BenchmarkAllowOperation_MCPDeniedAcrossContracts is a call one contract allows
+// while another's denied list is checked and doesn't apply.
+func BenchmarkAllowOperation_MCPDeniedAcrossContracts(b *testing.B) {
+	cbp := buildBenchCBPWithMCP(b, mcpGatewayGrant, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["get_*"] }
+}
+path "mcp/gateway/*" {
+  tools { denied = ["delete_*", "drop_*"] }
+}
+`)
+	req := newMCPRequest(b, "mcp/gateway/", mcpToolCall("get_repository"))
+	ctx := testContext()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, nil, false)
+	}
+}
+
 func BenchmarkAllowOperation_StressMCP(b *testing.B) {
 	// 5 stanzas at the same path, each with ~50 patterns across
 	// methods/tools/params. Operators shouldn't aim for this shape,
 	// but the bench bounds the cliff.
-	stress := buildStressPolicy(5, 50)
-	cbp := buildBenchCBP(b, stress)
+	cbp := buildBenchCBPWithMCP(b, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, buildStressPolicy(5, 50))
 	req := newMCPRequest(b, "mcp/gateway/", `{
 		"jsonrpc": "2.0",
 		"method":  "tools/call",
@@ -1079,14 +1426,35 @@ func buildBenchCBP(b *testing.B, rules string) *CBP {
 	return cbp
 }
 
+// buildBenchCBPWithMCP is buildBenchCBP for the two-document shape a governed
+// MCP mount uses.
+func buildBenchCBPWithMCP(b *testing.B, cbpRules, mcpRules string) *CBP {
+	b.Helper()
+	cbpPolicy, err := ParseCBPPolicy(namespace.RootNamespace, cbpRules)
+	if err != nil {
+		b.Fatalf("parse cbp: %v", err)
+	}
+	mcpPolicy, err := ParseMCPPolicy(namespace.RootNamespace, mcpRules)
+	if err != nil {
+		b.Fatalf("parse mcp: %v", err)
+	}
+	mcpPolicy.Name = "contract"
+	cbp, err := NewCBP(testContext(), []*Policy{cbpPolicy, mcpPolicy})
+	if err != nil {
+		b.Fatalf("build: %v", err)
+	}
+	return cbp
+}
+
+// buildStressPolicy emits an MCP document with `sets` stanzas at the same path,
+// which the index merges into that many rule-sets.
 func buildStressPolicy(sets, patternsPerList int) string {
 	var sb strings.Builder
 	for s := 0; s < sets; s++ {
 		sb.WriteString(`path "mcp/gateway/*" {
-  capabilities = ["update"]
-  mcp {
-    allowed_methods = ["tools/call"]
-    allowed_tools = [`)
+  methods { allowed = ["tools/call"] }
+  tools {
+    allowed = [`)
 		for i := 0; i < patternsPerList; i++ {
 			if i > 0 {
 				sb.WriteString(", ")
@@ -1096,4 +1464,441 @@ func buildStressPolicy(sets, patternsPerList int) string {
 		sb.WriteString("]\n  }\n}\n")
 	}
 	return sb.String()
+}
+
+// BenchmarkAllowOperation_MCPNoContract measures the absence deny: an
+// MCP-shaped request on a granted path with no contract in scope. This is the
+// cost of the second index lookup missing, which every ungoverned MCP request
+// now pays before being refused.
+func BenchmarkAllowOperation_MCPNoContract(b *testing.B) {
+	cbp := buildBenchCBP(b, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`)
+	req := newMCPRequest(b, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params":  {"name": "get_repository"},
+		"id":      1
+	}`)
+	ctx := testContext()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, nil, false)
+	}
+}
+
+// BenchmarkAllowOperation_MCPNoCondition isolates the contract's structural
+// gates from CEL. Paired with TypicalMCP — same shape, minus the condition —
+// it says how much of an MCP request's cost is the condition rather than the
+// method and name matching.
+func BenchmarkAllowOperation_MCPNoCondition(b *testing.B) {
+	cbp := buildBenchCBPWithMCP(b, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/list", "tools/call", "resources/list", "resources/read", "prompts/get"] }
+  tools { allowed = [
+      "get_repository", "get_pull_request", "list_issues", "list_pull_requests",
+      "search_code", "search_issues", "search_repositories", "list_workflows",
+      "list_commits", "get_file_contents",
+    ] }
+}
+`)
+	req := newMCPRequest(b, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "tools/call",
+		"params": {
+			"name": "get_repository",
+			"arguments": {"path": "docs/api.md", "mode": "0644", "region": "us-west1"}
+		},
+		"id": 1
+	}`)
+	ctx := testContext()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, nil, false)
+	}
+}
+
+// BenchmarkAllowOperation_NonMCPWithContractAttached measures what a contract
+// costs a request it does not govern — a plain path read by a token that also
+// carries an MCP policy. The index is built but never consulted for this path.
+func BenchmarkAllowOperation_NonMCPWithContractAttached(b *testing.B) {
+	cbp := buildBenchCBPWithMCP(b, `
+path "secret/data/*" {
+  capabilities = ["read"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["tools/call"] }
+  tools { allowed = ["get_repository"] }
+}
+`)
+	req := &logical.Request{Path: "secret/data/app", Operation: logical.ReadOperation}
+	ctx := testContext()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, nil, false)
+	}
+}
+
+// =============================================================================
+// subscriptions/listen resource-subscription gate
+// =============================================================================
+
+const listenContract = `
+path "mcp/gateway/*" {
+  methods { allowed = ["subscriptions/listen"] }
+  resources { allowed = ["repo://myorg/*"] }
+}
+`
+
+func listenBody(uris ...string) string {
+	quoted := make([]string, len(uris))
+	for i, u := range uris {
+		quoted[i] = `"` + u + `"`
+	}
+	return `{"jsonrpc":"2.0","method":"subscriptions/listen","id":1,"params":{"notifications":{"resourceSubscriptions":[` +
+		strings.Join(quoted, ",") + `]}}}`
+}
+
+func TestMCPEval_ListenURI_AllowedByResourcesFamily(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, listenContract)
+	req := newMCPRequest(t, "mcp/gateway/", listenBody("repo://myorg/api", "repo://myorg/web"))
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.True(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "allow", res.MCPDecision.Decision)
+}
+
+// The leak this closes: a caller denied resources/read on a URI could still
+// subscribe to its update stream. The content never arrives, but the
+// resource's existence and the timing of every change do.
+func TestMCPEval_ListenURI_OutsideAllowListDenies(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, listenContract)
+	req := newMCPRequest(t, "mcp/gateway/", listenBody("repo://myorg/api", "repo://other/secret"))
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
+	assert.Equal(t, "repo://other/secret", res.MCPDecision.Name, "audit must name the URI that refused")
+}
+
+func TestMCPEval_ListenURI_DeniedResourcesWins(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["subscriptions/listen"] }
+  resources {
+    allowed = ["repo://myorg/*"]
+    denied  = ["repo://myorg/secrets*"]
+  }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", listenBody("repo://myorg/secrets/db"))
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeDeniedResources, res.MCPDecision.RuleType)
+	assert.Equal(t, "repo://myorg/secrets*", res.MCPDecision.MatchedRule)
+}
+
+// A listen that names no resource subscribes only to list-changed events.
+// It carries no resource access, so it passes under a contract with no
+// resources{} block at all — the method gate is the whole of its governance.
+func TestMCPEval_ListenWithoutURIs_PassesWithNoResourcesBlock(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["subscriptions/listen"] }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `{
+		"jsonrpc": "2.0",
+		"method":  "subscriptions/listen",
+		"id":      1,
+		"params":  {"notifications": {"toolsListChanged": true}}
+	}`)
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.True(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, "allow", res.MCPDecision.Decision)
+}
+
+// The breaking half, stated as a test: methods { allowed = ["*"] } with no
+// resources{} block used to let a listen carry any URI. Deny-by-default in
+// the resources family now refuses it.
+func TestMCPEval_ListenWithURIs_DeniesWithNoResourcesBlock(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["*"] }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", listenBody("repo://myorg/api"))
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
+}
+
+// The gate lives inside the per-set function, so cross-set OR survives: a
+// second contract granting the URIs allows the call even though the first
+// refuses it.
+func TestMCPEval_ListenURI_CrossSetOR(t *testing.T) {
+	cbp := mustCBPWithMCPPolicies(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, map[string]string{
+		"narrow": `
+path "mcp/gateway/*" {
+  methods { allowed = ["subscriptions/listen"] }
+  resources { allowed = ["repo://myorg/*"] }
+}
+`,
+		"wide": `
+path "mcp/gateway/*" {
+  methods { allowed = ["subscriptions/listen"] }
+  resources { allowed = ["repo://*"] }
+}
+`,
+	})
+	req := newMCPRequest(t, "mcp/gateway/", listenBody("repo://other/thing"))
+	res := cbp.AllowOperation(testContext(), req, nil, false)
+
+	assert.True(t, res.Allowed, "a set that grants the URI must still allow the listen")
+}
+
+// Only subscriptions/listen carries subscription URIs. A descriptor that
+// somehow carries them on another method must not have them silently gated
+// under it — the resources family governs resources/read by its own name
+// gate, which is a different path.
+func TestMCPEval_ResourceSubscriptionGate_OnlyAppliesToListen(t *testing.T) {
+	set := &CBPMCPRules{AllowedResources: []string{"repo://myorg/*"}}
+	call := &logical.MCPCall{Method: "tools/call", URIs: []string{"repo://other/x"}}
+
+	assert.Nil(t, evaluateMCPResourceSubscriptions(set, mcpMethodToolsCall, call))
+	assert.NotNil(t, evaluateMCPResourceSubscriptions(set, mcpMethodSubscriptionsListen, call))
+}
+
+// The legacy-era route to the same update stream. Gating only the modern
+// spelling would leave the leak reachable one method name over, and Warden
+// fronts both eras by design.
+func TestMCPEval_ResourcesSubscribe_AnswersToResourcesFamily(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["resources/subscribe"] }
+  resources { allowed = ["repo://myorg/*"] }
+}
+`)
+
+	allowed := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"resources/subscribe","params":{"uri":"repo://myorg/api"},"id":1}`)
+	res := cbp.AllowOperation(testContext(), allowed, nil, false)
+	assert.True(t, res.Allowed)
+
+	denied := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"resources/subscribe","params":{"uri":"repo://other/secret"},"id":1}`)
+	res = cbp.AllowOperation(testContext(), denied, nil, false)
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
+}
+
+// The Skills extension builds skills on resources, so skills/get and
+// resources/directory/read answer to the grant that governs reading the URI
+// they name. A skill or directory outside the grant is refused, not described.
+func TestMCPEval_SkillsURIMethods_AnswerToResourcesFamily(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["skills/get", "resources/directory/read"] }
+  resources {
+    allowed = ["skill://pdf-processing/*"]
+    denied  = ["skill://pdf-processing/secret/*"]
+  }
+}
+`)
+
+	cases := []struct {
+		name     string
+		body     string
+		allowed  bool
+		ruleType string
+	}{
+		{
+			name:    "skills/get inside the grant",
+			body:    `{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"skill://pdf-processing/SKILL.md"},"id":1}`,
+			allowed: true,
+		},
+		{
+			name:     "skills/get outside the grant",
+			body:     `{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"skill://git-workflow/SKILL.md"},"id":1}`,
+			ruleType: mcpRuleTypeAllowedResources,
+		},
+		{
+			name:     "skills/get under a denied prefix",
+			body:     `{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"skill://pdf-processing/secret/SKILL.md"},"id":1}`,
+			ruleType: mcpRuleTypeDeniedResources,
+		},
+		{
+			// Matching is case-folded, so a case variant cannot step around a
+			// denied prefix. The upstream applies its own case rules to what
+			// Warden forwards.
+			name:     "skills/get case variant of a denied prefix",
+			body:     `{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"skill://pdf-processing/SECRET/SKILL.md"},"id":1}`,
+			ruleType: mcpRuleTypeDeniedResources,
+		},
+		{
+			name:    "directory read inside the grant",
+			body:    `{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf-processing/templates"},"id":1}`,
+			allowed: true,
+		},
+		{
+			name:     "directory read outside the grant",
+			body:     `{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://git-workflow"},"id":1}`,
+			ruleType: mcpRuleTypeAllowedResources,
+		},
+		{
+			// SEP-2640 writes a skill's root directory with no trailing slash,
+			// so "skill://pdf-processing/*" does not cover it. Browsing the
+			// root needs the literal granted too; widening to
+			// "skill://pdf-processing*" would also admit pdf-processing-evil.
+			name:     "directory read of the skill root is not covered by /*",
+			body:     `{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf-processing"},"id":1}`,
+			ruleType: mcpRuleTypeAllowedResources,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := cbp.AllowOperation(testContext(), newMCPRequest(t, "mcp/gateway/", tc.body), nil, false)
+			require.NotNil(t, res.MCPDecision)
+			if tc.allowed {
+				assert.True(t, res.Allowed)
+				// The allow is stamped by the resources gate, not by a
+				// method-only path.
+				assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
+				return
+			}
+			assert.False(t, res.Allowed)
+			assert.Equal(t, tc.ruleType, res.MCPDecision.RuleType)
+		})
+	}
+}
+
+// Granting the skill root alongside its subtree is how an operator lets a
+// caller browse the skill directory itself.
+func TestMCPEval_DirectoryRead_SkillRootNeedsTheLiteral(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["resources/directory/read"] }
+  resources { allowed = ["skill://pdf-processing", "skill://pdf-processing/*"] }
+}
+`)
+	req := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf-processing"},"id":1}`)
+	assert.True(t, cbp.AllowOperation(testContext(), req, nil, false).Allowed)
+}
+
+// Deny-by-default holds for the new members of the family: a contract that
+// allows the methods but carries no resources block refuses every skill.
+// This is the behaviour change for contracts written before skills/get was
+// name-bearing.
+func TestMCPEval_SkillsGet_NoResourcesBlockDenies(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["*"] }
+}
+`)
+	for _, body := range []string{
+		`{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"skill://pdf-processing/SKILL.md"},"id":1}`,
+		`{"jsonrpc":"2.0","method":"resources/directory/read","params":{"uri":"skill://pdf-processing"},"id":1}`,
+	} {
+		res := cbp.AllowOperation(testContext(), newMCPRequest(t, "mcp/gateway/", body), nil, false)
+		assert.False(t, res.Allowed, body)
+		require.NotNil(t, res.MCPDecision)
+		assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
+	}
+}
+
+// Cross-set OR applies to skills as to any name-bearing call: one contract
+// granting the skill is enough, whatever another contract says.
+func TestMCPEval_SkillsGet_CrossSetOR(t *testing.T) {
+	cbp := mustCBPWithMCP(t, `
+path "mcp/gateway/*" {
+  capabilities = ["update"]
+}
+`, `
+path "mcp/gateway/*" {
+  methods { allowed = ["skills/get"] }
+  resources { allowed = ["skill://git-workflow/*"] }
+}
+
+path "mcp/gateway/*" {
+  methods { allowed = ["skills/get"] }
+  resources { allowed = ["skill://pdf-processing/*"] }
+}
+`)
+	skillsGet := func(uri string) *logical.Request {
+		return newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"skills/get","params":{"uri":"`+uri+`"},"id":1}`)
+	}
+
+	// Each set grants one skill; both are reachable, so neither stanza
+	// shadows the other.
+	assert.True(t, cbp.AllowOperation(testContext(), skillsGet("skill://git-workflow/SKILL.md"), nil, false).Allowed)
+	assert.True(t, cbp.AllowOperation(testContext(), skillsGet("skill://pdf-processing/SKILL.md"), nil, false).Allowed)
+
+	res := cbp.AllowOperation(testContext(), skillsGet("skill://other/SKILL.md"), nil, false)
+	assert.False(t, res.Allowed)
+	require.NotNil(t, res.MCPDecision)
+	assert.Equal(t, mcpRuleTypeAllowedResources, res.MCPDecision.RuleType)
+}
+
+// A resources/list response is pruned by what a read would allow, not by what
+// a subscribe would — adding subscribe to the list-method map would prune
+// listings by the wrong gate.
+func TestMCPEval_ResourcesSubscribe_DoesNotDriveListFiltering(t *testing.T) {
+	assert.Equal(t, mcpMethodResourcesRead, mcpListMethodToCall["resources/list"])
+	for _, call := range mcpListMethodToCall {
+		assert.NotEqual(t, mcpMethodResourcesSubscribe, call)
+	}
 }

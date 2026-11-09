@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stephnangue/warden/internal/namespace"
@@ -22,6 +23,8 @@ import (
 type mockUnauthPathBackend struct {
 	mockTransparentModeProvider
 	userAuthPath string
+	// userAuthRefusal is what UserAuthRefusal answers.
+	userAuthRefusal error
 }
 
 func (m *mockUnauthPathBackend) IsUnauthenticatedPath(_ *http.Request, _ string) bool { return true }
@@ -29,7 +32,7 @@ func (m *mockUnauthPathBackend) IsUnauthenticatedPath(_ *http.Request, _ string)
 // GetUserAuthPath makes the mount a protected resource when non-empty, which is
 // what turns an empty agent into "the cert is the agent".
 func (m *mockUnauthPathBackend) GetUserAuthPath() string { return m.userAuthPath }
-func (m *mockUnauthPathBackend) GetUserAuthRole() string { return "" }
+func (m *mockUnauthPathBackend) UserAuthRefusal() error  { return m.userAuthRefusal }
 
 // ExtractTokens replaces the base mock's stub, which returns no credentials at
 // all. The gate now turns on the extracted user credential, so a stub would
@@ -131,5 +134,74 @@ func TestStreamUnauthenticatedGate(t *testing.T) {
 		_, _, _ = core.handleNonLoginRequest(ctx, req)
 		assert.False(t, req.StreamUnauthenticated,
 			"an agent credential off the user leg must still be authenticated")
+	})
+}
+
+// mcpUnauthPathBackend is the combination no shipped provider produces today:
+// a backend that declares its paths unauthenticated AND enforces MCP policy.
+// The two are independent opt-ins, so nothing but convention keeps them apart —
+// httpproxy's shared backend already implements both interfaces, and only the
+// spec hooks decide which providers turn each on.
+type mcpUnauthPathBackend struct {
+	mockUnauthPathBackend
+}
+
+func (m *mcpUnauthPathBackend) ShouldEnforceMCPPolicy(_ *logical.Request) (bool, int64) {
+	return true, 1 << 20
+}
+
+// TestStreamUnauthenticatedGate_MCPBodyIsRefused pins the guard that keeps an
+// MCP-shaped body from skipping policy evaluation entirely.
+//
+// The unauthenticated streaming path exists for credential-less protocol probes
+// and bypasses CheckToken, and with it every gate including the tool contract.
+// A JSON-RPC body arriving there would be proxied having answered to nothing —
+// precisely the invariant the absence deny exists to hold. It fails closed and
+// loudly rather than passing traffic silently, so the day a provider sets both
+// hooks it surfaces as a refusal instead of a quiet hole.
+func TestStreamUnauthenticatedGate_MCPBodyIsRefused(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	backend := &mcpUnauthPathBackend{}
+	entry := &MountEntry{
+		Path:        "mcp-unauth/",
+		Type:        "mcp",
+		Class:       mountClassProvider,
+		UUID:        "mcp-unauth-uuid",
+		Accessor:    "mcp-unauth-uuid_acc",
+		NamespaceID: namespace.RootNamespaceID,
+		namespace:   namespace.RootNamespace,
+	}
+	require.NoError(t, core.router.Mount("mcp-unauth/", backend, entry,
+		&mockBarrierView{prefix: "provider/mcp-unauth-uuid/"}))
+
+	newReq := func(body string) *logical.Request {
+		p := "mcp-unauth/gateway/messages"
+		hr := httptest.NewRequest(http.MethodPost, "/v1/"+p, strings.NewReader(body))
+		hr.Header.Set("Content-Type", "application/json")
+		return &logical.Request{Path: p, Operation: logical.CreateOperation, HTTPRequest: hr}
+	}
+
+	t.Run("a JSON-RPC body is refused", func(t *testing.T) {
+		req := newReq(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"x"},"id":1}`)
+		resp, _, err := core.handleNonLoginRequest(ctx, req)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		require.NotNil(t, resp.Err)
+		assert.Contains(t, resp.Err.Error(), "unauthenticated streaming paths")
+		assert.True(t, req.StreamUnauthenticated,
+			"the request did take the unauthenticated path — the guard is what stops it")
+	})
+
+	t.Run("a malformed body is refused too", func(t *testing.T) {
+		// A parse failure is still a populated descriptor, so it must not slip
+		// past on the grounds that no call could be extracted from it.
+		req := newReq(`{"jsonrpc":"2.0","method":`)
+		resp, _, err := core.handleNonLoginRequest(ctx, req)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		require.NotNil(t, resp.Err)
+		assert.Contains(t, resp.Err.Error(), "unauthenticated streaming paths")
 	})
 }

@@ -15,14 +15,14 @@ import (
 // Production switch: a request reaches AllowOperation with no
 // descriptor attached (e.g. the routed backend doesn't implement
 // MCPPolicyEnforced or declined this request) and the matched policy
-// has an mcp{} block in scope. Body-authoritative enforcement fails
+// has MCP rules in scope. Body-authoritative enforcement fails
 // CLOSED — the decision is deny with rule_type missing_body.
 func TestDecideMCP_NilDescriptorDeniesMissingBody(t *testing.T) {
 	sets := []*CBPMCPRules{{
 		AllowedMethods: []string{"tools/list"},
 	}}
 	req := &logical.Request{} // no MCPDescriptor
-	d := decideMCP(sets, req, nil, time.Time{}, "")
+	d := decideMCP(sets, nil, req, nil, time.Time{}, "")
 	require.NotNil(t, d)
 	assert.Equal(t, "deny", d.Decision)
 	assert.Equal(t, mcpRuleTypeMissingBody, d.RuleType)
@@ -55,7 +55,7 @@ func TestDecideMCP_ParseErrMapsByKind(t *testing.T) {
 					},
 				},
 			}
-			d := decideMCP(sets, req, nil, time.Time{}, "")
+			d := decideMCP(sets, nil, req, nil, time.Time{}, "")
 			require.NotNil(t, d)
 			assert.Equal(t, "deny", d.Decision)
 			assert.Equal(t, tc.ruleType, d.RuleType)
@@ -83,7 +83,7 @@ func TestDecideMCP_DescriptorMatcherAllows(t *testing.T) {
 			}},
 		},
 	}
-	d := decideMCP(sets, req, nil, time.Time{}, "")
+	d := decideMCP(sets, nil, req, nil, time.Time{}, "")
 	require.NotNil(t, d)
 	assert.Equal(t, "allow", d.Decision)
 }
@@ -93,13 +93,13 @@ func TestDecideMCP_DescriptorMatcherAllows(t *testing.T) {
 // ShouldEnforceMCPPolicy declines for a specific request (typically a
 // non-POST verb on a multi-method MCP endpoint). decideMCP must
 // return nil (skip evaluation) for this shape so the cap-level check
-// can decide — the mcp{} block is body-authoritative and can't
+// can decide — an MCP policy is body-authoritative and can't
 // meaningfully gate a verb the backend declared body-less.
 //
 // This is what lets MCP Streamable HTTP's GET (notification SSE
 // stream) and DELETE (session terminate) share the same URL as the
-// POST that mcp{} gates without the multi-method path tripping
-// missing_body. The nil-descriptor case (genuine misconfig: mcp{}
+// POST that an MCP policy gates without the multi-method path tripping
+// missing_body. The nil-descriptor case (genuine misconfig: MCP rules
 // bound to a non-MCP backend) still fails closed, covered by
 // TestDecideMCP_DescriptorMissingFailsClosed.
 func TestDecideMCP_EmptyDescriptorSkipsEvaluation(t *testing.T) {
@@ -111,11 +111,11 @@ func TestDecideMCP_EmptyDescriptorSkipsEvaluation(t *testing.T) {
 			// Calls nil, ParseErr nil — the per-request opt-out sentinel.
 		},
 	}
-	d := decideMCP(sets, req, nil, time.Time{}, "")
+	d := decideMCP(sets, nil, req, nil, time.Time{}, "")
 	assert.Nil(t, d, "decideMCP must return nil for the per-request opt-out sentinel so the cap-level check decides")
 }
 
-// Empty sets — no mcp{} block in scope — returns nil. The
+// Empty sets — no MCP rules in scope — returns nil. The
 // AllowOperation caller treats nil as "no MCP enforcement applied"
 // and continues to parameter validation.
 func TestDecideMCP_EmptySetsReturnNil(t *testing.T) {
@@ -124,10 +124,10 @@ func TestDecideMCP_EmptySetsReturnNil(t *testing.T) {
 			Calls: []logical.MCPCall{{Method: "tools/list"}},
 		},
 	}
-	if d := decideMCP(nil, req, nil, time.Time{}, ""); d != nil {
+	if d := decideMCP(nil, nil, req, nil, time.Time{}, ""); d != nil {
 		t.Errorf("decision = %+v, want nil for empty sets", d)
 	}
-	if d := decideMCP([]*CBPMCPRules{}, req, nil, time.Time{}, ""); d != nil {
+	if d := decideMCP([]*CBPMCPRules{}, nil, req, nil, time.Time{}, ""); d != nil {
 		t.Errorf("decision = %+v, want nil for empty sets slice", d)
 	}
 }
@@ -146,7 +146,7 @@ func TestEvaluateMCPDescriptor_BatchDenyStampsBatchIndex(t *testing.T) {
 			{Method: "tools/call", Name: "delete_repo", BatchIndex: 2},
 		},
 	}
-	d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{}, "")
+	d := evaluateMCPDescriptor(sets, nil, desc, nil, nil, time.Time{}, "")
 	require.NotNil(t, d)
 	require.Equal(t, "deny", d.Decision)
 	require.NotNil(t, d.BatchIndex, "BatchIndex should be stamped for batch denies")
@@ -164,7 +164,7 @@ func TestEvaluateMCPDescriptor_SingleCallLeavesBatchIndexNil(t *testing.T) {
 			{Method: "tools/call", Name: "delete_repo"},
 		},
 	}
-	d := evaluateMCPDescriptor(sets, desc, nil, nil, time.Time{}, "")
+	d := evaluateMCPDescriptor(sets, nil, desc, nil, nil, time.Time{}, "")
 	require.NotNil(t, d)
 	if d.BatchIndex != nil {
 		t.Errorf("BatchIndex = %v, want nil for single-call descriptor", *d.BatchIndex)
@@ -220,7 +220,7 @@ func TestDecideMCP_SanitizesDecisionBoundary(t *testing.T) {
 			}},
 		},
 	}
-	d := decideMCP(sets, req, nil, time.Time{}, "")
+	d := decideMCP(sets, nil, req, nil, time.Time{}, "")
 	require.NotNil(t, d)
 	assert.Equal(t, "deny", d.Decision)
 	assert.Equal(t, mcpRuleTypeDeniedTools, d.RuleType)

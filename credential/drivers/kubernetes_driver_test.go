@@ -35,7 +35,7 @@ func TestKubernetesDriverFactory_SensitiveConfigFields(t *testing.T) {
 func TestKubernetesDriverFactory_InferCredentialType(t *testing.T) {
 	f := &KubernetesDriverFactory{}
 
-	ct, err := f.InferCredentialType(map[string]string{})
+	ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{}))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeKubernetesToken, ct)
 }
@@ -44,55 +44,148 @@ func TestKubernetesDriverFactory_ValidateConfig(t *testing.T) {
 	f := &KubernetesDriverFactory{}
 
 	t.Run("missing kubernetes_url", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"token": "test-token",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "kubernetes_url")
 	})
 
 	t.Run("missing token", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"kubernetes_url": "https://k8s.example.com",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "token")
 	})
 
 	t.Run("kubernetes_url rejects http scheme", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"kubernetes_url": "http://k8s.example.com",
 			"token":          "test-token",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "https")
 	})
 
 	t.Run("http allowed with tls_skip_verify", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"kubernetes_url":  "http://k8s.example.com",
 			"token":           "test-token",
 			"tls_skip_verify": "true",
-		})
+		}))
 		require.NoError(t, err)
 	})
 
 	t.Run("valid minimal config", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"kubernetes_url": "https://k8s.example.com",
 			"token":          "test-token",
-		})
+		}))
 		require.NoError(t, err)
 	})
 
 	t.Run("valid full config", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"kubernetes_url":  "https://k8s.example.com:6443",
 			"token":           "test-token",
 			"tls_skip_verify": "false",
-		})
+		}))
 		require.NoError(t, err)
 	})
+}
+
+func TestKubernetesDriverFactory_ValidateConfig_AuthMethod(t *testing.T) {
+	f := &KubernetesDriverFactory{}
+
+	t.Run("absent auth_method behaves as static", func(t *testing.T) {
+		// The back-compat case: every source written before federation existed.
+		require.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{
+			"kubernetes_url": "https://k8s.example.com",
+			"token":          "test-token",
+		})))
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
+			"kubernetes_url": "https://k8s.example.com",
+		}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "token is required")
+	})
+
+	t.Run("present but empty auth_method is validated as static", func(t *testing.T) {
+		// GetString hands back a stored "" rather than the default, and the schema
+		// pass skips empty values — so an auth_method key set to "" must still be
+		// held to the static rules. Otherwise a source is accepted carrying neither
+		// a token nor a federation config, and every mint 401s with an empty bearer.
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
+			"kubernetes_url": "https://k8s.example.com",
+			"auth_method":    "",
+		}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "token is required")
+
+		require.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{
+			"kubernetes_url": "https://k8s.example.com",
+			"auth_method":    "",
+			"token":          "test-token",
+		})))
+	})
+
+	t.Run("unknown auth_method rejected", func(t *testing.T) {
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
+			"kubernetes_url": "https://k8s.example.com",
+			"auth_method":    "kubeconfig",
+			"token":          "test-token",
+		}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "auth_method")
+	})
+
+	t.Run("static rejects audience", func(t *testing.T) {
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
+			"kubernetes_url": "https://k8s.example.com",
+			"auth_method":    kubernetesAuthMethodStatic,
+			"token":          "test-token",
+			"audience":       "https://k8s.example.com",
+		}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "audience is only valid")
+	})
+
+	t.Run("federation minimal config", func(t *testing.T) {
+		require.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{
+			"kubernetes_url": "https://k8s.example.com",
+			"auth_method":    kubernetesAuthMethodOIDCFederation,
+		})))
+	})
+
+	t.Run("federation accepts audience", func(t *testing.T) {
+		require.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{
+			"kubernetes_url": "https://k8s.example.com",
+			"auth_method":    kubernetesAuthMethodOIDCFederation,
+			"audience":       "https://k8s.example.com",
+		})))
+	})
+
+	// A keyless source holds nothing to authenticate or rotate with, so every
+	// static field is rejected rather than silently ignored.
+	for _, field := range []string{"token", "source_service_account", "source_namespace", "source_token_ttl"} {
+		t.Run("federation rejects "+field, func(t *testing.T) {
+			config := map[string]string{
+				"kubernetes_url": "https://k8s.example.com",
+				"auth_method":    kubernetesAuthMethodOIDCFederation,
+			}
+			switch field {
+			case "source_token_ttl":
+				config[field] = "24h"
+			default:
+				config[field] = "some-value"
+			}
+			err := f.ValidateConfig(credential.NewConfig(config))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), field)
+			assert.Contains(t, err.Error(), "must not be set")
+		})
+	}
 }
 
 // ============================================================================
@@ -246,11 +339,11 @@ func newTestK8sDriver(t *testing.T, serverURL string) *KubernetesDriver {
 	return &KubernetesDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeKubernetes,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"kubernetes_url":  serverURL,
 				"token":           "valid-token",
 				"tls_skip_verify": "true",
-			},
+			}),
 		},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -264,7 +357,7 @@ func TestKubernetesDriver_Type(t *testing.T) {
 	d := &KubernetesDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeKubernetes,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.Equal(t, credential.SourceTypeKubernetes, d.Type())
@@ -274,7 +367,7 @@ func TestKubernetesDriver_Cleanup(t *testing.T) {
 	d := &KubernetesDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeKubernetes,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 		httpClient: &http.Client{},
 	}
@@ -285,7 +378,7 @@ func TestKubernetesDriver_Revoke_NoOp(t *testing.T) {
 	d := &KubernetesDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeKubernetes,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	err := d.Revoke(context.TODO(), "any-lease-id")
@@ -304,11 +397,11 @@ func TestKubernetesDriver_MintCredential_Success(t *testing.T) {
 
 	rawData, _, ttl, leaseID, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
 			"namespace":       "default",
 			"ttl":             "1h",
-		},
+		}),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "minted-token-for-my-sa", rawData["token"])
@@ -326,16 +419,48 @@ func TestKubernetesDriver_MintCredential_DefaultTTL(t *testing.T) {
 
 	rawData, _, ttl, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
 			"namespace":       "default",
 			// no ttl specified — should default to 1h
-		},
+		}),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "minted-token-for-my-sa", rawData["token"])
 	// TTL should be approximately 1 hour (3600s minus small elapsed time)
 	assert.True(t, ttl > 59*time.Minute && ttl <= 1*time.Hour, "expected ~1h TTL, got %v", ttl)
+}
+
+// max_ttl shortens the requested token lifetime, but never below the 10 minutes
+// the TokenRequest API accepts.
+func TestKubernetesDriver_MintCredential_MaxTTLBoundsTheRequestedLifetime(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		maxTTL time.Duration
+		want   time.Duration
+	}{
+		{"no max_ttl keeps the requested ttl", 0, time.Hour},
+		{"max_ttl shortens the requested ttl", 20 * time.Minute, 20 * time.Minute},
+		{"max_ttl below the API minimum requests the minimum", time.Minute, k8sMinTokenLifetime},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newK8sMockServer(t)
+			defer server.Close()
+
+			_, _, ttl, _, err := newTestK8sDriver(t, server.URL).MintCredential(context.TODO(), &credential.CredSpec{
+				Name:   "test-spec",
+				MaxTTL: tc.maxTTL,
+				Config: credential.NewConfig(map[string]string{
+					"service_account": "my-sa",
+					"namespace":       "default",
+					"ttl":             "1h",
+				}),
+			})
+			require.NoError(t, err)
+			// The mock echoes expirationSeconds into a second-precision timestamp.
+			assert.InDelta(t, tc.want.Seconds(), ttl.Seconds(), 2, "got %v", ttl)
+		})
+	}
 }
 
 func TestKubernetesDriver_MintCredential_CustomAudiences(t *testing.T) {
@@ -346,11 +471,11 @@ func TestKubernetesDriver_MintCredential_CustomAudiences(t *testing.T) {
 
 	rawData, _, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
 			"namespace":       "default",
 			"audiences":       "https://app1.example.com, https://app2.example.com",
-		},
+		}),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "https://app1.example.com, https://app2.example.com", rawData["audiences"])
@@ -364,9 +489,9 @@ func TestKubernetesDriver_MintCredential_MissingServiceAccount(t *testing.T) {
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"namespace": "default",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "service_account")
@@ -380,9 +505,9 @@ func TestKubernetesDriver_MintCredential_MissingNamespace(t *testing.T) {
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "namespace")
@@ -396,10 +521,10 @@ func TestKubernetesDriver_MintCredential_SANotFound(t *testing.T) {
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"service_account": "not-found-sa",
 			"namespace":       "default",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
@@ -413,10 +538,10 @@ func TestKubernetesDriver_MintCredential_Forbidden(t *testing.T) {
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"service_account": "forbidden-sa",
 			"namespace":       "default",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "insufficient permissions")
@@ -433,10 +558,10 @@ func TestKubernetesDriver_VerifySpec_Exists(t *testing.T) {
 	d := newTestK8sDriver(t, server.URL)
 
 	err := d.VerifySpec(context.TODO(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
 			"namespace":       "default",
-		},
+		}),
 	})
 	require.NoError(t, err)
 }
@@ -448,10 +573,10 @@ func TestKubernetesDriver_VerifySpec_NotFound(t *testing.T) {
 	d := newTestK8sDriver(t, server.URL)
 
 	err := d.VerifySpec(context.TODO(), &credential.CredSpec{
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"service_account": "not-found-sa",
 			"namespace":       "default",
-		},
+		}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
@@ -461,13 +586,13 @@ func TestKubernetesDriver_VerifySpec_MissingFields(t *testing.T) {
 	d := &KubernetesDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeKubernetes,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 		httpClient: &http.Client{},
 	}
 
 	err := d.VerifySpec(context.TODO(), &credential.CredSpec{
-		Config: map[string]string{},
+		Config: credential.NewConfig(map[string]string{}),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "required")
@@ -481,10 +606,10 @@ func TestKubernetesDriver_SupportsRotation(t *testing.T) {
 	t.Run("true when source SA is configured", func(t *testing.T) {
 		d := &KubernetesDriver{
 			credSource: &credential.CredSource{
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"source_service_account": "warden-sa",
 					"source_namespace":       "warden",
-				},
+				}),
 			},
 		}
 		assert.True(t, d.SupportsRotation())
@@ -493,7 +618,7 @@ func TestKubernetesDriver_SupportsRotation(t *testing.T) {
 	t.Run("false when source SA is missing", func(t *testing.T) {
 		d := &KubernetesDriver{
 			credSource: &credential.CredSource{
-				Config: map[string]string{},
+				Config: credential.NewConfig(map[string]string{}),
 			},
 		}
 		assert.False(t, d.SupportsRotation())
@@ -502,9 +627,9 @@ func TestKubernetesDriver_SupportsRotation(t *testing.T) {
 	t.Run("false when only SA name is set", func(t *testing.T) {
 		d := &KubernetesDriver{
 			credSource: &credential.CredSource{
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"source_service_account": "warden-sa",
-				},
+				}),
 			},
 		}
 		assert.False(t, d.SupportsRotation())
@@ -518,12 +643,12 @@ func TestKubernetesDriver_PrepareRotation_Success(t *testing.T) {
 	d := &KubernetesDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeKubernetes,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"kubernetes_url":         server.URL,
 				"token":                  "valid-token",
 				"source_service_account": "warden-sa",
 				"source_namespace":       "warden",
-			},
+			}),
 		},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -546,10 +671,10 @@ func TestKubernetesDriver_PrepareRotation_Success(t *testing.T) {
 func TestKubernetesDriver_PrepareRotation_MissingSAConfig(t *testing.T) {
 	d := &KubernetesDriver{
 		credSource: &credential.CredSource{
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"kubernetes_url": "https://k8s.example.com",
 				"token":          "valid-token",
-			},
+			}),
 		},
 	}
 
@@ -565,10 +690,10 @@ func TestKubernetesDriver_CommitRotation_Success(t *testing.T) {
 	d := &KubernetesDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeKubernetes,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"kubernetes_url": server.URL,
 				"token":          "old-token",
-			},
+			}),
 		},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -582,7 +707,7 @@ func TestKubernetesDriver_CommitRotation_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Config should be updated
-	assert.Equal(t, "valid-token", d.credSource.Config["token"])
+	assert.Equal(t, "valid-token", d.credSource.Config.Get("token"))
 }
 
 func TestKubernetesDriver_CommitRotation_RollbackOnFailure(t *testing.T) {
@@ -592,10 +717,10 @@ func TestKubernetesDriver_CommitRotation_RollbackOnFailure(t *testing.T) {
 	d := &KubernetesDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeKubernetes,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"kubernetes_url": server.URL,
 				"token":          "valid-token",
-			},
+			}),
 		},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -609,7 +734,7 @@ func TestKubernetesDriver_CommitRotation_RollbackOnFailure(t *testing.T) {
 	require.Error(t, err)
 
 	// Config should be rolled back
-	assert.Equal(t, "valid-token", d.credSource.Config["token"])
+	assert.Equal(t, "valid-token", d.credSource.Config.Get("token"))
 }
 
 func TestKubernetesDriver_CleanupRotation_NoOp(t *testing.T) {
@@ -633,11 +758,11 @@ func TestKubernetesDriverFactory_Create_Success(t *testing.T) {
 	defer server.Close()
 
 	f := &KubernetesDriverFactory{}
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"kubernetes_url":  server.URL,
 		"token":           "valid-token",
 		"tls_skip_verify": "true",
-	}, newTestLogger(t))
+	}), newTestLogger(t))
 	require.NoError(t, err)
 	assert.NotNil(t, driver)
 	assert.Equal(t, credential.SourceTypeKubernetes, driver.Type())
@@ -648,22 +773,22 @@ func TestKubernetesDriverFactory_Create_InvalidToken(t *testing.T) {
 	defer server.Close()
 
 	f := &KubernetesDriverFactory{}
-	_, err := f.Create(map[string]string{
+	_, err := f.Create(credential.NewConfig(map[string]string{
 		"kubernetes_url":  server.URL,
 		"token":           "bad-token",
 		"tls_skip_verify": "true",
-	}, newTestLogger(t))
+	}), newTestLogger(t))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "connection failed")
 }
 
 func TestKubernetesDriverFactory_Create_InvalidCAData(t *testing.T) {
 	f := &KubernetesDriverFactory{}
-	_, err := f.Create(map[string]string{
+	_, err := f.Create(credential.NewConfig(map[string]string{
 		"kubernetes_url": "https://k8s.example.com",
 		"token":          "valid-token",
 		"ca_data":        "not-valid-base64!!!",
-	}, newTestLogger(t))
+	}), newTestLogger(t))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ca_data")
 }
@@ -676,30 +801,30 @@ func TestKubernetesDriverFactory_ValidateConfig_SourceTokenTTL(t *testing.T) {
 	f := &KubernetesDriverFactory{}
 
 	t.Run("valid source_token_ttl", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"kubernetes_url":   "https://k8s.example.com",
 			"token":            "test-token",
 			"source_token_ttl": "24h",
-		})
+		}))
 		require.NoError(t, err)
 	})
 
 	t.Run("source_token_ttl too short", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"kubernetes_url":   "https://k8s.example.com",
 			"token":            "test-token",
 			"source_token_ttl": "5m",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "at least 10m")
 	})
 
 	t.Run("source_token_ttl too long", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"kubernetes_url":   "https://k8s.example.com",
 			"token":            "test-token",
 			"source_token_ttl": "72h",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "exceed 48h")
 	})
@@ -720,10 +845,10 @@ func TestKubernetesDriver_MintCredential_ContextCancelled(t *testing.T) {
 
 	_, _, _, _, err := d.MintCredential(ctx, &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"service_account": "my-sa",
 			"namespace":       "default",
-		},
+		}),
 	})
 	require.Error(t, err)
 }
@@ -735,12 +860,12 @@ func TestKubernetesDriver_ConcurrentMintAndRotation(t *testing.T) {
 	d := &KubernetesDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeKubernetes,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"kubernetes_url":         server.URL,
 				"token":                  "valid-token",
 				"source_service_account": "warden-sa",
 				"source_namespace":       "warden",
-			},
+			}),
 		},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -753,10 +878,10 @@ func TestKubernetesDriver_ConcurrentMintAndRotation(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			_, _, _, _, _ = d.MintCredential(context.Background(), &credential.CredSpec{
 				Name: "test-spec",
-				Config: map[string]string{
+				Config: credential.NewConfig(map[string]string{
 					"service_account": "my-sa",
 					"namespace":       "default",
-				},
+				}),
 			})
 		}
 	}()
@@ -812,4 +937,229 @@ func TestKubernetesTokenMetadata(t *testing.T) {
 		assert.NotContains(t, meta, "audiences")
 		assert.NotContains(t, meta, "expiration")
 	})
+}
+
+// ============================================================================
+// Keyless (workload identity federation) Tests
+// ============================================================================
+
+// newFederatedK8sDriver builds a driver backed by the shared mock server with no
+// stored token, the way a keyless source is configured.
+func newFederatedK8sDriver(t *testing.T, serverURL string) *KubernetesDriver {
+	t.Helper()
+	return &KubernetesDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeKubernetes,
+			Config: credential.NewConfig(map[string]string{
+				"kubernetes_url":  serverURL,
+				"auth_method":     kubernetesAuthMethodOIDCFederation,
+				"audience":        "https://k8s.example.com",
+				"tls_skip_verify": "true",
+			}),
+		},
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+func TestKubernetesDriver_MintCredentialWithExchange_UsesAssertionAsBearer(t *testing.T) {
+	// The assertion the caller presents must be the bearer on the TokenRequest
+	// call — that is the whole of federation here, since there is no exchange hop.
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"kind":       "TokenRequest",
+			"apiVersion": "authentication.k8s.io/v1",
+			"status": map[string]interface{}{
+				"token":               "minted-token-for-payments",
+				"expirationTimestamp": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			},
+		})
+	}))
+	defer server.Close()
+
+	d := newFederatedK8sDriver(t, server.URL)
+	spec := &credential.CredSpec{
+		Name: "payments",
+		Config: credential.NewConfig(map[string]string{
+			"service_account":      "payments",
+			"namespace":            "prod",
+			"subject_token_source": credential.SourceWardenIdentity,
+		}),
+	}
+
+	rawData, metadata, ttl, leaseID, err := d.MintCredentialWithExchange(
+		context.Background(), spec, &credential.ExchangeInputs{SubjectToken: "assertion-jwt"})
+	require.NoError(t, err)
+
+	assert.Equal(t, "Bearer assertion-jwt", gotAuth)
+	assert.Equal(t, "minted-token-for-payments", rawData["token"])
+	assert.Equal(t, "prod", rawData["namespace"])
+	assert.Equal(t, "payments", rawData["service_account"])
+	assert.Equal(t, "system:serviceaccount:prod:payments", metadata["subject"])
+	assert.InDelta(t, time.Hour.Seconds(), ttl.Seconds(), 5)
+	// A ServiceAccount token cannot be revoked, so there is no lease to hold.
+	assert.Empty(t, leaseID)
+}
+
+func TestKubernetesDriver_ExchangeFailsClosed(t *testing.T) {
+	server := newK8sMockServer(t)
+	defer server.Close()
+
+	spec := &credential.CredSpec{
+		Name:   "app",
+		Config: credential.NewConfig(map[string]string{"service_account": "app-backend", "namespace": "default"}),
+	}
+
+	t.Run("MintCredential refuses a federated source", func(t *testing.T) {
+		d := newFederatedK8sDriver(t, server.URL)
+		_, _, _, _, err := d.MintCredential(context.Background(), spec)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "subject_token_source")
+	})
+
+	t.Run("MintCredentialWithExchange refuses a static source", func(t *testing.T) {
+		d := newTestK8sDriver(t, server.URL)
+		_, _, _, _, err := d.MintCredentialWithExchange(
+			context.Background(), spec, &credential.ExchangeInputs{SubjectToken: "assertion-jwt"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), kubernetesAuthMethodOIDCFederation)
+	})
+
+	t.Run("empty subject token is refused", func(t *testing.T) {
+		d := newFederatedK8sDriver(t, server.URL)
+		_, _, _, _, err := d.MintCredentialWithExchange(
+			context.Background(), spec, &credential.ExchangeInputs{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no subject token")
+	})
+
+	t.Run("nil exchange inputs are refused", func(t *testing.T) {
+		d := newFederatedK8sDriver(t, server.URL)
+		_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no subject token")
+	})
+}
+
+func TestKubernetesDriver_Federation_RotationAndVerifyDisabled(t *testing.T) {
+	server := newK8sMockServer(t)
+	defer server.Close()
+
+	d := newFederatedK8sDriver(t, server.URL)
+
+	assert.False(t, d.SupportsRotation(), "a source holding no token has nothing to rotate")
+
+	// A stored empty auth_method resolves to static, matching what ValidateConfig
+	// holds such a source to.
+	empty := newTestK8sDriver(t, server.URL)
+	empty.credSource.Config = empty.credSource.Config.With("auth_method", "")
+	assert.Equal(t, kubernetesAuthMethodStatic, empty.getAuthMethod())
+
+	_, _, _, err := d.PrepareRotation(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no token to rotate")
+
+	// VerifySpec has no ambient credential to look the account up with, so it is
+	// skipped rather than attempted unauthenticated.
+	require.NoError(t, d.VerifySpec(context.Background(), &credential.CredSpec{
+		Config: credential.NewConfig(map[string]string{"service_account": "not-found-sa", "namespace": "default"}),
+	}))
+}
+
+func TestKubernetesDriverFactory_Create_Federation(t *testing.T) {
+	f := &KubernetesDriverFactory{}
+
+	t.Run("no request is sent to the API server", func(t *testing.T) {
+		// Driver creation runs on every mint, not just at source create, so a
+		// federated Create must not depend on a credential it does not have.
+		var calls int
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+		defer server.Close()
+
+		d, err := f.Create(credential.NewConfig(map[string]string{
+			"kubernetes_url":  server.URL,
+			"auth_method":     kubernetesAuthMethodOIDCFederation,
+			"audience":        "https://k8s.example.com",
+			"tls_skip_verify": "true",
+		}), newTestLogger(t))
+		require.NoError(t, err)
+		require.NotNil(t, d)
+		assert.Zero(t, calls, "the TLS probe must send no HTTP request")
+	})
+
+	t.Run("rejects a certificate the CA does not verify", func(t *testing.T) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		defer server.Close()
+
+		// httptest signs with its own throwaway CA, which the system roots do not
+		// carry — so verification must fail without tls_skip_verify.
+		_, err := f.Create(credential.NewConfig(map[string]string{
+			"kubernetes_url": server.URL,
+			"auth_method":    kubernetesAuthMethodOIDCFederation,
+		}), newTestLogger(t))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "TLS connection")
+	})
+
+	t.Run("rejects an unreachable host", func(t *testing.T) {
+		_, err := f.Create(credential.NewConfig(map[string]string{
+			"kubernetes_url":  "https://127.0.0.1:1",
+			"auth_method":     kubernetesAuthMethodOIDCFederation,
+			"tls_skip_verify": "true",
+		}), newTestLogger(t))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "TLS connection")
+	})
+
+	t.Run("plain http is not probed", func(t *testing.T) {
+		// tls_skip_verify permits an http URL for dev clusters; a handshake against
+		// a plain listener would fail regardless of InsecureSkipVerify, so the probe
+		// must skip it. The e2e harness depends on this.
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("no request should reach the server")
+		}))
+		defer server.Close()
+
+		_, err := f.Create(credential.NewConfig(map[string]string{
+			"kubernetes_url":  server.URL,
+			"auth_method":     kubernetesAuthMethodOIDCFederation,
+			"tls_skip_verify": "true",
+		}), newTestLogger(t))
+		require.NoError(t, err)
+	})
+
+	t.Run("probes with the system roots", func(t *testing.T) {
+		// With neither ca_data nor tls_skip_verify, the probe reads the transport's
+		// TLS config — system roots — and fails on a host that cannot be reached.
+		_, err := f.Create(credential.NewConfig(map[string]string{
+			"kubernetes_url": "https://127.0.0.1:1",
+			"auth_method":    kubernetesAuthMethodOIDCFederation,
+		}), newTestLogger(t))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "TLS connection")
+	})
+}
+
+func TestKubernetesDriver_MapError_Federated(t *testing.T) {
+	server := newK8sMockServer(t)
+	defer server.Close()
+
+	// A federated refusal is as likely to be a trust or audience mismatch as a
+	// missing grant, so the message must name all three.
+	d := newFederatedK8sDriver(t, server.URL)
+	err := d.mapError(fmt.Errorf("forbidden"), http.StatusForbidden, "payments", "prod")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "issuer")
+	assert.Contains(t, err.Error(), "audience")
+	assert.Contains(t, err.Error(), "serviceaccounts/token")
+
+	// The static message is unchanged.
+	static := newTestK8sDriver(t, server.URL)
+	err = static.mapError(fmt.Errorf("forbidden"), http.StatusForbidden, "payments", "prod")
+	assert.Contains(t, err.Error(), "insufficient permissions")
 }

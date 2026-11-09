@@ -1,5 +1,7 @@
 ---
 title: "Audit & attribution"
+sidebar:
+  order: 6
 ---
 
 _Know exactly who did what, on whose behalf._
@@ -32,21 +34,31 @@ rather than read off the record.
 Warden sits in the path of every request, so it records every request — a
 [forensic log](/concepts/audit/) of who asked for what, which policy decision
 was made, and which credential was issued. Each operation produces paired request
-and response entries carrying the principal and [role](/concepts/roles/), the
+and response entries carrying the caller's native identity, the
+[role](/identity/roles/) it ran under and the group that granted it, the
 policies in force, the [namespace](/concepts/namespaces/), the upstream called,
 and — for a brokered call — a description of the credential Warden minted. Because
 the agent authenticated [as itself](/use-cases/access-brokering/), the identity on the entry
 is the real one, not a shared key.
+
+When the agent is registered, the entry also names its
+[entity](/identity/entities/) — its ID, its name and whether it is governed. The
+entity carries a description and a [sponsor](/identity/sponsors/): the team that
+answers for the agent. So the trail ends at a known agent and a group of people,
+not at a credential nobody claims.
 
 Attribution survives the extra hop. A caller's token can carry a
 [delegation](/concepts/delegation/) chain — the subjects it is being made *on
 behalf of* — and Warden records them alongside the authenticated principal. The
 chain is the cryptographically-verified RFC 8693 `act` chain, attested by a signed
 JWT `act` claim, so every actor on the record is one the issuing IdP or trust
-domain vouched for. When an agent acts for a verified **[user principal](/concepts/delegation/)**
-— a human, or another agent, presented per request — every mint it scopes is stamped
-with that user (`Auth.User`), so a per-user action is attributed to the person behind it,
-never the raw user credential. Attribution is kept deliberately orthogonal to authorization —
+domain vouched for — with that issuer recorded beside it when the `act` claim names one. When an
+agent acts for a verified **[user principal](/concepts/delegation/)** — a human, or another
+agent, presented per request — every mint it scopes is stamped with that user
+(`auth.user`): who they are, the namespace their credential was admitted in, and
+the user token's own `act` chain, so a call that passed through several hands before the
+agent is traced back along all of them. A per-user action is attributed to the person
+behind it, never the raw user credential. Attribution is kept deliberately orthogonal to authorization —
 naming who a call is for can never *widen* what the caller may do — so it is safe
 to trust the chain for forensics without it becoming an avenue for escalation.
 
@@ -54,7 +66,7 @@ The record is built to be kept. Secrets are **never written in clear**: sensitiv
 values are replaced with a keyed HMAC, deterministic enough to correlate
 occurrences of a value across the log yet impossible to reverse, so the log is safe
 to ship to a SIEM. For [MCP](/concepts/mcp/) traffic the detail goes per tool
-call: every `mcp { }` decision is recorded on **both allow and deny**, with the tool
+call: every MCP policy decision is recorded on **both allow and deny**, with the tool
 or parameter that decided it — a complete account of what an agent did through a
 server, not just what it was blocked from doing.
 
@@ -70,17 +82,20 @@ server, not just what it was blocked from doing.
 ## In practice
 
 An agent authenticates with a token whose verified RFC 8693 `act` chain names the
-user or upstream agent it is acting for, and Warden persists that chain on the
+user or upstream agent it is acting for, and Warden records that chain on the
 token. An investigation into an unexpected change reads the audit log and finds
-the offending call attributed to the principal `mcp-gateway` *and* to the actor
-`agents/alpha` — so the trail leads to the specific agent behind the call, not just
-the authenticating identity. The credential Warden issued is described in the same
+the offending call attributed to the native identity `mcp-gateway`, claimed by the
+entity `mcp-gateway` that the platform team sponsors, *and* to the actor
+`agents/alpha` — so the trail leads to the specific agent behind the call and the
+team that answers for it, not just the authenticating identity. The credential Warden issued is described in the same
 entry, with its secret HMAC'd; the investigator can confirm which value was used by
 hashing it the same way, without the log ever holding a usable key.
 
 ## See Also
 
 - [Audit](/concepts/audit/) — what is recorded, and how secrets are hashed.
+- [Entities](/identity/entities/) and [Sponsors](/identity/sponsors/) — the
+  registered agent an entry names, and the team that answers for it.
 - [Delegation](/concepts/delegation/) — the verified actor chain and how it
   reaches the log.
 - [Model Context Protocol](/concepts/mcp/) — per-tool-call decisions in the

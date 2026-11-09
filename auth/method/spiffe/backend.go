@@ -1,8 +1,8 @@
 // Package spiffe implements the SPIFFE auth method: a first-class relying party
 // that authenticates workloads presenting either a SPIFFE X.509-SVID (a TLS
 // client certificate) or a SPIFFE JWT-SVID (a bearer token) against per-trust-
-// domain bundles. Both SVID types are accepted on one mount and issue the single
-// spiffe_role token type. The trust-domain store, federation, and SVID
+// domain bundles. Both SVID types are accepted on one mount and issue an
+// identity token. The trust-domain store, federation, and SVID
 // verification are provided by the shared auth/spiffe substrate.
 package spiffe
 
@@ -14,6 +14,7 @@ import (
 
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
 
+	"github.com/stephnangue/warden/auth/helper"
 	spiffelib "github.com/stephnangue/warden/auth/spiffe"
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
@@ -23,20 +24,53 @@ import (
 // SPIFFEAuthConfig is the mount-level configuration. Trust domains are managed
 // via the trust-domain/ paths, not here.
 type SPIFFEAuthConfig struct {
-	TokenTTL    time.Duration `json:"token_ttl" default:"1h"`
-	DefaultRole string        `json:"default_role,omitempty"`
+	TokenTTL time.Duration `json:"token_ttl" default:"1h"`
+
+	// removed names the removed keys (helper.RemovedConfigKeys) the config
+	// was built from, which it ignores; a config read warns about each.
+	removed []string
+
+	// BoundAudiences are the audiences a JWT-SVID must carry for the mount to
+	// admit it, any one of them. Validated (no empty entry); required on an
+	// agent mount, and without it no JWT-SVID is admitted.
+	BoundAudiences []string `json:"bound_audiences,omitempty"`
+
+	// MaxAge bounds a JWT-SVID's age at admission, from its iat: one older,
+	// or without an iat, is not admitted. X.509-SVIDs carry no issue time and
+	// are not checked. Zero is unset. Validated (not negative) and enforced
+	// at admission, through CheckSVIDMaxAge.
+	MaxAge time.Duration `json:"max_age,omitempty"`
+
+	// Facts: entity_kind, and the SVID fields the mount publishes under other
+	// names beyond its built-in facts. Compiled in buildSPIFFEConfig. A config
+	// write refuses facts that do not compile, so they are never stored; ones
+	// that still fail at load (the mount table's, or storage written under
+	// looser rules) are installed with a nil naming: the mount answers no
+	// fact, so nothing that reads facts can match it.
+	helper.FactsConfig
 }
 
 type spiffeAuthBackend struct {
 	*framework.Backend
-	config      *SPIFFEAuthConfig
-	configMu    sync.RWMutex
-	logger      *logger.GatedLogger
-	storageView sdklogical.Storage
+	config   *SPIFFEAuthConfig
+	configMu sync.RWMutex
+	// configWriteMu serializes config writes and the storage load: a write
+	// merges onto the live config, so two racing would lose one writer's keys.
+	configWriteMu sync.Mutex
+	logger        *logger.GatedLogger
+	storageView   sdklogical.Storage
 
 	// spiffe holds the SPIFFE substrate (trust-domain store, verification set,
 	// federation refresh loop).
 	spiffe *spiffelib.Manager
+
+	// mountFacts holds the naming in force and is shared by pointer with
+	// every admission this mount produces. installConfig publishes it under
+	// configMu together with the config it was compiled from, so a reader
+	// holding configMu sees the two agree (a nil config, the defaults, goes
+	// with the default naming Factory publishes); admissions and FactNames
+	// load it without a lock and see one published naming, whole.
+	mountFacts *logical.MountFacts
 }
 
 var _ logical.Factory = Factory
@@ -46,7 +80,12 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	b := &spiffeAuthBackend{
 		logger:      conf.Logger,
 		storageView: conf.StorageView,
+		mountFacts:  &logical.MountFacts{},
 	}
+	// A spiffe mount admits without any config (every key has a default), so
+	// until one is installed it answers its built-in facts as an agent mount.
+	// Published before b is shared, so no lock is needed.
+	b.mountFacts.Publish(defaultNaming())
 	b.spiffe = spiffelib.NewManager(conf.StorageView, conf.Logger)
 
 	b.Backend = &framework.Backend{
@@ -56,16 +95,13 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		PathsSpecial: &logical.Paths{
 			Unauthenticated: []string{
 				"login",
-				"introspect/roles",
 			},
 		},
-		Paths: append([]*framework.Path{
+		Paths: append(append([]*framework.Path{
 			b.pathLogin(),
 			b.pathConfig(),
-			b.pathRole(),
-			b.pathRoleList(),
-			b.pathIntrospect(),
-		}, b.spiffe.Paths()...),
+			helper.AdmitPath(b.admit),
+		}, pathRoles()...), b.spiffe.Paths()...),
 	}
 
 	// Stop the federation refresh loop on unmount/seal (step-down is covered by
@@ -85,17 +121,90 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	return b, nil
 }
 
+// setupSPIFFEConfig builds conf and installs it. It serves the mount table's
+// config when the mount is set up and the stored config when it is loaded,
+// which a failure here would turn into a failed mount (and, at unseal, a
+// failed unseal). Facts that do not compile are therefore logged and installed
+// as a nil naming, which answers no fact: closed for every reader of facts,
+// while logins and the config itself keep working.
 func (b *spiffeAuthBackend) setupSPIFFEConfig(_ context.Context, conf map[string]any) error {
-	config, err := mapToSPIFFEAuthConfig(conf)
+	config, err := buildSPIFFEConfig(conf)
 	if err != nil {
 		return err
 	}
+	if err := config.FactsConfig.Err(); err != nil {
+		b.logger.Error(helper.FactsDoNotCompileLog, logger.Err(err))
+	}
+	if err := helper.RequireAgentAudiences(config.EntityKind, config.BoundAudiences); err != nil {
+		b.logger.Warn("auth mount admits no JWT-SVID until its config is rewritten", logger.Err(err))
+	}
+	if len(config.removed) > 0 {
+		b.logger.Warn("auth mount config sets removed keys, which are ignored", logger.Any("keys", config.removed))
+	}
+	b.installConfig(config)
+	return nil
+}
+
+// installConfig makes config the live configuration and publishes its naming
+// (nil when it does not compile, which answers no fact) in the same critical
+// section. It cannot fail.
+func (b *spiffeAuthBackend) installConfig(config *SPIFFEAuthConfig) {
+	b.configMu.Lock()
+	b.config = config
+	b.mountFacts.Publish(config.Naming())
+	b.configMu.Unlock()
+}
+
+// buildSPIFFEConfig parses conf, without touching the backend.
+func buildSPIFFEConfig(conf map[string]any) (*SPIFFEAuthConfig, error) {
+	config, err := mapToSPIFFEAuthConfig(conf)
+	if err != nil {
+		return nil, err
+	}
+	config.removed = helper.RemovedConfigKeys(conf)
 	if config.TokenTTL == 0 {
 		config.TokenTTL = time.Hour
 	}
-	b.configMu.Lock()
-	b.config = config
-	b.configMu.Unlock()
+	// Facts that do not compile are kept on the config, not returned: the
+	// caller decides whether to refuse them or fail closed.
+	config.CompileFields(spiffeBuiltinFacts(), spiffeAliasPolicy)
+	return config, nil
+}
+
+// normalizedSPIFFEConfig is config in the form storage holds, so a restart
+// parses consistent types.
+func normalizedSPIFFEConfig(config *SPIFFEAuthConfig) map[string]any {
+	return map[string]any{
+		"token_ttl":         config.TokenTTL.String(),
+		"bound_audiences":   config.BoundAudiences,
+		"max_age":           config.MaxAge.String(),
+		"entity_kind":       config.EntityKind,
+		"facts":             config.Facts,
+		"alias_name_source": config.AliasNameSource,
+	}
+}
+
+// loadConfig installs the persisted config, if any. It holds configWriteMu:
+// the mount is routed before it is initialized, so a config write can already
+// be under way, and loading storage over it would undo it.
+func (b *spiffeAuthBackend) loadConfig(ctx context.Context) error {
+	b.configWriteMu.Lock()
+	defer b.configWriteMu.Unlock()
+
+	entry, err := b.storageView.Get(ctx, "config")
+	if err != nil {
+		return fmt.Errorf("failed to read config from storage: %w", err)
+	}
+	if entry == nil {
+		return nil
+	}
+	var configMap map[string]any
+	if err := entry.DecodeJSON(&configMap); err != nil {
+		return fmt.Errorf("failed to decode config: %w", err)
+	}
+	if err := b.setupSPIFFEConfig(ctx, configMap); err != nil {
+		return fmt.Errorf("failed to setup spiffe config from storage: %w", err)
+	}
 	return nil
 }
 
@@ -107,18 +216,8 @@ func (b *spiffeAuthBackend) Initialize(ctx context.Context) error {
 		return nil
 	}
 
-	entry, err := b.storageView.Get(ctx, "config")
-	if err != nil {
-		return fmt.Errorf("failed to read config from storage: %w", err)
-	}
-	if entry != nil {
-		var configMap map[string]any
-		if err := entry.DecodeJSON(&configMap); err != nil {
-			return fmt.Errorf("failed to decode config: %w", err)
-		}
-		if err := b.setupSPIFFEConfig(ctx, configMap); err != nil {
-			return fmt.Errorf("failed to setup spiffe config from storage: %w", err)
-		}
+	if err := b.loadConfig(ctx); err != nil {
+		return err
 	}
 
 	// Fail closed: if the bundles cannot be loaded, the mount must not serve logins.
@@ -143,11 +242,14 @@ It accepts both SVID types on a single mount:
     with a mandatory audience.
 
 Trust is anchored per trust domain via bundles registered under trust-domain/,
-which may be static or fetched via SPIFFE Federation. Roles bind a trust domain
-to a set of token policies and optionally constrain the allowed SPIFFE IDs.
+which may be static or fetched via SPIFFE Federation.
 
 Configuration:
   POST /auth/{mount}/trust-domain/:name - Register a trust domain bundle
-  POST /auth/{mount}/role/:name         - Create a role bound to a trust domain
   POST /auth/{mount}/login              - Authenticate with an X.509-SVID or JWT-SVID
+
+The mount's entity_kind and facts name what it admits; bound_audiences are
+the audiences a JWT-SVID must carry (required on an agent mount); max_age
+bounds a JWT-SVID's age at admission (X.509-SVIDs carry no issue time and are
+not checked).
 `

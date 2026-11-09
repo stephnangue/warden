@@ -25,17 +25,18 @@ import (
 	"github.com/stephnangue/warden/api"
 	"github.com/stephnangue/warden/audit"
 	"github.com/stephnangue/warden/config"
-	"github.com/stephnangue/warden/core/oidcsign"
 	"github.com/stephnangue/warden/core/seal"
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
+	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/credential/types"
+	"github.com/stephnangue/warden/helper/flight"
 	"github.com/stephnangue/warden/internal/locking"
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	phy "github.com/stephnangue/warden/physical"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -187,6 +188,11 @@ type Core struct {
 	// rawConfig stores the config as-is from the provided server configuration.
 	rawConfig *atomic.Value
 
+	// keylessEnforcement is keyless_enforcement_level, resolved once in NewCore.
+	// It is never written after construction, so it is read without
+	// synchronization.
+	keylessEnforcement KeylessEnforcementLevel
+
 	logger *logger.GatedLogger
 
 	// tokenStore manages namespace-aware tokens with pluggable types
@@ -202,6 +208,33 @@ type Core struct {
 	// across namespaces; root-only mutations are enforced at the HTTP layer).
 	skillStore *SkillStore
 
+	// roleStore holds the namespace roles (sys/roles). Loaded on the active
+	// node only; reads are lock-free against its snapshot.
+	roleStore *RoleStore
+
+	// builtinRolePolicies holds the built-in roles' bodies, compiled per
+	// namespace on first use (role_builtin.go).
+	builtinRolePolicies builtinRolePolicies
+
+	// identityStore holds the namespace groups and entities (sys/identity/*).
+	// Loaded on the active node only; reads and membership computations are
+	// lock-free against its snapshot.
+	identityStore *IdentityStore
+
+	// aliasUnderivedLogged holds the accessors of the mounts that have logged
+	// admitting a credential without a native identity, so each logs it once.
+	aliasUnderivedLogged sync.Map
+
+	// authRoleLeftovers counts, per auth mount UUID, the auth roles its
+	// storage still holds from before roles moved to the namespace. Built at
+	// unseal on the active node (detectAuthRoleLeftovers), read by sys/auth to
+	// warn; nil until then.
+	authRoleLeftovers atomic.Pointer[map[string]int]
+
+	// skillRenders memoises each skill's SKILL.md as the discovery server
+	// serves it, with its digest (Skills extension listings carry one).
+	skillRenders skillRenderCache
+
 	// policy store is used to manage named CBP policies
 	policyStore *PolicyStore
 
@@ -212,6 +245,9 @@ type Core struct {
 	// Global registries shared across all namespaces
 	credentialTypeRegistry   *credential.TypeRegistry
 	credentialDriverRegistry *credential.DriverRegistry
+	// assertionProfileRegistry holds the claim shapes a warden_identity assertion
+	// can be minted in. Written once in NewCore, read-only thereafter.
+	assertionProfileRegistry *credential.AssertionProfileRegistry
 
 	// expirationManager provides active TTL enforcement for tokens and credentials
 	// Uses timer-based expiration instead of relying on lazy cache eviction
@@ -231,12 +267,20 @@ type Core struct {
 	oidcIssuer    *OIDCIssuer
 	oidcPublisher JWKSPublisher
 
+	// externalBase caches the protected-resource resource_url — the external
+	// base clients reach Warden at — for provider backends that build links to
+	// themselves on the response path, where a storage read per response would
+	// cost too much. externalBaseRefresh serializes the refreshes; readers never
+	// wait on one. See externalBaseURL.
+	externalBase        atomic.Pointer[externalBaseEntry]
+	externalBaseRefresh sync.Mutex
+
 	// oidcSignBackend is the external KMS signer for the issuer key when the
 	// signer HCL stanza is configured (nil = default in-process keys). It is built
 	// lazily on the active serving path in setupOIDCIssuer and closed in
 	// stopOIDCIssuer, so a standby holds no idle KMS token. Guarded by oidcSetupMu.
 	// oidcSignTimeout is its per-call timeout.
-	oidcSignBackend oidcsign.Backend
+	oidcSignBackend remotesign.Backend
 	oidcSignTimeout time.Duration
 
 	// oidcRotationCancel stops the active node's signing-key rotation loop, and
@@ -288,6 +332,11 @@ type Core struct {
 	// Populated from CoreConfig.ProviderSkills; consumed by the mount
 	// handler to seed the skill registry on first mount of each type.
 	providerSkills map[string]string
+
+	// devPlayground is the dev playground's fixtures, from
+	// CoreConfig.DevPlayground. Nil on every server not started with
+	// -dev-playground; the sys/dev paths exist only when it is set.
+	devPlayground DevPlayground
 
 	auditManager audit.AuditManager
 
@@ -387,9 +436,17 @@ type Core struct {
 	// systemBackend is the backend which is used to manage internal operations
 	systemBackend *SystemBackend
 
-	// transparentAuthGroup ensures only one implicit auth per JWT to prevent
-	// duplicate token creation when concurrent requests arrive with the same JWT
-	transparentAuthGroup singleflight.Group
+	// transparentAuthFlight ensures only one implicit auth per credential and role,
+	// preventing duplicate token creation when concurrent requests arrive with the
+	// same one. Built by newTransparentAuthFlight.
+	transparentAuthFlight *flight.Group[*TokenEntry]
+
+	// anonymousListens holds one slot per anonymous subscriptions/listen
+	// stream open on this node's discovery server, in every namespace,
+	// bounding them at maxAnonymousListens. Made on first use
+	// (anonymousListenSlots).
+	anonymousListensOnce sync.Once
+	anonymousListens     chan struct{}
 
 	// clusterConfig holds tunable HA cluster parameters (timeouts, intervals).
 	clusterConfig ClusterConfig
@@ -418,6 +475,11 @@ type CoreConfig struct {
 	// SeedProviderSkill. Types absent from this map simply don't appear
 	// in the agent skill catalog until an operator creates one manually.
 	ProviderSkills map[string]string
+
+	// DevPlayground is set only by a dev server started with -dev-playground.
+	// It serves the sys/dev paths: minting playground identities, the scenario
+	// catalogue and the playground's audit log.
+	DevPlayground DevPlayground
 
 	// TokenStore has been moved to core package and is created internally
 	// Deprecated: Remove this field, TokenStore is now created in NewCore
@@ -490,7 +552,11 @@ func (c *Core) Shutdown() error {
 	}
 
 	// Seal the core, which triggers the full preSeal teardown sequence
-	if err := c.Seal(); err != nil {
+	err := c.Seal()
+	// The stores NewCore built outlive every seal; a core shut down needs them
+	// no more, sealed or not.
+	c.closeStores()
+	if err != nil {
 		c.logger.Error("error during seal on shutdown", logger.Err(err))
 		return err
 	}
@@ -498,6 +564,39 @@ func (c *Core) Shutdown() error {
 	c.logger.Info("core shutdown successfully")
 
 	return nil
+}
+
+// tokenCacheMaxBytes is the token cache budget the server config sets
+// (token_cache_megabytes), in bytes: 0 when unset, which keeps the built-in
+// default.
+func (c *Core) tokenCacheMaxBytes() int64 {
+	if rawConf, ok := c.rawConfig.Load().(*config.Config); ok && rawConf != nil {
+		return int64(rawConf.TokenCacheMegabytes) << 20
+	}
+	return 0
+}
+
+// credentialCacheMaxBytes is the credential cache budget the server config
+// sets (credential_cache_megabytes), in bytes: 0 when unset, which keeps the
+// credential manager's default.
+func (c *Core) credentialCacheMaxBytes() int64 {
+	if rawConf, ok := c.rawConfig.Load().(*config.Config); ok && rawConf != nil {
+		return int64(rawConf.CredentialCacheMegabytes) << 20
+	}
+	return 0
+}
+
+// closeStores closes the token store and the credential config store, which
+// NewCore builds once per core. Their caches run goroutines until closed,
+// which keep the caches, and the core, reachable. Each store refuses calls
+// once closed; closing twice is a no-op.
+func (c *Core) closeStores() {
+	if c.tokenStore != nil {
+		c.tokenStore.Close()
+	}
+	if c.credConfigStore != nil {
+		_ = c.credConfigStore.Close()
+	}
 }
 
 // CreateCore conducts static validations on the Core Config
@@ -583,6 +682,7 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 	if conf.ClusterAddr != "" {
 		c.clusterAddr.Store(conf.ClusterAddr)
 	}
+	c.transparentAuthFlight = newTransparentAuthFlight(c)
 
 	c.standby.Store(true)
 	c.standbyStopCh.Store(make(chan struct{}, 1))
@@ -592,6 +692,7 @@ func CreateCore(conf *CoreConfig) (*Core, error) {
 
 	c.SetConfig(conf.RawConfig)
 	c.clusterConfig = parseClusterConfig(conf.RawConfig)
+	c.keylessEnforcement = parseKeylessEnforcementLevel(conf.RawConfig)
 
 	// Load seal information.
 	if c.seal == nil {
@@ -649,6 +750,9 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 	if rawConf, ok := c.rawConfig.Load().(*config.Config); ok && rawConf != nil && rawConf.IPBindingPolicy != "" {
 		tokenStoreConfig.IPBindingPolicy = IPBindingPolicy(rawConf.IPBindingPolicy)
 	}
+	if budget := c.tokenCacheMaxBytes(); budget > 0 {
+		tokenStoreConfig.CacheMaxCost = budget
+	}
 	tokenStore, err := NewTokenStore(c, tokenStoreConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token store: %w", err)
@@ -665,16 +769,26 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 	// Create SkillStore (storage view is wired up at unseal time).
 	c.skillStore = NewSkillStore(c)
 
-	// Initialize global credential type and driver registries
+	// Create RoleStore (storage view is wired up and loaded at unseal time).
+	c.roleStore = NewRoleStore(c)
+
+	// Create IdentityStore (storage view is wired up and loaded at unseal time).
+	c.identityStore = NewIdentityStore(c)
+
+	// Initialize global credential type, driver and assertion-profile registries
 	c.credentialTypeRegistry = credential.NewTypeRegistry()
 	c.credentialDriverRegistry = credential.NewDriverRegistry(c.logger.WithSystem("credential.driver"))
+	c.assertionProfileRegistry = credential.NewAssertionProfileRegistry()
 
-	// Register builtin credential types and drivers
+	// Register builtin credential types, drivers and assertion profiles
 	if err := types.RegisterBuiltinTypes(c.credentialTypeRegistry); err != nil {
 		return nil, fmt.Errorf("failed to register builtin credential types: %w", err)
 	}
 	if err := drivers.RegisterBuiltinDrivers(c.credentialDriverRegistry); err != nil {
 		return nil, fmt.Errorf("failed to register builtin credential drivers: %w", err)
+	}
+	if err := profiles.RegisterBuiltinProfiles(c.assertionProfileRegistry); err != nil {
+		return nil, fmt.Errorf("failed to register builtin assertion profiles: %w", err)
 	}
 
 	if conf.HAPhysical != nil && conf.HAPhysical.HAEnabled() {
@@ -684,6 +798,7 @@ func NewCore(conf *CoreConfig) (*Core, error) {
 	// Provider backends
 	c.configureProvider(conf.Providers)
 	c.configureProviderSkills(conf.ProviderSkills)
+	c.devPlayground = conf.DevPlayground
 
 	// Auth backends
 	c.configureAuthMethods(conf.AuthMethods)
@@ -734,6 +849,11 @@ func (c *Core) CredentialTypeRegistry() *credential.TypeRegistry {
 
 func (c *Core) CredentialDriverRegistry() *credential.DriverRegistry {
 	return c.credentialDriverRegistry
+}
+
+// AssertionProfileRegistry returns the registry of warden_identity claim shapes.
+func (c *Core) AssertionProfileRegistry() *credential.AssertionProfileRegistry {
+	return c.assertionProfileRegistry
 }
 
 // IsInitialized returns whether warden init has been called
@@ -836,13 +956,15 @@ func (c *Core) setupRotationManager(ctx context.Context) error {
 		c.logger.WithSubsystem("rotation"),
 		rotationStorage,
 	)
-	c.rotationManager.Start()
 
-	// Restore persisted rotation entries from storage
+	// Restore persisted rotation entries from storage before starting the tick
+	// loop: restore reconciles each entry against the config it rotates, and a
+	// tick running first could rotate a source that has left the schedule.
 	if err := c.rotationManager.Restore(ctx); err != nil {
 		c.logger.Warn("failed to restore rotation entries", logger.Err(err))
 		// Don't fail startup for restoration errors
 	}
+	c.rotationManager.Start()
 
 	c.logger.Info("rotation manager setup complete")
 
@@ -888,7 +1010,7 @@ func parseConfigBool(s string) bool {
 // is configured (the default: in-process keys). A construction failure is a
 // config error (bad TLS/address); transit being unreachable is not detected here.
 // Called under oidcSetupMu.
-func (c *Core) ensureOIDCSignBackend() (oidcsign.Backend, time.Duration, error) {
+func (c *Core) ensureOIDCSignBackend() (remotesign.Backend, time.Duration, error) {
 	if c.oidcSignBackend != nil {
 		return c.oidcSignBackend, c.oidcSignTimeout, nil
 	}
@@ -909,7 +1031,7 @@ func (c *Core) ensureOIDCSignBackend() (oidcsign.Backend, time.Duration, error) 
 	if prefix == "" {
 		prefix = defaultOIDCKeyNamePrefix
 	}
-	backend, err := oidcsign.NewTransitBackend(oidcsign.TransitConfig{
+	backend, err := remotesign.NewTransitBackend(remotesign.TransitConfig{
 		Address:        s.Address,
 		Token:          s.Token,
 		MountPath:      s.MountPath,
@@ -1012,7 +1134,7 @@ func (c *Core) setupOIDCIssuer(ctx context.Context, standby, configWrite bool) e
 	// external signer when the `signer` stanza is configured; a standby uses no
 	// backend (it holds no KMS token) and reconstructs any remote keys as
 	// verification-only.
-	var backend oidcsign.Backend
+	var backend remotesign.Backend
 	var signTimeout time.Duration
 	if !standby {
 		b, to, berr := c.ensureOIDCSignBackend()
@@ -1907,6 +2029,10 @@ func (c *Core) preSeal() error {
 
 	var result error
 
+	// Before anything else: a namespace job reads the managers and stores
+	// torn down below, so none may still be running when they go.
+	c.cancelNamespaceDeletion()
+
 	if err := c.teardownAudits(context.Background()); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error tearing down audits: %w", err))
 	}
@@ -1960,6 +2086,16 @@ func (c *Core) preSeal() error {
 	if err := c.teardownSkillStore(); err != nil {
 		c.logger.Warn("error tearing down skill store", logger.Err(err))
 	}
+
+	// Drop the role snapshot (records remain in storage; the next active node
+	// loads them).
+	c.teardownRoleStore()
+
+	// Drop the identity snapshot (groups and entities) likewise.
+	c.teardownIdentityStore()
+
+	// The next active node counts leftover auth roles again.
+	c.authRoleLeftovers.Store(nil)
 
 	// Stop all credential managers
 	if err := c.teardownCredentialManager(); err != nil {
@@ -2021,7 +2157,7 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 	if err := c.setupCredentialManager(ctx); err != nil {
 		return err
 	}
-	if err := c.setupSkillStore(ctx); err != nil {
+	if err := c.setupSkillStore(ctx, standby); err != nil {
 		return err
 	}
 
@@ -2059,6 +2195,14 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 		return err
 	}
 
+	// The built-in policies, in every namespace, once the system mount's
+	// storage is in place; on the active node only, which alone writes.
+	if !standby {
+		if err := c.seedNamespacePolicies(ctx); err != nil {
+			return err
+		}
+	}
+
 	// Auth methods are loaded after the provider/system mounts so the router
 	// and system backend are live before any auth backend's Initialize()
 	// runs. Mirrors OpenBao's postUnseal ordering.
@@ -2067,6 +2211,23 @@ func (readonlyUnsealStrategy) unsealShared(ctx context.Context, log *logger.Gate
 	}
 	if err := c.setupAuth(ctx); err != nil {
 		return err
+	}
+
+	// Roles load once the namespaces and mounts are in place, on the active
+	// node only.
+	if err := c.setupRoleStore(ctx, standby); err != nil {
+		return err
+	}
+
+	// Groups too: their write-time checks ask the auth mounts for their facts.
+	if err := c.setupIdentityStore(ctx, standby); err != nil {
+		return err
+	}
+
+	// Auth roles left in auth mount storage are no longer used: say so, once
+	// per mount, without touching them.
+	if !standby {
+		c.detectAuthRoleLeftovers(ctx)
 	}
 
 	if err := c.loadTokensFromStorage(ctx); err != nil {

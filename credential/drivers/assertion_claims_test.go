@@ -85,6 +85,77 @@ func TestDeriveAssertionAudience(t *testing.T) {
 			wantOK:     false,
 		},
 		{
+			name:       "kubernetes federation derives explicit audience",
+			sourceType: credential.SourceTypeKubernetes,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "audience": "https://kubernetes.example.com"},
+			wantAud:    "https://kubernetes.example.com",
+			wantOK:     true,
+		},
+		{
+			name:       "kubernetes federation without audience derives nothing (no default)",
+			sourceType: credential.SourceTypeKubernetes,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation"},
+			wantOK:     false,
+		},
+		{
+			name:       "kubernetes static derives nothing even with audience",
+			sourceType: credential.SourceTypeKubernetes,
+			sourceCfg:  map[string]string{"auth_method": "static", "audience": "https://kubernetes.example.com"},
+			wantOK:     false,
+		},
+		{
+			name:       "kubernetes absent auth_method derives nothing",
+			sourceType: credential.SourceTypeKubernetes,
+			sourceCfg:  map[string]string{"audience": "https://kubernetes.example.com"},
+			wantOK:     false,
+		},
+		{
+			name:       "anthropic federation derives explicit audience",
+			sourceType: credential.SourceTypeAnthropic,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "audience": "https://warden.example.com/anthropic"},
+			wantAud:    "https://warden.example.com/anthropic",
+			wantOK:     true,
+		},
+		{
+			// ValidateConfig requires auth_method, so a record without it never
+			// passed validation and must not be treated as federated.
+			name:       "anthropic absent auth_method derives nothing",
+			sourceType: credential.SourceTypeAnthropic,
+			sourceCfg:  map[string]string{"audience": "https://warden.example.com/anthropic"},
+			wantOK:     false,
+		},
+		{
+			name:       "anthropic without audience derives nothing (no default)",
+			sourceType: credential.SourceTypeAnthropic,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation"},
+			wantOK:     false,
+		},
+		{
+			name:       "anthropic other auth_method derives nothing",
+			sourceType: credential.SourceTypeAnthropic,
+			sourceCfg:  map[string]string{"auth_method": "static", "audience": "https://warden.example.com/anthropic"},
+			wantOK:     false,
+		},
+		{
+			name:       "openai federation derives explicit audience",
+			sourceType: credential.SourceTypeOpenAI,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "audience": "https://warden.example.com/openai"},
+			wantAud:    "https://warden.example.com/openai",
+			wantOK:     true,
+		},
+		{
+			name:       "openai absent auth_method derives nothing",
+			sourceType: credential.SourceTypeOpenAI,
+			sourceCfg:  map[string]string{"audience": "https://warden.example.com/openai"},
+			wantOK:     false,
+		},
+		{
+			name:       "openai without audience derives nothing (no default)",
+			sourceType: credential.SourceTypeOpenAI,
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation"},
+			wantOK:     false,
+		},
+		{
 			name:       "unknown source type derives nothing",
 			sourceType: credential.SourceTypeGitHub,
 			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "audience": "x"},
@@ -94,7 +165,7 @@ func TestDeriveAssertionAudience(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			aud, ok := DeriveAssertionAudience(tc.sourceType, tc.sourceCfg, map[string]string{})
+			aud, ok := DeriveAssertionAudience(tc.sourceType, credential.NewConfig(tc.sourceCfg), credential.NewConfig(map[string]string{}))
 			assert.Equal(t, tc.wantOK, ok)
 			if tc.wantOK {
 				assert.Equal(t, tc.wantAud, aud)
@@ -171,7 +242,7 @@ func TestDeriveAssertionResource(t *testing.T) {
 		{
 			name:       "gcp impersonation names the target service account",
 			sourceType: credential.SourceTypeGCP,
-			sourceCfg:  map[string]string{"workload_identity_provider": testAudGCPProvider},
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "workload_identity_provider": testAudGCPProvider},
 			specCfg:    map[string]string{"mint_method": "impersonated_access_token", "target_service_account": "sa@p.iam.gserviceaccount.com"},
 			want:       "gcp-iam:sa@p.iam.gserviceaccount.com",
 			wantOK:     true,
@@ -179,7 +250,7 @@ func TestDeriveAssertionResource(t *testing.T) {
 		{
 			name:       "gcp federated names the provider from source config",
 			sourceType: credential.SourceTypeGCP,
-			sourceCfg:  map[string]string{"workload_identity_provider": testAudGCPProvider},
+			sourceCfg:  map[string]string{"auth_method": "oidc_federation", "workload_identity_provider": testAudGCPProvider},
 			specCfg:    map[string]string{"mint_method": "access_token"},
 			want:       "gcp-wif:" + testAudGCPProvider,
 			wantOK:     true,
@@ -188,6 +259,25 @@ func TestDeriveAssertionResource(t *testing.T) {
 			name:       "gcp impersonation without target omits",
 			sourceType: credential.SourceTypeGCP,
 			specCfg:    map[string]string{"mint_method": "impersonated_access_token"},
+			wantOK:     false,
+		},
+		{
+			name:       "kubernetes names the target service account",
+			sourceType: credential.SourceTypeKubernetes,
+			specCfg:    map[string]string{"namespace": "prod", "service_account": "payments"},
+			want:       "prod/payments",
+			wantOK:     true,
+		},
+		{
+			name:       "kubernetes without namespace omits",
+			sourceType: credential.SourceTypeKubernetes,
+			specCfg:    map[string]string{"service_account": "payments"},
+			wantOK:     false,
+		},
+		{
+			name:       "kubernetes without service_account omits",
+			sourceType: credential.SourceTypeKubernetes,
+			specCfg:    map[string]string{"namespace": "prod"},
 			wantOK:     false,
 		},
 		{
@@ -268,6 +358,32 @@ func TestDeriveAssertionResource(t *testing.T) {
 			wantOK:     false,
 		},
 		{
+			name:       "anthropic names the service account",
+			sourceType: credential.SourceTypeAnthropic,
+			specCfg:    map[string]string{"federation_rule_id": "fdrl_01ExampleRule", "service_account_id": "svac_01ExampleAccount"},
+			want:       "anthropic:svac_01ExampleAccount",
+			wantOK:     true,
+		},
+		{
+			name:       "anthropic without service account omits",
+			sourceType: credential.SourceTypeAnthropic,
+			specCfg:    map[string]string{"federation_rule_id": "fdrl_01ExampleRule"},
+			wantOK:     false,
+		},
+		{
+			name:       "openai names the service account",
+			sourceType: credential.SourceTypeOpenAI,
+			specCfg:    map[string]string{"service_account_id": "example-service-account"},
+			want:       "openai:example-service-account",
+			wantOK:     true,
+		},
+		{
+			name:       "openai without service account omits",
+			sourceType: credential.SourceTypeOpenAI,
+			specCfg:    map[string]string{},
+			wantOK:     false,
+		},
+		{
 			name:       "unknown source type omits",
 			sourceType: credential.SourceTypeGitHub,
 			specCfg:    map[string]string{"mint_method": "secrets_manager", "secret_id": "x"},
@@ -277,7 +393,7 @@ func TestDeriveAssertionResource(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := DeriveAssertionResource(tc.sourceType, tc.sourceCfg, tc.specCfg)
+			got, ok := DeriveAssertionResource(tc.sourceType, credential.NewConfig(tc.sourceCfg), credential.NewConfig(tc.specCfg))
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v (value %q)", ok, tc.wantOK, got)
 			}

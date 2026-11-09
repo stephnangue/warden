@@ -2,6 +2,8 @@ package audit
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/stephnangue/warden/logger"
@@ -38,11 +40,12 @@ type Request struct {
 	MountType  string `json:"mount_type,omitempty"`  // Backend type (vault, aws, jwt)
 	MountClass string `json:"mount_class,omitempty"` // provider, auth, system, audit
 
-	// HTTP details
-	Method   string              `json:"method"` // GET, POST, PUT, DELETE
-	ClientIP string              `json:"client_ip"`
-	Headers  map[string][]string `json:"headers,omitempty"`
-	Data     map[string]any      `json:"data,omitempty"`
+	// HTTP details. Headers and the body are not fields of the entry: they
+	// carry the caller's credentials, and after routing the credentials minted
+	// for the upstream. A policy condition still records the values it read
+	// from the body, under auth.policy_results.condition.inputs.
+	Method   string `json:"method"` // GET, POST, PUT, DELETE
+	ClientIP string `json:"client_ip"`
 
 	// Namespace context
 	NamespaceID   string `json:"namespace_id,omitempty"`
@@ -56,11 +59,10 @@ type Request struct {
 
 // Response contains audit information about the response
 type Response struct {
-	// HTTP response
-	StatusCode    int                 `json:"status_code"`
-	StatusMessage string              `json:"status_message,omitempty"`
-	Headers       map[string][]string `json:"headers,omitempty"`
-	Data          map[string]any      `json:"data,omitempty"`
+	// HTTP response. Headers and the body are not fields of the entry, as for
+	// the request: a login's body holds the token it issued.
+	StatusCode    int    `json:"status_code"`
+	StatusMessage string `json:"status_message,omitempty"`
 
 	// Mount context (from response)
 	MountClass string `json:"mount_class,omitempty"`
@@ -92,6 +94,56 @@ type Auth struct {
 	PrincipalID string `json:"principal_id,omitempty"`
 	RoleName    string `json:"role_name,omitempty"`
 
+	// MountAccessor is the accessor of the auth mount that admitted the
+	// credential; empty for a token no mount issued (root).
+	MountAccessor string `json:"mount_accessor,omitempty"`
+
+	// AliasName is the native identity the credential presented, as the
+	// admitting mount derived it (its alias_name_source). Salted like
+	// PrincipalID; omittable.
+	AliasName string `json:"alias_name,omitempty"`
+
+	// EntityKind is the kind of entity the admitting mount admits (agent or
+	// human).
+	EntityKind string `json:"entity_kind,omitempty"`
+
+	// RoleGrantedBy names the group that granted RoleName ("group:<name>")
+	// when the token takes its role per request; empty for a token that
+	// carries its role itself.
+	RoleGrantedBy string `json:"role_granted_by,omitempty"`
+
+	// RoleGroupType is the type of the group RoleGrantedBy names: "virtual"
+	// for an unclaimed caller, "static" for a claimed one, never "virtual"
+	// when the caller is claimed. Set with RoleGrantedBy.
+	RoleGroupType string `json:"role_group_type,omitempty"`
+
+	// RoleDeniedReason says why no role was granted (e.g. "not assumable");
+	// set only on a refused grant, so at most one of it and RoleGrantedBy is.
+	RoleDeniedReason string `json:"role_denied_reason,omitempty"`
+
+	// Groups are the caller's groups, sorted, when the token takes its role
+	// per request. Operator-chosen names, not salted.
+	Groups []string `json:"groups,omitempty"`
+
+	// SponsoredBy names the sponsor group a request on a sponsor path acted
+	// through ("group:<name>"): the entity's sponsor, or the pending handover
+	// a member accepted. Set on success only.
+	SponsoredBy string `json:"sponsored_by,omitempty"`
+
+	// EntityID, EntityName and GovernedBy describe the entity of record that
+	// claims the caller's native identity, when one does: its ID, its name and
+	// what governs it ("" when ungoverned).
+	EntityID   string `json:"entity_id,omitempty"`
+	EntityName string `json:"entity_name,omitempty"`
+	GovernedBy string `json:"governed_by,omitempty"`
+
+	// IdentityStatus is what unknown_aliases=deny refuses the caller for
+	// ("unclaimed", "no native identity", "entity not governed", "entity
+	// suspended", "entity retired"), recorded in every mode; empty when its
+	// identity is accounted for. Under observe nothing is refused for it, so
+	// a status without a RoleDeniedReason is what deny would refuse.
+	IdentityStatus string `json:"identity_status,omitempty"`
+
 	// Policies
 	Policies      []string       `json:"policies,omitempty"`
 	PolicyResults *PolicyResults `json:"policy_results,omitempty"`
@@ -99,6 +151,19 @@ type Auth struct {
 	// Token lifecycle
 	TokenTTL  int64 `json:"token_ttl,omitempty"`  // Seconds remaining
 	ExpiresAt int64 `json:"expires_at,omitempty"` // Unix timestamp
+
+	// AuthTime is when the person behind the credential last authenticated
+	// to its identity provider (Unix timestamp), when the credential records
+	// it (a ticket does).
+	AuthTime int64 `json:"auth_time,omitempty"`
+
+	// DPoPJKT is the thumbprint of the key a ticket is bound to, and ProofID
+	// identifies the proof of it the request carried (a truncated hash of its
+	// jti). Warden keeps no record of proofs, so a repeated ProofID is how a
+	// replayed one shows; the CLI signs every attempt afresh. Both empty for
+	// a bearer credential.
+	DPoPJKT string `json:"dpop_jkt,omitempty"`
+	ProofID string `json:"proof_id,omitempty"`
 
 	// Namespace binding
 	NamespaceID   string `json:"namespace_id,omitempty"`
@@ -108,7 +173,9 @@ type Auth struct {
 	CreatedByIP string `json:"created_by_ip,omitempty"`
 
 	// Actor chain — the verified RFC 8693 "act" delegation chain from the
-	// authenticated token (the JWT "act" claim per RFC 8693 §4.1).
+	// authenticated token (the JWT "act" claim per RFC 8693 §4.1). Like every
+	// field at this level, it describes the AGENT; the user token's own chain is
+	// User.Actors.
 	Actors []ActorRef `json:"actors,omitempty"`
 
 	// User is the secondary (user) principal the agent acted for, captured by
@@ -116,6 +183,35 @@ type Auth struct {
 	// was resolved for the request; nil otherwise. Identity only — the raw user
 	// credential is never logged.
 	User *UserAttribution `json:"user,omitempty"`
+
+	// Discovery is how a request on a discovery endpoint was admitted without
+	// a service token; nil on every other request.
+	Discovery *DiscoveryAuth `json:"discovery,omitempty"`
+}
+
+// DiscoveryAuth records how a discovery request was admitted: the auth
+// mounts that admitted the presented credential and the roles granted there,
+// or that it ran anonymously.
+type DiscoveryAuth struct {
+	AdmittedBy   []AdmittedMount `json:"admitted_by,omitempty"`
+	RolesGranted int             `json:"roles_granted"`
+	Anonymous    bool            `json:"anonymous,omitempty"`
+	// CredentialUnverified: an anonymous request presented a credential that
+	// was neither checked nor used.
+	CredentialUnverified bool `json:"credential_unverified,omitempty"`
+}
+
+// AdmittedMount is one auth mount that admitted a discovery credential.
+type AdmittedMount struct {
+	Mount       string `json:"mount"`
+	PrincipalID string `json:"principal_id,omitempty"`
+	// AliasName is the native identity the credential presented there,
+	// salted like PrincipalID.
+	AliasName string `json:"alias_name,omitempty"`
+
+	// EntityID is the entity of record that claims that native identity in
+	// the namespace; empty when none does.
+	EntityID string `json:"entity_id,omitempty"`
 }
 
 // UserAttribution records the secondary (user) principal in an audit entry so a
@@ -123,19 +219,33 @@ type Auth struct {
 // carries identity only — the raw user credential is never logged.
 type UserAttribution struct {
 	// Subject is the user's raw principal (their auth-method subject, e.g. the
-	// JWT sub) — the same value carried as warden_user.sub in the assertion.
+	// JWT sub) — the same value a default-profile delegation assertion carries as
+	// its top-level sub.
 	Subject string `json:"subject,omitempty"`
 	// TokenID is the user token's hash-based ID (safe to log).
 	TokenID string `json:"token_id,omitempty"`
 	// NamespaceID is the user token's namespace.
 	NamespaceID string `json:"namespace_id,omitempty"`
+	// NamespacePath is the user token's namespace path, as the agent's
+	// Auth.NamespacePath records the agent's: the stored path, so empty (and
+	// omitted) for the root namespace. A delegation assertion's warden_namespace
+	// carries the same path, rendered "root" for the root namespace.
+	NamespacePath string `json:"namespace_path,omitempty"`
+	// Actors is the user token's OWN verified RFC 8693 "act" chain, outermost
+	// first — who handled the user's token before the agent presented it. A
+	// delegation assertion nests it under the agent as prior actors. Distinct from
+	// Auth.Actors, which is the agent token's chain.
+	Actors []ActorRef `json:"actors,omitempty"`
 }
 
-// ActorRef identifies one party in the RFC 8693 "act" delegation chain
-// alongside the authenticated principal. Every actor is cryptographically
-// attested by an IdP (the JWT "act" claim), so there is no unverified variant.
+// ActorRef identifies one party in an RFC 8693 "act" delegation chain. Every actor
+// is cryptographically attested by an IdP (the JWT "act" claim), so there is no
+// unverified variant.
 type ActorRef struct {
 	Subject string `json:"subject"`
+	// Issuer is the act layer's "iss", recorded only when the inbound layer carried
+	// one — the context Subject is interpreted in.
+	Issuer string `json:"issuer,omitempty"`
 }
 
 // PolicyResults captures which policies granted access
@@ -143,11 +253,30 @@ type PolicyResults struct {
 	Allowed          bool     `json:"allowed"`
 	GrantingPolicies []string `json:"granting_policies,omitempty"`
 
-	// MCPDecision carries the MCP-specific policy decision when an
-	// mcp { } block was consulted during CBP evaluation. nil when no
-	// such block applied. The field is omitempty so non-MCP audit
-	// records remain byte-identical to today's output.
+	// DenyingPolicy names the policy whose deny stanza refused the request. Empty
+	// when none did: a grant whose condition failed denied nothing, and
+	// Condition records that. With DenyingPolicy set, a Condition that denied
+	// without error means the deny rule's condition held.
+	DenyingPolicy string `json:"denying_policy,omitempty"`
+
+	// MCPDecision carries the decision an MCP-shaped request reached,
+	// populated on both outcomes: a contract was consulted and allowed or
+	// denied the call, or no contract was in scope at all and the request
+	// was refused with no_mcp_policy. The absence case is the one worth
+	// recording loudest — it is an operator misconfiguration, not a caller
+	// overstepping.
+	//
+	// nil for everything else: every non-MCP provider, and the body-less
+	// verbs an MCP mount serves alongside its JSON-RPC POSTs. The field is
+	// omitempty so those records stay byte-identical to today's output.
 	MCPDecision *logical.MCPDecision `json:"mcp_decision,omitempty"`
+
+	// MCPClient carries the client's self-description, taken from the
+	// request body's _meta. It sits beside MCPDecision rather than on it
+	// because it decided nothing: it is unverified, unauthenticated and
+	// trivially forged, useful for telling one agent build from another in
+	// a log and for nothing else. Never gate on it.
+	MCPClient *MCPClientInfo `json:"mcp_client,omitempty"`
 
 	// Condition carries the path-level CEL condition decision when a condition
 	// was evaluated for a non-MCP request (the MCP per-call condition is
@@ -155,14 +284,23 @@ type PolicyResults struct {
 	Condition *logical.ConditionResult `json:"condition,omitempty"`
 }
 
-// AuthResult contains authentication result from login operations
+// MCPClientInfo is a client's self-reported identity. Control characters are
+// stripped and each field length-capped at extraction, so a caller cannot
+// use it to inject line breaks into an audit record or to grow one without
+// bound.
+type MCPClientInfo struct {
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version,omitempty"`
+}
+
+// AuthResult contains authentication result from login operations. A login
+// admits a credential and carries no role and no credential spec: the role a
+// request runs under is recorded on that request's Auth.
 type AuthResult struct {
-	TokenType      string   `json:"token_type"`
-	PrincipalID    string   `json:"principal_id"`
-	RoleName       string   `json:"role_name"`
-	Policies       []string `json:"policies"`
-	TokenTTL       int64    `json:"token_ttl"` // Seconds
-	CredentialSpec string   `json:"credential_spec,omitempty"`
+	TokenType   string   `json:"token_type"`
+	PrincipalID string   `json:"principal_id"`
+	Policies    []string `json:"policies"`
+	TokenTTL    int64    `json:"token_ttl"` // Seconds
 }
 
 // Credential contains audit information about a credential that was issued
@@ -211,199 +349,66 @@ func (e *LogEntry) Clone() *LogEntry {
 		return nil
 	}
 
-	clone := &LogEntry{
-		Type:      e.Type,
-		Timestamp: e.Timestamp,
-		Error:     e.Error,
-	}
+	// Every struct is copied by value first, then each of its reference fields
+	// (slices, maps, pointers) is copied anew, so devices writing the same
+	// entry share nothing. Copying by value is what keeps a field added later
+	// from being lost: a field-by-field copy once dropped the user principal,
+	// and then auth_time, from every written entry, because the JSON formatter
+	// clones before serialising. TestCloneKeepsEverythingSharesNothing pins it.
+	clone := *e
 
-	// Clone Request
 	if e.Request != nil {
-		clone.Request = &Request{
-			ID:              e.Request.ID,
-			Operation:       e.Request.Operation,
-			Path:            e.Request.Path,
-			MountPoint:      e.Request.MountPoint,
-			MountType:       e.Request.MountType,
-			MountClass:      e.Request.MountClass,
-			Method:          e.Request.Method,
-			ClientIP:        e.Request.ClientIP,
-			NamespaceID:     e.Request.NamespaceID,
-			NamespacePath:   e.Request.NamespacePath,
-			Unauthenticated: e.Request.Unauthenticated,
-			Streamed:        e.Request.Streamed,
-			Transparent:     e.Request.Transparent,
-		}
-		if e.Request.Headers != nil {
-			clone.Request.Headers = cloneHeaders(e.Request.Headers)
-		}
-		if e.Request.Data != nil {
-			clone.Request.Data = cloneMapAny(e.Request.Data)
-		}
+		req := *e.Request
+		clone.Request = &req
 	}
 
-	// Clone Response
 	if e.Response != nil {
-		clone.Response = &Response{
-			StatusCode:    e.Response.StatusCode,
-			StatusMessage: e.Response.StatusMessage,
-			MountClass:    e.Response.MountClass,
-			Streamed:      e.Response.Streamed,
-			UpstreamURL:   e.Response.UpstreamURL,
+		resp := *e.Response
+		resp.Warnings = slices.Clone(e.Response.Warnings)
+		if c := e.Response.Credential; c != nil {
+			cred := *c
+			cred.Data = maps.Clone(c.Data)
+			cred.Metadata = maps.Clone(c.Metadata)
+			resp.Credential = &cred
 		}
-		if e.Response.Headers != nil {
-			clone.Response.Headers = cloneHeaders(e.Response.Headers)
+		if ar := e.Response.AuthResult; ar != nil {
+			result := *ar
+			result.Policies = slices.Clone(ar.Policies)
+			resp.AuthResult = &result
 		}
-		if e.Response.Data != nil {
-			clone.Response.Data = cloneMapAny(e.Response.Data)
-		}
-		if e.Response.Warnings != nil {
-			clone.Response.Warnings = make([]string, len(e.Response.Warnings))
-			copy(clone.Response.Warnings, e.Response.Warnings)
-		}
-		if e.Response.Credential != nil {
-			clone.Response.Credential = &Credential{
-				CredentialID: e.Response.Credential.CredentialID,
-				Type:         e.Response.Credential.Type,
-				Category:     e.Response.Credential.Category,
-				LeaseTTL:     e.Response.Credential.LeaseTTL,
-				LeaseID:      e.Response.Credential.LeaseID,
-				TokenID:      e.Response.Credential.TokenID,
-				SourceName:   e.Response.Credential.SourceName,
-				SourceType:   e.Response.Credential.SourceType,
-				SpecName:     e.Response.Credential.SpecName,
-				Revocable:    e.Response.Credential.Revocable,
-			}
-			if e.Response.Credential.Data != nil {
-				clone.Response.Credential.Data = make(map[string]string, len(e.Response.Credential.Data))
-				for k, v := range e.Response.Credential.Data {
-					clone.Response.Credential.Data[k] = v
-				}
-			}
-			if e.Response.Credential.Metadata != nil {
-				clone.Response.Credential.Metadata = make(map[string]string, len(e.Response.Credential.Metadata))
-				for k, v := range e.Response.Credential.Metadata {
-					clone.Response.Credential.Metadata[k] = v
-				}
-			}
-		}
-		if e.Response.AuthResult != nil {
-			clone.Response.AuthResult = &AuthResult{
-				TokenType:      e.Response.AuthResult.TokenType,
-				PrincipalID:    e.Response.AuthResult.PrincipalID,
-				RoleName:       e.Response.AuthResult.RoleName,
-				TokenTTL:       e.Response.AuthResult.TokenTTL,
-				CredentialSpec: e.Response.AuthResult.CredentialSpec,
-			}
-			if e.Response.AuthResult.Policies != nil {
-				clone.Response.AuthResult.Policies = make([]string, len(e.Response.AuthResult.Policies))
-				copy(clone.Response.AuthResult.Policies, e.Response.AuthResult.Policies)
-			}
-		}
+		clone.Response = &resp
 	}
 
-	// Clone Auth
 	if e.Auth != nil {
-		clone.Auth = &Auth{
-			TokenID:       e.Auth.TokenID,
-			TokenAccessor: e.Auth.TokenAccessor,
-			TokenType:     e.Auth.TokenType,
-			PrincipalID:   e.Auth.PrincipalID,
-			RoleName:      e.Auth.RoleName,
-			TokenTTL:      e.Auth.TokenTTL,
-			ExpiresAt:     e.Auth.ExpiresAt,
-			NamespaceID:   e.Auth.NamespaceID,
-			NamespacePath: e.Auth.NamespacePath,
-			CreatedByIP:   e.Auth.CreatedByIP,
+		auth := *e.Auth
+		auth.Policies = slices.Clone(e.Auth.Policies)
+		auth.Groups = slices.Clone(e.Auth.Groups)
+		auth.Actors = slices.Clone(e.Auth.Actors)
+		if d := e.Auth.Discovery; d != nil {
+			dc := *d
+			dc.AdmittedBy = slices.Clone(d.AdmittedBy)
+			auth.Discovery = &dc
 		}
-		if e.Auth.Policies != nil {
-			clone.Auth.Policies = make([]string, len(e.Auth.Policies))
-			copy(clone.Auth.Policies, e.Auth.Policies)
-		}
-		if e.Auth.PolicyResults != nil {
-			clone.Auth.PolicyResults = &PolicyResults{
-				Allowed:     e.Auth.PolicyResults.Allowed,
-				MCPDecision: e.Auth.PolicyResults.MCPDecision.Clone(),
-				Condition:   e.Auth.PolicyResults.Condition.Clone(),
+		if pr := e.Auth.PolicyResults; pr != nil {
+			results := *pr
+			results.GrantingPolicies = slices.Clone(pr.GrantingPolicies)
+			results.MCPDecision = pr.MCPDecision.Clone()
+			results.Condition = pr.Condition.Clone()
+			if mc := pr.MCPClient; mc != nil {
+				mcCopy := *mc
+				results.MCPClient = &mcCopy
 			}
-			if e.Auth.PolicyResults.GrantingPolicies != nil {
-				clone.Auth.PolicyResults.GrantingPolicies = make([]string, len(e.Auth.PolicyResults.GrantingPolicies))
-				copy(clone.Auth.PolicyResults.GrantingPolicies, e.Auth.PolicyResults.GrantingPolicies)
-			}
+			auth.PolicyResults = &results
 		}
-		if e.Auth.Actors != nil {
-			clone.Auth.Actors = make([]ActorRef, len(e.Auth.Actors))
-			copy(clone.Auth.Actors, e.Auth.Actors)
+		if u := e.Auth.User; u != nil {
+			user := *u
+			user.Actors = slices.Clone(u.Actors)
+			auth.User = &user
 		}
-		// The secondary (user) principal. Omitting it here silently dropped
-		// per-user attribution from every written entry, because the JSON
-		// formatter clones before serialising — the field was set correctly in
-		// memory and lost on the way to disk.
-		if e.Auth.User != nil {
-			user := *e.Auth.User
-			clone.Auth.User = &user
-		}
+		clone.Auth = &auth
 	}
 
-	return clone
-}
-
-// cloneMapAny creates a deep copy of a map[string]any, recursively cloning
-// nested maps and slices to prevent data races when logging to multiple devices.
-func cloneMapAny(m map[string]any) map[string]any {
-	if m == nil {
-		return nil
-	}
-	clone := make(map[string]any, len(m))
-	for k, v := range m {
-		clone[k] = cloneValue(v)
-	}
-	return clone
-}
-
-// cloneValue recursively clones a value, handling maps, slices, and primitives.
-func cloneValue(v any) any {
-	if v == nil {
-		return nil
-	}
-	switch val := v.(type) {
-	case map[string]any:
-		return cloneMapAny(val)
-	case map[string]string:
-		clone := make(map[string]string, len(val))
-		for k, v := range val {
-			clone[k] = v
-		}
-		return clone
-	case []any:
-		clone := make([]any, len(val))
-		for i, item := range val {
-			clone[i] = cloneValue(item)
-		}
-		return clone
-	case []string:
-		clone := make([]string, len(val))
-		copy(clone, val)
-		return clone
-	default:
-		// Primitives (string, int, bool, etc.) are safe to share
-		return v
-	}
-}
-
-// cloneHeaders creates a copy of HTTP headers
-func cloneHeaders(h map[string][]string) map[string][]string {
-	if h == nil {
-		return nil
-	}
-	clone := make(map[string][]string, len(h))
-	for k, v := range h {
-		if v != nil {
-			clone[k] = make([]string, len(v))
-			copy(clone[k], v)
-		}
-	}
-	return clone
+	return &clone
 }
 
 // Format defines the serialization format for audit logs
@@ -485,6 +490,17 @@ type DeviceConfig struct {
 	// Performance options
 	BufferSize  int           `json:"buffer_size,omitempty"`
 	FlushPeriod time.Duration `json:"flush_period,omitempty"`
+
+	// Warnings name what the factory changed in the operator's configuration
+	// to keep the device safe. Reported through WarningReporter.
+	Warnings []string `json:"-"`
+}
+
+// WarningReporter is implemented by a device whose factory changed its
+// configuration. Core logs the warnings with the device's mount path, at
+// enable and at every unseal: factories have no logger of their own.
+type WarningReporter interface {
+	Warnings() []string
 }
 
 // AuditManager manages audit devices
@@ -535,4 +551,11 @@ type Factory interface {
 		accessor string,
 		config map[string]any) (Device, error)
 	Initialize(logger *logger.GatedLogger) error
+}
+
+// ConfigValidator is implemented by a factory that can check a device
+// configuration before the device is enabled. Core refuses a new device whose
+// configuration it rejects; a stored one is still loaded, through Create.
+type ConfigValidator interface {
+	ValidateConfig(config map[string]any) error
 }

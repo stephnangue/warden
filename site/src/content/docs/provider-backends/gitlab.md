@@ -1,8 +1,60 @@
 ---
 title: "GitLab"
+description: "Proxy the GitLab REST API through Warden: chain the root credential from a vault per request and mint scoped project or group access tokens with it."
 ---
 
 The GitLab provider enables proxied access to the GitLab REST API through Warden. It supports **Personal Access Token (PAT)** and **OAuth2** authentication, can mint scoped project and group access tokens on demand, and works with both GitLab.com and self-hosted instances.
+
+## How a request flows
+
+The credential reaching GitLab is always **minted**: Warden uses a root credential — a PAT
+or an OAuth2 application — to create a scoped **project** or **group access token** for the
+request. The question is where that root credential lives.
+
+The recommended setup keeps it in the vault that owns it.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the GitLab PAT or application credentials from an external vault at a path templated by the agent's team and environment, mints a project access token at the GitLab token endpoint, and injects that token to the GitLab API or Git host" src="/images/warden-prov-gitlab-cred-chain.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to an **external
+   KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden authenticates to the **external vault** and reads
+   `secret/gitlab/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the root credential for that team and environment.
+7. Warden presents it to the **GitLab token endpoint**…
+8. …which mints a scoped project access token.
+9. Warden injects that token and forwards.
+
+The credential GitLab sees is scoped and short-lived even though the root credential behind
+it is neither — and that root never enters Warden's storage.
+
+:::note[Steps 3–8 run only on a cache miss]
+Warden caches the minted credential, so most requests skip from step 2 to step 9 — no
+assertion, no vault read, no token minting. The entry is keyed by namespace, the agent's
+token id, the spec name and the user's token id.
+:::
+
+### When you must store the root credential
+
+<p align="center"><img alt="Warden reads the GitLab root credential from its encrypted storage, mints a project access token at the GitLab token endpoint, and injects that token to the GitLab API or Git host" src="/images/warden-prov-gitlab-static-sts.png" width="860"></p>
+
+Steps 3 to 6 collapse into a storage read. The minting and injection are unchanged, and
+Warden can rotate the stored credential on a schedule.
+
+## Credential modes
+
+| Mode | Supported | How |
+|---|---|---|
+| **Chaining** ✅ *recommended* | Yes | `secret_spec` on the source; the root credential is read per request from a vault Warden reaches keylessly |
+| **Stored root → short-lived mint** | Yes | `auth_method=oauth2` or `pat` on the source, rotated on a schedule |
+| **Keyless federation** | No | GitLab exposes no workload-identity federation for this exchange |
+| **Static inline** | No | The access token is always minted; only the root credential varies |
+| **Delegated user token** | No | The minted token is scoped to a project or group, not to the calling user |
+
+See the [GitLab credential driver](/credential-drivers/gitlab/) for every source and spec
+key.
 
 ## Prerequisites
 
@@ -15,21 +67,23 @@ The GitLab provider enables proxied access to the GitLab REST API through Warden
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/gitlab-user \
-    token_policies="gitlab-access" \
-    user_claim=sub \
-    cred_spec_name=gitlab-project-token
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -75,71 +129,117 @@ warden read gitlab/config
 
 ## Step 3: Create a Credential Source and Spec
 
-The credential source holds the connection info and auth credentials for GitLab.
+The source holds the connection info and says where the root credential comes from. The
+spec says what to mint with it.
 
-### Option A: OAuth2 Application (Recommended)
+### Option A: Chained root credential (recommended)
 
-1. In GitLab, go to **Admin Area > Applications** (or **User Settings > Applications**).
-2. Create an OAuth2 application and note the `Application ID` and `Secret`.
+The flow in the diagram above. The source names a `secret_spec` and holds no credential of
+its own.
 
 ```bash
-warden cred source create gitlab-oauth \
-  -type=gitlab \
-  -rotation-period=720h \
-  -config=gitlab_address=https://gitlab.com \
-  -config=auth_method=oauth2 \
-  -config=application_id=<your-application-id> \
-  -config=application_secret=<your-application-secret>
+# Producer: the root credential, read from KV v2 through a keyless Vault source
+warden cred spec create gitlab-root -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "kv2_read",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "gitlab/{{agent.team}}/{{agent.env}}"
+  }
+}'
+
+# Consumer: a gitlab source holding no credential of its own
+warden cred source create gitlab-src -json '{
+  "type": "gitlab",
+  "config": {
+    "gitlab_address": "https://gitlab.com",
+    "secret_spec": "gitlab-root"
+  }
+}'
 ```
 
-### Option B: Personal Access Token
+Both principals are available to the path template: `{{agent.sub}}` is free,
+`{{agent.<claim>}}` needs `assertion_metadata_claims`, and `{{user.<claim>}}` needs
+`assertion_user_claims` plus a user on the request. Templates resolve at **mint, not at
+write**, so a path naming an unprojected claim is accepted by `spec create` and fails on the
+first request.
 
-1. In GitLab, go to **User Settings > Access Tokens**.
-2. Create a token with the required scopes (`api` at minimum, `admin` for rotation support).
+### Option B: Root credential stored on the source
+
+Either an OAuth2 application (**Admin Area > Applications**) or a PAT (**User Settings >
+Access Tokens**, `api` scope at minimum, `admin` for rotation support).
 
 ```bash
-warden cred source create gitlab-pat \
-  -type=gitlab \
-  -rotation-period=720h \
-  -config=gitlab_address=https://gitlab.com \
-  -config=auth_method=pat \
-  -config=personal_access_token=glpat-xxxxxxxxxxxxxxxxxxxx
+warden cred source create gitlab-src -json '{
+  "type": "gitlab",
+  "rotation_period": 2592000,
+  "config": {
+    "gitlab_address": "https://gitlab.com",
+    "auth_method": "oauth2",
+    "application_id": "<your-application-id>",
+    "application_secret": "<your-application-secret>"
+  }
+}'
 ```
 
-Verify the source was created:
+Or with a PAT:
 
 ```bash
-warden cred source read gitlab-pat
+warden cred source create gitlab-src -json '{
+  "type": "gitlab",
+  "rotation_period": 2592000,
+  "config": {
+    "gitlab_address": "https://gitlab.com",
+    "auth_method": "pat",
+    "personal_access_token": "<glpat-…>"
+  }
+}'
 ```
 
-Create a credential spec that references the credential source. The spec defines what type of token to mint (project access token, group access token, etc.).
+The connection key is **`gitlab_address`**, not `gitlab_url` — a source omitting it is
+rejected with *"field 'gitlab_address' is required"*.
 
-### Project Access Token
+### What to mint
+
+Both mint methods require `token_name` **and** `scopes`; omitting either is rejected naming
+it. `access_level` defaults to `30` (developer).
+
+**Project access token:**
 
 ```bash
-warden cred spec create gitlab-project-token \
-  -source=gitlab-pat \
-  -min-ttl=1h \
-  -max-ttl=24h \
-  -config=mint_method=project_access_token \
-  -config=project_id=123 \
-  -config=token_name=warden-minted \
-  -config=scopes=api,read_api \
-  -config=access_level=30
+warden cred spec create gitlab-project-token -json '{
+  "source": "gitlab-src",
+  "min_ttl": 3600,
+  "max_ttl": 86400,
+  "config": {
+    "mint_method": "project_access_token",
+    "project_id": "123",
+    "token_name": "warden-minted",
+    "scopes": "api,read_api",
+    "access_level": "30"
+  }
+}'
 ```
 
-### Group Access Token
+**Group access token:**
 
 ```bash
-warden cred spec create gitlab-group-token \
-  -source=gitlab-pat \
-  -min-ttl=1h \
-  -max-ttl=24h \
-  -config=mint_method=group_access_token \
-  -config=group_id=79644309 \
-  -config=token_name=warden-minted \
-  -config=scopes=api \
-  -config=access_level=30
+warden cred spec create gitlab-group-token -json '{
+  "source": "gitlab-src",
+  "min_ttl": 3600,
+  "max_ttl": 86400,
+  "config": {
+    "mint_method": "group_access_token",
+    "group_id": "79644309",
+    "token_name": "warden-minted",
+    "scopes": "api",
+    "access_level": "30"
+  }
+}'
 ```
 
 Verify:
@@ -179,7 +279,7 @@ path "gitlab/role/+/gateway*" {
 EOF
 ```
 
-The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/concepts/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
+The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/identity/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
 
 Verify:
 
@@ -187,7 +287,33 @@ Verify:
 warden policy read gitlab-access
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 5: Grant Agents the Role
+
+Create the role that binds the credential spec and policy, then a virtual group that grants it to callers of the JWT mount. The provider must already be configured with its `auto_auth_path` (Step 2), so the role is reachable through it. See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+```bash
+warden role create gitlab-user -json '{
+  "policies": ["gitlab-access"],
+  "cred_spec_name": "gitlab-project-token",
+  "provider_path": "gitlab/"
+}'
+
+warden identity group create gitlab-user-agents -json '{
+  "type": "virtual",
+  "roles": ["gitlab-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, such as `"sub": ["agent-*"]`.
+
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -337,7 +463,7 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 ## Minting Project and Group Access Tokens
 
-Warden mints short-lived, scoped access tokens for GitLab projects and groups through credential specs (configured in Step 4).
+Warden mints short-lived, scoped access tokens for GitLab projects and groups through credential specs (configured in Step 3).
 
 ### Access Levels
 
@@ -373,13 +499,13 @@ The default activation delay is **1 minute** (configurable via `activation_delay
 
 ## TLS Certificate Authentication
 
-Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+The steps above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
+Steps 2-4 (provider, credential and policy setup) are identical. Replace Steps 1, 5 and 6 with the following.
 
 ### Enable Cert Auth
 
@@ -392,38 +518,46 @@ warden auth enable cert
 Provide the PEM-encoded CA certificate that signs your client certificates:
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=gitlab-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
-
-### Create a Cert Role
-
-Create a role that binds allowed certificate identities to a credential spec and policy:
-
-```bash
-warden write auth/cert/role/gitlab-user \
-    allowed_common_names="agent-*" \
-    token_policies="gitlab-access" \
-    cred_spec_name=gitlab-project-token
-```
-
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ### Configure Provider for Cert Auth
 
-Update the provider config to use cert auth:
+Update the provider config to use cert auth. `default_role` names the role a request without one uses:
 
 ```bash
 warden write gitlab/config <<EOF
 {
   "gitlab_address": "https://gitlab.com",
   "auto_auth_path": "auth/cert/",
+  "default_role": "gitlab-user",
   "timeout": "30s",
   "max_body_size": 10485760
 }
 EOF
 ```
+
+### Grant the Role to Certificates
+
+Create the role as in Step 5, and grant it with a group whose rule matches certificate fields:
+
+```bash
+warden role create gitlab-user -json '{
+  "policies": ["gitlab-access"],
+  "cred_spec_name": "gitlab-project-token",
+  "provider_path": "gitlab/"
+}'
+
+warden identity group create gitlab-user-agents -json '{
+  "type": "virtual",
+  "roles": ["gitlab-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+Values support glob patterns; a rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
 
 ### Make Requests with Certificates
 

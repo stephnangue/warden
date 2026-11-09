@@ -14,4 +14,5 @@ func init() {
 	SourceCmd.AddCommand(ReadCmd)
 	SourceCmd.AddCommand(UpdateCmd)
 	SourceCmd.AddCommand(DeleteCmd)
+	SourceCmd.AddCommand(KeylessPlanCmd)
 }

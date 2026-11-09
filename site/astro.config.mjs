@@ -17,6 +17,12 @@ export default defineConfig({
       },
       favicon: '/favicon.svg',
       customCss: ['./src/styles/custom.css'],
+      // Starlight 0.36 offers no config for arbitrary top-nav links; overriding
+      // this leaf component is the supported way to add one. See the component
+      // for why SocialIcons and not Header.
+      components: {
+        SocialIcons: './src/components/HeaderLinks.astro',
+      },
       // Starlight emits og:title/type/url per page; add the shared social card.
       head: [
         {
@@ -53,11 +59,33 @@ export default defineConfig({
           label: 'Start here',
           items: [
             { label: 'Home', link: '/' },
+            { slug: 'getting-started' },
             { slug: 'agent-flow' },
             { slug: 'architecture' },
           ],
         },
+        { label: 'Install', items: [{ autogenerate: { directory: 'install' } }] },
         { label: 'Use cases', items: [{ autogenerate: { directory: 'use-cases' } }] },
+        {
+          // The identity model, in the order a request meets it. Authenticate: a
+          // mount admits a credential and names the facts it verified. Resolve:
+          // groups turn facts (or a listed entity) into roles for this one
+          // request. Authorize: the role's policies, and their conditions, decide.
+          label: 'Identity & access',
+          items: [
+            { slug: 'identity' },
+            { slug: 'identity/authentication' },
+            { slug: 'identity/tokens' },
+            { slug: 'identity/groups' },
+            { slug: 'identity/entities' },
+            { slug: 'identity/sponsors' },
+            { slug: 'identity/roles' },
+            { slug: 'identity/policies' },
+            { slug: 'identity/cel-conditions' },
+            { slug: 'identity/human-operators' },
+            { slug: 'identity/built-in-roles' },
+          ],
+        },
         {
           // Concepts follow the curated reading order from concepts/index.md,
           // not alphabetical.
@@ -65,11 +93,6 @@ export default defineConfig({
           items: [
             { slug: 'concepts' },
             { slug: 'concepts/dev-server' },
-            { slug: 'concepts/authentication' },
-            { slug: 'concepts/tokens' },
-            { slug: 'concepts/roles' },
-            { slug: 'concepts/policies' },
-            { slug: 'concepts/cel-conditions' },
             { slug: 'concepts/credentials' },
             { slug: 'concepts/providers' },
             { slug: 'concepts/mcp' },
@@ -90,8 +113,10 @@ export default defineConfig({
             { slug: 'federation' },
             { slug: 'federation/oidc-issuer' },
             { slug: 'federation/keyless-credentials' },
+            { slug: 'federation/keyless-model-access' },
             { slug: 'federation/assertion-claims' },
             { slug: 'federation/credential-chaining' },
+            { slug: 'federation/oauth-3lo-store' },
             {
               // The signing key lives in an external KMS (also listed under
               // Configuration, since it is a server-config stanza).
@@ -151,6 +176,7 @@ export default defineConfig({
               items: [
                 { slug: 'provider-backends/aws' },
                 { slug: 'provider-backends/azure' },
+                { slug: 'provider-backends/msgraph' },
                 { slug: 'provider-backends/gcp' },
                 { slug: 'provider-backends/alicloud' },
                 { slug: 'provider-backends/ibmcloud' },
@@ -219,19 +245,21 @@ export default defineConfig({
           items: [
             { slug: 'credential-drivers' },
             { slug: 'credential-drivers/alicloud' },
+            { slug: 'credential-drivers/anthropic' },
             { slug: 'credential-drivers/aws' },
             { slug: 'credential-drivers/azure' },
+            { slug: 'credential-drivers/cloudflare' },
             { slug: 'credential-drivers/elastic' },
             { slug: 'credential-drivers/gcp' },
             { slug: 'credential-drivers/github' },
             { slug: 'credential-drivers/gitlab' },
             { slug: 'credential-drivers/grafana' },
             { slug: 'credential-drivers/vault' },
-            { slug: 'credential-drivers/honeycomb' },
             { slug: 'credential-drivers/ibm' },
             { slug: 'credential-drivers/kubernetes' },
             { slug: 'credential-drivers/local' },
             { slug: 'credential-drivers/oauth2' },
+            { slug: 'credential-drivers/openai' },
             { slug: 'credential-drivers/ovh' },
             { slug: 'credential-drivers/scaleway' },
             { slug: 'credential-drivers/apikey' },
@@ -259,7 +287,6 @@ export default defineConfig({
                 { slug: 'configuration/seal/azurekeyvault' },
                 { slug: 'configuration/seal/gcpkms' },
                 { slug: 'configuration/seal/transit' },
-                { slug: 'configuration/seal/pkcs11' },
                 { slug: 'configuration/seal/ocikms' },
                 { slug: 'configuration/seal/kmip' },
                 { slug: 'configuration/seal/static' },
@@ -280,7 +307,6 @@ export default defineConfig({
         { label: 'Audit devices', items: [{ autogenerate: { directory: 'audit-devices' } }] },
         { label: 'Quickstarts', items: [{ autogenerate: { directory: 'quickstarts' } }] },
         { label: 'Tutorials', items: [{ autogenerate: { directory: 'tutorials' } }] },
-        { label: 'Install', items: [{ autogenerate: { directory: 'install' } }] },
         { label: 'Upgrade', items: [{ autogenerate: { directory: 'upgrade' } }] },
       ],
     }),

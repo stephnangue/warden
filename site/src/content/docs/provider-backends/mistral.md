@@ -2,7 +2,63 @@
 title: "Mistral AI"
 ---
 
-The Mistral provider enables proxied access to the Mistral AI API through Warden. It streams requests to Mistral endpoints (chat completions, embeddings, models) with automatic API key injection and policy evaluation on AI request fields.
+The Mistral provider enables proxied access to the Mistral AI API through Warden. It streams requests to Mistral endpoints (chat completions, embeddings, models) with automatic API key injection and policy evaluation on AI request fields. Credentials are injected via the `Authorization: Bearer` header. Chain the key from your secret store (recommended), or store it in Warden (`apikey` source type).
+
+## How a request flows
+
+This mount injects an **`api_key`** credential into the `Authorization` header as a bearer
+token. The question is where that API key lives.
+
+The recommended setup keeps it in the vault that manages it, read per request.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the Mistral API key from an external vault at a path templated by the user's team and the agent's environment, and injects it to the Mistral API" src="/images/warden-prov-mistral-vault-apikey.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to a KMS-backed
+   issuer unsigned, where one is configured.
+4. The issuer returns it signed.
+5. Warden authenticates to the **external vault** and reads
+   `secret/mistral/{{user.team}}/{{agent.env}}`.
+6. The vault returns the API key for that team and environment.
+7. Warden injects it and forwards.
+
+The credential is served **verbatim** — nothing is minted. What chaining buys is custody:
+it stays in the store that manages it, and the read path decides who reaches which one.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the credential, so most requests skip from step 2 to step 7. The entry is
+keyed by namespace, the agent's token id and the spec name — plus the user's token id when
+the mount carries a user.
+:::
+
+### The simpler variant
+
+<p align="center"><img alt="Warden reads a static Mistral API key from its encrypted storage and injects it to the Mistral API for every caller" src="/images/warden-prov-mistral-inline-apikey.png" width="860"></p>
+
+**Inline.** The credential sits in Warden's storage. Shortest to set up, weakest custody:
+one long-lived credential for every caller.
+
+## Credential modes
+
+| Mode | What Mistral sees | Where the credential lives |
+|---|---|---|
+| **Chained** ✅ *recommended* | One long-lived credential, scoped by path | The vault; nothing in Warden |
+| **Inline** ⚠️ | One long-lived credential, shared | Warden's storage |
+
+Mistral exposes no workload-identity federation and mints nothing per request, so the
+credential is long-lived in both rows; what changes is whether Warden holds it.
+
+:::note[Mistral authenticates with the key alone]
+There is no second header to pair with it, so a chained spec can read the vault directly
+with `mint_method=static_apikey`. A provider that needs another field beside the key cannot
+— adjunct fields are dropped for any non-`apikey` driver, and the read has to go through a
+producer spec.
+[OpenAI](/provider-backends/openai/#carrying-an-organization-or-project-id) shows that shape.
+:::
+
+See the [apikey credential driver](/credential-drivers/apikey/) for every source and spec
+key.
 
 ## Prerequisites
 
@@ -13,21 +69,23 @@ The Mistral provider enables proxied access to the Mistral AI API through Warden
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source); the commands below are for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/mistral-user \
-    token_policies="mistral-access" \
-    user_claim=sub \
-    cred_spec_name=mistral-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -71,82 +129,118 @@ Verify the configuration:
 warden read mistral/config
 ```
 
-## Step 3: Create a Credential Source and Spec
+## Step 3: Create a Role and Grant It
 
-The credential source holds only connection info (`api_url`). The API key is stored on the credential spec below, allowing multiple specs with different keys to share one source.
+Create the role that names the policy and the credential spec, then a virtual group that grants it to callers admitted through the JWT mount. The spec and the policy come in Steps 4 and 5; until they exist, the role write warns.
 
 ```bash
-warden cred source create mistral-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://api.mistral.ai \
-  -config=verify_endpoint=/v1/models \
-  -config=optional_metadata=organization_id \
-  -config=display_name=Mistral
+warden role create mistral-user -json '{
+  "policies": ["mistral-access"],
+  "cred_spec_name": "mistral-ops",
+  "provider_path": "mistral/"
+}'
+
+warden identity group create mistral-user-agents -json '{
+  "type": "virtual",
+  "roles": ["mistral-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
 ```
 
-Verify the source was created:
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, as shown in [JWT auth](/auth-methods/jwt/#step-4-grant-the-role-with-a-group). See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+## Step 4: Create a Credential Source and Spec
+
+### Option A: Chained (recommended)
+
+The flow in the first diagram. The vault holds the API key; Warden reads it per request and
+injects it.
+
+The key never enters Warden's storage. Warden reads it from a path built out of the agent's
+and user's claims, so a request made for the `platform-eng` team against `prod` reads
+`secret/mistral/platform-eng/prod` and can reach nothing else.
+
+**Prerequisites:** a Vault/OpenBao instance with a KV v2 mount holding an `api_key` field,
+and a JWT auth role bound to Warden's issuer.
+
+```bash
+warden cred source create mistral-vault-src -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-mistral",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+```
+
+`auth_method=oidc_federation` is keyless — the source stores no `secret_id` and no token, and setting one is rejected on write. It also needs no rotation period, because there is nothing to rotate.
+
+```bash
+warden cred spec create mistral-ops -json '{
+  "source": "mistral-vault-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "static_apikey",
+    "subject_token_source": "warden_identity",
+    "assertion_user_claims": "team",
+    "assertion_metadata_claims": "env",
+    "kv2_mount": "secret",
+    "secret_path": "mistral/{{user.team}}/{{agent.env}}"
+  }
+}'
+```
+
+:::note[Templated paths resolve at mint time, not at write time]
+`warden cred spec create` accepts `{{user.team}}` and `{{agent.env}}` without checking that either claim can ever be produced — the substitution happens on each credential request. A claim resolves only if the spec projects it: `{{user.*}}` requires the claim in `assertion_user_claims` **and** `subject_token_source=warden_identity`; `{{agent.*}}` requires it in `assertion_metadata_claims`, except `{{agent.sub}}`, which is always available. An unprojected claim fails the request closed rather than reading some other path.
+:::
+
+### Option B: Inline
+
+The second diagram. The key sits in Warden's encrypted storage rather than a vault — no
+assertion, no outbound hop to fetch it. Quickest to a working mount, and the reason it
+belongs in dev and test rather than production.
+
+The source holds only connection details; the key rides on the spec, so several specs with
+different keys can share one source.
+
+```bash
+warden cred source create mistral-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://api.mistral.ai",
+    "verify_endpoint": "/v1/models",
+    "display_name": "Mistral"
+  }
+}'
+
+warden cred spec create mistral-ops -json '{
+  "source": "mistral-src",
+  "config": {
+    "api_key": "<your-mistral-api-key>"
+  }
+}'
+```
+
+`verify_endpoint` describes how to *verify* a key, not how to inject one: it builds the `GET /v1/models` call that validates a key when a spec is created, so an invalid key fails here rather than on the first gateway request. Gateway injection is the provider's own job and is not configurable here.
+
+Verify either setup:
 
 ```bash
 warden cred source read mistral-src
-```
-
-Create a credential spec that references the credential source. The spec carries the API key and gets associated with tokens at login time.
-
-```bash
-warden cred spec create mistral-ops \
-  -source mistral-src \
-  -config api_key=<your-mistral-api-key>
-```
-
-Optionally include an organization ID:
-
-```bash
-warden cred spec create mistral-ops \
-  -source mistral-src \
-  -config api_key=<your-mistral-api-key> \
-  -config organization_id=<your-org-id>
-```
-
-The API key is validated at creation time via a `GET /v1/models` call to the Mistral API (SpecVerifier). If the key is invalid, spec creation will fail.
-
-Verify:
-
-```bash
 warden cred spec read mistral-ops
 ```
 
-### Alternative: Vault/OpenBao as Credential Source
-
-Instead of storing the API key directly in Warden, you can store it in a Vault/OpenBao KV v2 secret engine and have Warden fetch it at runtime. This centralizes secret management in Vault.
-
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your Mistral API key (e.g., at `secret/mistral/ops` with an `api_key` field)
-- An AppRole configured for Warden access
-
-```bash
-# Create a Vault credential source
-warden cred source create mistral-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
-
-# Create a credential spec using the static_apikey mint method
-warden cred spec create mistral-ops \
-  -source mistral-vault-src \
-  -config mint_method=static_apikey \
-  -config kv2_mount=secret \
-  -config secret_path=mistral/ops
-```
-
-The KV v2 secret at `secret/mistral/ops` should contain at minimum an `api_key` field. Warden fetches the secret from Vault on each credential request.
-
-## Step 4: Create a Policy
+## Step 5: Create a Policy
 
 Create a policy that grants access to the Mistral provider gateway:
 
@@ -193,7 +287,7 @@ path "mistral/role/+/gateway/v1/models" {
 EOF
 ```
 
-The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/concepts/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
+The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/identity/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
 
 Verify:
 
@@ -201,7 +295,7 @@ Verify:
 warden policy read mistral-access
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -297,13 +391,13 @@ This allows operators to enforce policies such as:
 
 ## TLS Certificate Authentication
 
-Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+Steps 1, 3 and 6 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
+The role, the credential spec and the policy (Steps 3-5) are identical. Replace the JWT mount, the provider's `auto_auth_path`, the group and the requests with the following.
 
 ### Enable Cert Auth
 
@@ -316,23 +410,8 @@ warden auth enable cert
 Provide the PEM-encoded CA certificate that signs your client certificates:
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=mistral-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
-
-### Create a Cert Role
-
-Create a role that binds allowed certificate identities to a credential spec and policy:
-
-```bash
-warden write auth/cert/role/mistral-user \
-    allowed_common_names="agent-*" \
-    token_policies="mistral-access" \
-    cred_spec_name=mistral-ops 
-```
-
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ### Configure Provider for Cert Auth
 
@@ -348,6 +427,22 @@ warden write mistral/config <<EOF
 }
 EOF
 ```
+
+### Grant the Role to Certificates
+
+Grant `mistral-user` with a group whose rule trusts the cert mount and matches the certificate's common name:
+
+```bash
+warden identity group create mistral-user-agents -json '{
+  "type": "virtual",
+  "roles": ["mistral-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+Selectors take glob patterns. A rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
 
 ### Make Requests with Certificates
 

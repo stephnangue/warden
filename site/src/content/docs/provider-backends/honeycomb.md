@@ -1,34 +1,37 @@
 ---
 title: "Honeycomb"
+description: "Proxy the Honeycomb API through Warden: chain the key from a vault per request so Warden stores nothing, or hold it inline."
 ---
 
-The Honeycomb provider enables proxied access to the Honeycomb API through Warden. It forwards requests to Honeycomb endpoints (`/1/events/{dataset}`, `/1/queries/{dataset}`, `/2/teams/{team}/api-keys`, etc.) with automatic credential injection and policy evaluation. Honeycomb uses two authentication modes: the `X-Honeycomb-Team` header for ingest and configuration keys, and `Authorization: Bearer <key_id>:<key_secret>` for management keys. Credentials can be static tokens from an `apikey` source or dynamically minted API keys from the `honeycomb` source driver.
+The Honeycomb provider enables proxied access to the Honeycomb API through Warden. It forwards requests to Honeycomb endpoints (`/1/events/{dataset}`, `/1/queries/{dataset}`, `/2/teams/{team}/api-keys`, etc.) with automatic credential injection and policy evaluation. Honeycomb uses two authentication modes: the `X-Honeycomb-Team` header for ingest and configuration keys, and `Authorization: Bearer <key_id>:<key_secret>` for management keys. Credentials come from an `apikey` source — held inline, or [chained](/federation/credential-chaining/) from a vault so Warden stores nothing.
 
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- A Honeycomb account with a management key (key ID + key secret) for dynamic key minting, **or** a static ingest/configuration key
+- A Honeycomb ingest or configuration key — in your secret store, for the recommended chained setup
 - Team slug from your Honeycomb organization (visible in your Honeycomb URL)
 
 :::note[New to Warden?]
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/honeycomb-user \
-    token_policies="honeycomb-access" \
-    user_claim=sub \
-    cred_spec_name=honeycomb-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -86,9 +89,58 @@ warden read honeycomb/config
 
 ## Step 3: Create a Credential Source and Spec
 
-### Option A: Static API Key
+### Option A: Keyless — the key held in your secret store, fetched per request (recommended)
 
-Use this when you already have a Honeycomb ingest or configuration key and want Warden to proxy requests with it.
+:::caution[The `honeycomb` credential driver was removed in v0.20.0]
+Warden used to mint Honeycomb API keys from a management key. That driver is gone: the
+keys it minted were wrong on the wire, and Honeycomb offers no way to revoke or expire
+them, so a leaked key stayed valid indefinitely and Warden could not clean up after
+itself. Keep the key where it can be rotated — in your vault — and
+[chain](/federation/credential-chaining/) it per request instead. Nothing is stored in
+Warden either way, and this is the recommended production shape.
+:::
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which authenticates to an external vault with a KMS-signed assertion carrying user and agent claims, reads the Honeycomb key from a templated path, and injects it to the Honeycomb API" src="/images/warden-prov-honeycomb-vault-apikey.png" width="860"></p>
+
+Hold the Honeycomb key in a vault and have the `apikey` source fetch it at mint time. The
+source stores no secret, and the producer is itself keyless, so nothing standing sits at
+either hop:
+
+Steps 3 and 4 are the keyless login to the store; 5 and 6 the read; 7 the injection. They
+run only on a **cache miss** — the entry is keyed by namespace, the agent's token id and
+the spec name, plus the user's token id when the mount carries a user.
+
+```bash
+# producer: the Honeycomb key, where it can be rotated
+warden cred spec create honeycomb-key-in-vault \
+  -source=vault-keyless \
+  -config=mint_method=kv2_read \
+  -config=kv2_mount=secret \
+  -config=secret_path=honeycomb/ingest-key \
+  -config=subject_token_source=warden_identity
+
+# consumer: the Honeycomb provider's credential
+warden cred source create honeycomb-src \
+  -type=apikey \
+  -rotation-period=0 \
+  -config=api_url=https://api.honeycomb.io \
+  -config=secret_spec=honeycomb-key-in-vault \
+  -config=display_name=Honeycomb
+```
+
+See [credential chaining](/federation/credential-chaining/) for the producer options —
+OpenBao/Vault, AWS Secrets Manager or GCP Secret Manager — and for templating a different
+key per team or per user.
+
+### Option B: Static API key in Warden ⚠️
+
+The quick start: Warden stores the ingest or configuration key itself.
+
+<p align="center"><img alt="Warden reads a static Honeycomb key from its encrypted storage and injects it to the Honeycomb API for every caller" src="/images/warden-prov-honeycomb-inline-apikey.png" width="860"></p>
+
+The key sits in Warden's encrypted storage and is injected for every caller — shortest to
+set up, weakest custody. Option A keeps it in the store that can rotate it; use this one to
+try the mount out, then move the key there.
 
 ```bash
 warden cred source create honeycomb-src \
@@ -104,50 +156,6 @@ Create a credential spec with your API key:
 warden cred spec create honeycomb-ops \
   -source honeycomb-src \
   -config api_key=your-honeycomb-api-key
-```
-
-### Option B: Dynamic API Keys (Honeycomb Source Driver)
-
-Use this to have Warden dynamically create and revoke Honeycomb API keys using a management key. This is the recommended approach for production as it provides automatic key rotation and revocation.
-
-**Prerequisites:**
-- A Honeycomb management key (Settings > Team Settings > API Keys > Manage Management Keys)
-- The team slug from your Honeycomb account
-- An environment ID (visible in the URL when you select an environment)
-
-Create a credential source backed by the Honeycomb API:
-
-```bash
-warden cred source create honeycomb-src \
-  -type=honeycomb \
-  -rotation-period=24h \
-  -config=management_key_id=hcxmk_01abc123 \
-  -config=management_key_secret=your-management-key-secret \
-  -config=team_slug=my-team \
-  -config=honeycomb_url=https://api.honeycomb.io
-```
-
-Create a credential spec that mints ingest keys:
-
-```bash
-warden cred spec create honeycomb-ops \
-  -source honeycomb-src \
-  -config environment_id=your-environment-id \
-  -config key_type=ingest \
-  -config key_name_prefix=warden- \
-  -config key_ttl=24h
-```
-
-For configuration keys with specific permissions:
-
-```bash
-warden cred spec create honeycomb-config \
-  -source honeycomb-src \
-  -config environment_id=your-environment-id \
-  -config key_type=configuration \
-  -config key_name_prefix=warden- \
-  -config key_ttl=24h \
-  -config 'permissions={"send_events":true,"create_datasets":true,"run_queries":true}'
 ```
 
 ### Option C: Vault/OpenBao as Credential Source
@@ -229,7 +237,33 @@ Verify:
 warden policy read honeycomb-access
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 5: Grant Agents the Role
+
+Create the role that binds the credential spec and policy, then a virtual group that grants it to callers of the JWT mount. The provider must already be configured with its `auto_auth_path` (Step 2), so the role is reachable through it. See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+```bash
+warden role create honeycomb-user -json '{
+  "policies": ["honeycomb-access"],
+  "cred_spec_name": "honeycomb-ops",
+  "provider_path": "honeycomb/"
+}'
+
+warden identity group create honeycomb-user-agents -json '{
+  "type": "virtual",
+  "roles": ["honeycomb-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
+```
+
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, such as `"sub": ["agent-*"]`.
+
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -323,13 +357,13 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 ## TLS Certificate Authentication
 
-Steps 1-4 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+The steps above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
+Steps 2-4 (provider, credential and policy setup) are identical. Replace Steps 1, 5 and 6 with the following.
 
 ### Enable Cert Auth
 
@@ -342,21 +376,8 @@ warden auth enable cert
 Provide the PEM-encoded CA certificate that signs your client certificates:
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=honeycomb-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
-
-### Create a Cert Role
-
-```bash
-warden write auth/cert/role/honeycomb-user \
-    allowed_common_names="agent-*" \
-    token_policies="honeycomb-access" \
-    cred_spec_name=honeycomb-ops
-```
-
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ### Configure Provider for Cert Auth
 
@@ -370,6 +391,28 @@ warden write honeycomb/config <<EOF
 }
 EOF
 ```
+
+### Grant the Role to Certificates
+
+Create the role as in Step 5, and grant it with a group whose rule matches certificate fields:
+
+```bash
+warden role create honeycomb-user -json '{
+  "policies": ["honeycomb-access"],
+  "cred_spec_name": "honeycomb-ops",
+  "provider_path": "honeycomb/"
+}'
+
+warden identity group create honeycomb-user-agents -json '{
+  "type": "virtual",
+  "roles": ["honeycomb-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+Values support glob patterns; a rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
 
 ### Make Requests with Certificates
 
@@ -389,14 +432,13 @@ curl --cert client.pem --key client-key.pem \
 | **Rotation** | Manual -- generate a new key in Honeycomb and update the spec |
 | **Lifetime** | Does not expire unless deleted in Honeycomb |
 
-### Dynamic API Keys (Honeycomb Source Driver)
+### Chained Key
 
 | Aspect | Details |
 |--------|---------|
-| **Storage** | Key secret is captured at creation and managed by Warden |
-| **Rotation** | Automatic -- Warden creates a new key and deletes the old one on the configured rotation period |
-| **Lifetime** | Controlled by `key_ttl` in the spec config; keys are revoked (deleted) when the lease expires |
-| **Revocation** | On lease expiry or manual revocation, Warden calls `DELETE /2/teams/{team}/api-keys/{id}` |
+| **Storage** | Key stays in your secret store; Warden fetches it per mint and stores nothing |
+| **Rotation** | Rotate it in the store — the next mint picks up the new value |
+| **Lifetime** | Does not expire unless deleted in Honeycomb |
 
 **To rotate static credentials:**
 
@@ -407,14 +449,3 @@ curl --cert client.pem --key client-key.pem \
      -config api_key=your-new-api-key
    ```
 3. Delete the old key in Honeycomb
-
-**To rotate the management key (source driver):**
-
-1. Create a new management key in Honeycomb
-2. Update the credential source:
-   ```bash
-   warden cred source update honeycomb-src \
-     -config management_key_id=new-key-id \
-     -config management_key_secret=new-key-secret
-   ```
-3. Delete the old management key in Honeycomb

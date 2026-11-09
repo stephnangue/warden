@@ -19,9 +19,9 @@ The `PATH` may be given positionally or via `--path` — pick one.
 ## Examples
 
 ```bash
-# Delete a JWT auth role (prompts for confirmation)
-warden delete auth/jwt/role/developer
-warden delete --path=auth/jwt/role/developer
+# Delete a role (prompts for confirmation)
+warden delete sys/roles/developer
+warden delete --path=sys/roles/developer
 
 # Skip the confirmation prompt
 warden delete sys/providers/aws -f

@@ -2,26 +2,31 @@
 title: "JWT"
 ---
 
-The JWT auth method validates workload identities by **cryptographically verifying** the signature of a JSON Web Token against a configured key source. The hub holds (or fetches) the issuer's public keys directly; no upstream API call is made per login. Validated claims drive role binding (issuer, audience, subject, arbitrary bound claims), and the resolved principal flows through Warden's transparent-auth layer like any other auth method in the family.
+The JWT auth method admits workloads that carry a **JSON Web Token**. It verifies the token's signature against a key source you configure, checks its issuer, audience and age, and records what it verified as **facts**. The mount holds (or fetches) the issuer's public keys itself, so no call is made to the issuer per request. It grants nothing: [groups](/identity/groups/) match the facts and grant [roles](/identity/roles/), on every request.
 
 This is the auth method to reach for when:
 
-- Your workloads carry tokens issued by an **OIDC provider** (Auth0, Okta, Keycloak, Google, Azure AD, GitHub Actions OIDC, GitLab CI OIDC, Forgejo, Hydra, Dex, …) and you want their JWTs accepted directly.
-- You have a fixed set of static issuer keys (PEM-encoded RSA or ECDSA) and no JWKS endpoint to publish them, and want to ship them with the Warden configuration.
-- You need claim-driven role mapping — e.g. policies attached from the JWT's `groups` claim, or per-tenant routing via a custom `tenant` claim.
+- Your workloads carry tokens issued by an **OIDC provider** (Auth0, Okta, Keycloak, Google, Azure AD, GitHub Actions OIDC, GitLab CI OIDC, Forgejo, Hydra, Dex, …) and you want those tokens accepted as they are.
+- You have a fixed set of issuer keys (PEM-encoded RSA or ECDSA) and no JWKS endpoint to publish them.
+- You want roles granted from claims, such as a `tenant` claim, a repository name, or a scope.
 
-If your workload's identity is a Kubernetes ServiceAccount token, prefer the `kubernetes` auth method instead — it validates via TokenReview against the issuing cluster and avoids the JWKS distribution problem entirely. The JWT method works for K8s SA tokens too (the cluster's `/openid/v1/jwks` endpoint is a perfectly valid JWKS source), but only when that endpoint is reachable from Warden, which hardened distros often make awkward.
+If your workload's identity is a Kubernetes ServiceAccount token, prefer the [`kubernetes`](/auth-methods/kubernetes/) auth method: it checks the token through the issuing cluster's TokenReview and avoids distributing keys. The JWT method works for ServiceAccount tokens too (the cluster's `/openid/v1/jwks` endpoint is a valid JWKS source), but only when that endpoint is reachable from Warden, which hardened distributions often make awkward.
 
-If your workloads present **SPIFFE identities** — an X.509-SVID or a JWT-SVID — use the dedicated `spiffe` auth method instead. It verifies the SVID against a trust-domain bundle and enforces the SPIFFE audience requirement, which generic JWT claim-binding here cannot do.
+If your workloads present **SPIFFE identities** (an X.509-SVID or a JWT-SVID), use the [`spiffe`](/auth-methods/spiffe/) auth method. It verifies the SVID against a trust-domain bundle and enforces the SPIFFE audience rules.
+
+People signing in to run the CLI use the [`oidc`](/auth-methods/oidc/) auth method instead.
+
+Coming from v0.21.0, where roles were bound on the auth mount? See [Upgrading from v0.21.0](/upgrade/from-v0-21/).
 
 ## Prerequisites
 
 - A **Warden server** unsealed and reachable from the workload's network.
 - One of:
-  - An **OIDC issuer** with a discovery endpoint (the issuer URL — Warden appends `/.well-known/openid-configuration`).
-  - A standalone **JWKS endpoint** (a URL serving the issuer's public keys as JSON Web Key Set).
-  - A set of **PEM-encoded RSA or ECDSA public keys** (when no JWKS endpoint is reachable).
-- A **role-mapping policy** in Warden that scopes what the resulting auth token can do (issuing a token doesn't grant access on its own).
+  - An **OIDC issuer** with a discovery endpoint (the issuer URL; Warden appends `/.well-known/openid-configuration`).
+  - A standalone **JWKS endpoint** (a URL serving the issuer's public keys as a JSON Web Key Set).
+  - A set of **PEM-encoded RSA or ECDSA public keys**, when no JWKS endpoint is reachable.
+- The **audience** your issuer puts in tokens meant for Warden. An agent mount refuses to run without one.
+- The [policies](/identity/policies/) the role you grant will carry. Admitting a token grants no access on its own.
 
 ## Step 1: Configure the Key Source
 
@@ -31,251 +36,285 @@ Enable the auth method:
 warden auth enable jwt
 ```
 
-This mounts at `auth/jwt/` (the default when `-path` is omitted matches the type). If you need multiple JWT mounts with different key sources — e.g. one per tenant or per IdP — use `-path` to name them:
+This mounts at `auth/jwt/`. For several JWT mounts with different key sources, one per tenant or per IdP, name each with `-path`:
 
 ```bash
 warden auth enable -path=jwt-tenant-a jwt
 warden auth enable -path=jwt-tenant-b jwt
 ```
 
-The `-path` flag takes the mount name only; the CLI prefixes `auth/` automatically.
+`-path` takes the mount name only; the CLI adds the `auth/` prefix.
 
-Then configure one — and only one — of the three key sources. The mount enforces this; mixed configurations are rejected.
+Then configure one, and only one, of the three key sources. A write that leaves the mount with none, or with more than one, is refused.
 
-**OIDC discovery** (most common — for any provider that publishes `/.well-known/openid-configuration`):
-
-```bash
-warden write auth/jwt/config \
-  oidc_discovery_url="https://accounts.google.com" \
-  default_role="default"
-```
-
-If the issuer's TLS chain isn't in the system roots, pass the CA bundle:
+**OIDC discovery**, the common case, for any provider that publishes `/.well-known/openid-configuration`:
 
 ```bash
-warden write auth/jwt/config \
-  oidc_discovery_url="https://issuer.internal.example.com" \
-  oidc_discovery_ca_pem=@/path/to/internal-ca.pem
+warden write auth/jwt/config '{
+  "oidc_discovery_url": "https://accounts.google.com",
+  "bound_issuer": "https://accounts.google.com",
+  "bound_audiences": ["my-warden-instance"]
+}'
 ```
 
-**JWKS endpoint** (for issuers that publish a JWKS URL but no full OIDC discovery doc):
+**JWKS endpoint**, for issuers that publish a JWKS URL but no discovery document:
 
 ```bash
-warden write auth/jwt/config \
-  jwks_url="https://issuer.example.com/.well-known/jwks.json" \
-  jwks_ca_pem=@/path/to/issuer-ca.pem
+warden write auth/jwt/config '{
+  "jwks_url": "https://issuer.example.com/.well-known/jwks.json",
+  "bound_issuer": "https://issuer.example.com",
+  "bound_audiences": ["warden"]
+}'
 ```
 
-**Static PEM public keys** (for air-gapped clusters or fixed-issuer workloads where neither OIDC nor JWKS is reachable):
+Warden fetches the discovery document or the JWKS before it stores the configuration, so the URL must be reachable from the server when you write it.
+
+**PEM values.** A CA bundle or a public key cannot sit in a JSON argument as it is: it spans lines, and its base64 often holds `=`, which makes `warden write` read the argument as `key=value` pairs. Build the JSON with `jq` and pass it on stdin. For an issuer whose TLS chain is not in the system roots:
 
 ```bash
-warden write auth/jwt/config \
-  jwt_validation_pubkeys=@/path/to/issuer-pubkey.pem
+jq -n --rawfile ca internal-ca.pem '{
+  "oidc_discovery_url": "https://issuer.internal.example.com",
+  "oidc_discovery_ca_pem": $ca,
+  "bound_issuer": "https://issuer.internal.example.com",
+  "bound_audiences": ["warden"]
+}' | warden write auth/jwt/config
 ```
 
-Multiple PEM keys can be supplied as a comma-separated list — useful during key rotation when the issuer may sign with either of two keys.
+`jwks_ca_pem` does the same for a JWKS endpoint.
 
-**Quickstart (Ory Hydra).** The provider guides use the local [dev setup](/provider-backends/local-dev-setup/), whose bundled Hydra publishes a JWKS endpoint. Point the mount at it:
+**Static PEM public keys**, for air-gapped clusters or fixed issuers where neither discovery nor JWKS is reachable. List two keys while the issuer rotates, so tokens signed with either are admitted:
+
+```bash
+jq -n --rawfile old issuer-2025.pem --rawfile new issuer-2026.pem '{
+  "jwt_validation_pubkeys": [$old, $new],
+  "bound_issuer": "https://issuer.example.com",
+  "bound_audiences": ["warden"]
+}' | warden write auth/jwt/config
+```
+
+**Quickstart (Ory Hydra).** The provider guides use the local [dev setup](/provider-backends/local-dev-setup/), whose bundled Hydra publishes a JWKS endpoint. Point the mount at it, with the audience the client in [Obtaining a JWT](#obtaining-a-jwt) asks for:
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
-## Step 2: Add Issuer / Audience / Claim Bindings
+## Step 2: Say What the Mount Admits
 
-Bindings configured on the mount apply to every login through it (a role may override most of them with per-role bindings).
+A write merges onto the stored configuration: keys you leave out keep their value. These keys decide which tokens are admitted:
+
+- `bound_issuer`: the value the token's `iss` must equal. Set it on every real deployment. Without it, any token signed by a key your source serves is admitted.
+- `bound_audiences`: the audiences a token must carry, any one of them. **Required** on a mount that admits agents: without it, a token the same issuer minted for any other service would be admitted. A write that leaves an agent mount without one is refused.
+- `bound_subject`: the value the token's `sub` must equal. Useful on a mount meant for a single workload.
+- `bound_claims`: a map of claim to required value. A token missing one of the claims, or carrying a different value, is refused. Values compare with their JSON type, so `1` does not match `"1"`.
+- `max_age`: the maximum age of a token, from its `iat`, such as `15m`. A token older than that, or without an `iat`, is refused.
+
+And these say what the mount records about a token it admits:
+
+- `entity_kind`: `agent` (the default) or `human`. A `human` jwt mount admits the user an agent acts for, on a provider's `user_auth_path` (see [Delegation](/concepts/delegation/)).
+- `facts`: the claims the mount publishes beyond its built-in facts, as a map from claim to fact name.
+- `alias_name_source`: the fact whose first value is the caller's **native identity**. Defaults to `sub`.
+- `user_claim`: the claim recorded as the caller's principal, in audit and as `agent.principal` in policy. Defaults to `sub`.
+
+A mount for agents of one tenant, which publishes two claims as facts and takes the native identity from the client ID:
 
 ```bash
-warden write auth/jwt/config \
-  bound_issuer="https://accounts.google.com" \
-  bound_audiences="my-warden-instance" \
-  user_claim="email"
+warden write auth/jwt/config '{
+  "oidc_discovery_url": "https://idp.example.com",
+  "bound_issuer": "https://idp.example.com",
+  "bound_audiences": ["warden"],
+  "max_age": "15m",
+  "entity_kind": "agent",
+  "facts": {
+    "client_id": "client",
+    "/tenant/id": "tenant"
+  },
+  "alias_name_source": "client"
+}'
+
+warden read auth/jwt/config
 ```
 
-What each does:
+### Facts a token proves
 
-- `bound_issuer` — the expected value of the JWT's `iss` claim. Required for almost every real-world deployment. Without it, any JWT signed by a key your discovery endpoint serves will pass.
-- `bound_audiences` — accepted values of the JWT's `aud` claim. Tokens whose audience isn't in this list are rejected. Pin this when the issuer signs tokens for multiple audiences and only some should be allowed to talk to Warden.
-- `bound_subject` — pin the expected `sub` claim. Rarely set at the mount level (more often per-role).
-- `bound_claims` — a map of arbitrary claim → required value pairs. Tokens missing any required claim or carrying a mismatched value are rejected.
-- `user_claim` — which claim Warden uses as the principal identity in audit logs and the issued token's `PrincipalID`. Defaults to `sub`. Override to `email`, `preferred_username`, or `name` as appropriate.
+Every admission carries `mount` (here `auth/jwt/`) and `kind` (`agent`), plus the token's `sub`, `iss` and `aud`. Every other claim stays invisible to groups and policy until `facts` names it.
+
+A source in `facts` is a claim name (`client_id`), or a JSON Pointer into nested claims (`/tenant/id`, `/scp/0`, `/realm_access/roles`). A claim that is a JSON array gives one value per element; a string is one value, commas included. Fact names use lowercase letters, digits and `_ . : / -`; `mount` and `kind` are reserved, and a mount maps at most 32 facts. A write of `facts` replaces the whole map, and an empty map clears it.
+
+Mapped facts also reach [CEL conditions](/identity/cel-conditions/) as `agent.metadata.<name>`, the values of a multi-valued fact joined with commas. With the mapping above, a policy can gate a path with `condition = "agent.metadata.tenant == 'acme'"`. The built-in facts are not in `agent.metadata` unless you map them to themselves (`"sub": "sub"`).
+
+### The native identity
+
+The native identity is the one value that names the caller at this mount. It is what an [entity](/identity/entities/) claims when you register the agent, and what audit names an unregistered caller by. `alias_name_source` may name any fact the mount publishes, built-in or mapped. Pick one that is stable and unique for the workload: a client ID is often a better choice than a `sub` an IdP derives per session. A change applies to tokens admitted after it.
 
 ## Step 3: Create a Role
 
-A role decides which Warden policies are stamped on the issued token and can tighten the claim bindings beyond what the mount already requires.
+A role names what a caller may do: its policies, an optional credential spec Warden mints from, and how discovery describes it. Roles live in the namespace, not on the mount, so one role can be granted through several mounts.
 
 ```bash
-warden write auth/jwt/role/inventory-agent \
-  bound_subject="agent@example.com" \
-  token_policies="inventory-read,inventory-write" \
-  token_ttl="1h"
+warden role create inventory-agent -json '{
+  "description": "Reads and updates the inventory service",
+  "policies": ["inventory-read", "inventory-write"],
+  "cred_spec_name": "inventory-api",
+  "provider_path": "inventory/"
+}'
 ```
 
-Per-role overrides (when set, these win over the mount-level bindings):
+`provider_path` names the provider mount the role is used with; the [discovery server](/concepts/discovery-and-skills/#discovering-roles) builds the role's URL from it. See [Roles](/identity/roles/) for every field.
 
-- `bound_audiences` — narrower audience list than the mount's.
-- `bound_subject` — different expected `sub` than the mount.
-- `bound_claims` — additional claim → value pairs the role insists on.
+## Step 4: Grant the Role with a Group
 
-Per-role-only fields:
+Nobody holds `inventory-agent` yet. A **virtual group** grants it to every caller whose facts match one of its rules. Every rule names the mounts it trusts in `mount`:
 
-- `max_age` — a freshness check: tokens whose `iat` (issued-at) claim is older than this duration are rejected. Useful when you want to force re-mint cycles to be no longer than, say, 5 minutes.
-- `cred_spec_name` — the credential spec to use for implicit-auth flows.
+```bash
+warden identity group create inventory-agents -json '{
+  "type": "virtual",
+  "description": "Inventory agents of the acme tenant",
+  "roles": ["inventory-agent"],
+  "rules": [
+    {
+      "mount": ["auth/jwt/"],
+      "kind": ["agent"],
+      "tenant": ["acme"],
+      "client": ["inventory-*"]
+    }
+  ]
+}'
+```
 
-A role's `TokenType` is always pinned to `jwt_role`; operators can't override it.
+A token from this mount whose `tenant` is `acme` and whose `client` starts with `inventory-` may now ask for `inventory-agent`. Within a rule every selector must match; across rules any one is enough. `*` matches any run of characters except `/`. The full rule syntax is on [Groups](/identity/groups/).
 
-## Step 4: Wire Up Transparent Auth
+Once an entity claims an agent's native identity, virtual groups no longer apply to it: it holds only what its entity's [static groups](/identity/groups/#static-groups) grant. See [What a claim changes](/identity/entities/#what-a-claim-changes) before you register an agent that already works through a virtual group.
 
-The JWT auth method is **transparent-only**. There is no "log in once, get a Warden bearer token" handshake the workload performs explicitly — `POST /auth/<mount>/login` for a `jwt_role` token is rejected at the request handler with `explicit login is not supported for roles with token_type=transparent`. The workload's JWT flows through every call, and Warden's transparent middleware does the validation in-line.
+## Step 5: Point a Provider at the Mount
 
-The shape:
+Workloads never log in. The workload sends its JWT as `Authorization: Bearer` on every request, and Warden admits it in-line through the auth mount the path names:
 
-1. The workload includes its JWT in the `Authorization: Bearer` header on every request to a Warden gateway URL.
-2. Warden resolves the auth mount via the provider's (or namespace's) `auto_auth_path` configuration.
-3. Warden validates the JWT against the mount's keyset and bindings — or, if a prior call with the same (JWT, role) tuple is in cache, skips that work.
-4. The role's policies decide whether the upstream call goes through.
+1. On a provider's gateway, the mount is the provider's `auto_auth_path`. Elsewhere it is the namespace's `auto_auth_path`.
+2. Warden verifies the token against the mount's keys and bindings, or reuses the admission it cached for this token.
+3. The groups that match the facts decide whether the role the request names is granted.
+4. The role's policies decide the call.
 
-So the workload-side setup is per-provider, not per-workload:
+Set `auto_auth_path` on the provider the workload reaches, here a [`rest`](/provider-backends/rest/) provider mounted at `inventory/`:
 
-- On the provider you want the workload to reach, set `auto_auth_path` to the JWT auth mount you configured (`auth/jwt/`), and optionally a `default_role`.
-- The workload passes its JWT as `Authorization: Bearer` on each Warden request.
+```bash
+warden write inventory/config '{
+  "base_url": "https://inventory.internal.example.com",
+  "auto_auth_path": "auth/jwt/"
+}'
+```
 
-A typical workload-side call looks like:
+The workload then names the role in the URL:
 
 ```bash
 curl -H "Authorization: Bearer $JWT" \
-     -H "X-Warden-Role: inventory-agent" \
-     "${WARDEN_ADDR}/v1/<provider>/gateway/<upstream-path>"
+     "${WARDEN_ADDR}/v1/inventory/role/inventory-agent/gateway/<upstream-path>"
 ```
 
-The role can be set via the `X-Warden-Role` header (as above), embedded in the URL path (`/role/<r>/gateway/...`), or fall back to the provider's `default_role` or the auth method's `default_role`.
+The role can also come from the `X-Warden-Role` header or the provider's `default_role`. A request that selects no role is refused with `400` before the token is checked. See [How a request selects a role](/identity/roles/#how-a-request-selects-a-role).
 
-The first request with a given (JWT, role) tuple triggers a fresh signature + claim validation and caches the result. Subsequent requests with the same tuple hit Warden's in-memory cache (TTL = `min(role.token_ttl, jwt-exp-derived)`) — no signature re-verification per call.
-
-> **Why no explicit login endpoint?** The `jwt_role` token type is part of Warden's transparent-auth family (alongside `cert_role` and `kubernetes_role`). Explicit logins returning a transparent token type are rejected by design. This keeps the workload's identity — the JWT, attested by the IdP — flowing through every call so each request is independently auditable, with no operator-distributed Warden tokens to rotate or revoke separately.
+The first request with a given token is verified by the mount; the requests that follow reuse that admission until the token expires or the mount's `token_ttl` (default one hour) runs out, whichever comes first. The role is decided again on every request, so an edit to a group or a role applies from the next one.
 
 ## Obtaining a JWT
 
-The workload gets its JWT from your identity provider — the same IdP whose keys back the mount's [key source](#step-1-configure-the-key-source). How depends on the provider (OAuth2 client-credentials, an OIDC device flow, a CI runner's OIDC token, etc.).
+The workload gets its JWT from your identity provider, the same one whose keys back the mount's [key source](#step-1-configure-the-key-source). How depends on the provider: OAuth2 client credentials, a CI runner's OIDC token, a device flow, and so on. Ask for a token whose audience is one of the mount's `bound_audiences`.
 
-For the local [dev setup](/provider-backends/local-dev-setup/), the bundled Ory Hydra issues one via the OAuth2 client-credentials grant:
+For the local [dev setup](/provider-backends/local-dev-setup/), register a Hydra client that may ask for the `warden` audience:
+
+```bash
+curl -s -X POST http://localhost:4445/admin/clients \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "inventory-agent",
+    "client_secret": "agent-secret",
+    "grant_types": ["client_credentials"],
+    "response_types": [],
+    "scope": "api:read api:write",
+    "audience": ["warden"],
+    "token_endpoint_auth_method": "client_secret_post"
+  }'
+```
+
+Then issue a token through the client-credentials grant:
 
 ```bash
 export JWT=$(curl -s -X POST http://localhost:4444/oauth2/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=my-agent&client_secret=agent-secret&scope=api:read api:write" \
+  -d "grant_type=client_credentials&client_id=inventory-agent&client_secret=agent-secret&scope=api:read api:write&audience=warden" \
   | jq -r '.access_token')
 ```
 
-The workload then presents `$JWT` on every gateway request (as `Authorization: Bearer`, or via the provider-specific credential field documented in each provider guide).
+The workload presents `$JWT` on every gateway request, as `Authorization: Bearer` or through the credential field each provider guide documents.
 
-## Group-Based Policies
+## Discovering Roles
 
-If your IdP issues a `groups` claim (or any list-typed claim listing the user's groups), Warden can stamp one policy per group onto the issued token, in addition to the role's static `token_policies`.
-
-```bash
-warden write auth/jwt/config \
-  groups_claim="groups" \
-  group_policy_prefix="oidc-"
-```
-
-A JWT carrying `"groups": ["engineering", "billing-admin"]` gets `oidc-engineering` and `oidc-billing-admin` appended to its policy list.
-
-The prefix is required to keep group-derived policies in a namespace operators can recognize and reason about (e.g. you'd write a policy named `oidc-engineering`, knowing it auto-attaches to anyone in that IdP group). Default prefix is `group-`.
-
-Per-role overrides for `groups_claim` and `group_policy_prefix` let one mount serve multiple IdP claim conventions.
-
-## Token Metadata
-
-A role's `metadata_claims` copies verified JWT claims onto the issued token's metadata, where a CEL `condition` can match them via `token.metadata`. The mapping is `source-claim=destination-metadata-key`. The source is a literal claim name, or a JSON Pointer (leading `/`) for a nested claim; resolved values must be strings.
-
-```bash
-warden write auth/jwt/role/inventory-agent \
-  metadata_claims="department=dept,/resource_access/warden/env=env"
-```
-
-A JWT with `"department": "eng"` and a nested `resource_access.warden.env` of `"prod"` produces a token whose metadata carries `dept="eng"` and `env="prod"`. A policy can then gate a path with `condition = "token.metadata.env == 'prod'"`. When a `condition` reads a metadata value to decide a request, that value is recorded in the audit entry under `auth.policy_results.condition.inputs` (keyed by the CEL path, e.g. `token.metadata.env`) — logged in clear by default, salt-able per key via the audit device's `salt_fields`.
-
-> **Note:** metadata is matched at request time against the token's own values and is never compiled into the policy, so it stays correct for every token. Use it for authorization decisions that depend on identity attributes rather than path/capability alone.
-
-## Delegation Chain (RFC 8693 `act` Claim)
-
-RFC 8693 §4.1 defines an `act` claim that attests a delegation chain — "this token represents X, who is acting on behalf of Y, who is acting on behalf of Z." When present, Warden extracts the chain (up to a fixed depth of 4 to guard against pathological tokens) and persists it on the issued token. Because the IdP signed the token, the chain is inherently attested. Audit log entries for downstream requests carry the full chain.
-
-No configuration needed — extraction happens automatically when the claim is present. Policies that want to inspect the chain can do so via the token's `actors` field.
-
-## Discovering Assumable Roles
-
-Agents that don't know which role to ask for can use Warden's namespace-wide introspection endpoint. The aggregator detects the token's shape (generic JWT vs Kubernetes SA JWT) and fans out only to auth mounts whose registered TokenType matches — so a generic JWT goes to JWT mounts, a K8s SA token goes to kubernetes mounts. The workload doesn't need to know which mount serves it.
-
-The endpoint expects the workload's JWT in the `Authorization: Bearer` header (not the operator's Warden token), so the natural caller is the workload itself with `curl`:
+An agent does not need role names in advance. The MCP discovery server's `list_roles` tool returns the roles groups grant the presented token, each with its description, skill and URL; see [Discovery and Skills](/concepts/discovery-and-skills/#discovering-roles). Outside MCP, the same answer comes from:
 
 ```bash
 curl -H "Authorization: Bearer $JWT" \
   "${WARDEN_ADDR}/v1/sys/introspect/roles"
 ```
 
-The response is `{roles: [{auth_path, name, description}, ...], warnings: [...]}`. Each role in the list has passed the issuer + audience + subject + bound-claims checks against the presented token, and `auth_path` tells the agent which mount the role lives on. Introspection is a discovery hint, not an authorization — the agent picks a role and uses it on subsequent gateway requests, where Warden's transparent-auth layer does the actual validation + cache write.
+The response is `{roles: [{name, description, skill, provider_path}, ...], warnings: [...]}`. Warden admits the token at each auth mount a role of the namespace is reached through and lists the roles a group grants it there. It is a hint, not a grant: each request is still decided on its own.
 
-Per-mount introspection (`auth/<mount>/introspect/roles`) exists too — the aggregator calls it internally — but workloads should prefer the aggregator since it handles dispatch.
+## Delegation Chain (RFC 8693 `act` Claim)
+
+RFC 8693 §4.1 defines an `act` claim that attests a delegation chain: this token represents X, acting on behalf of Y, acting on behalf of Z. When a token carries one, Warden reads the chain (up to a depth of 4, to guard against pathological tokens) and records it with the request. Because the issuer signed the token, the chain is attested. Audit entries carry the full chain, and policies read it as `agent.actors`.
+
+No configuration is needed. See [Delegation](/concepts/delegation/).
 
 ## Configuration Reference
 
-### Mount configuration
-
-Exactly one of `oidc_discovery_url`, `jwks_url`, or `jwt_validation_pubkeys` must be set; mixed configurations are rejected at write time.
+Exactly one of `oidc_discovery_url`, `jwks_url` or `jwt_validation_pubkeys` must be set. Lists take a JSON array or a comma-separated string.
 
 | Field | Required | Description |
 |---|---|---|
-| `oidc_discovery_url` | one of three | OIDC issuer URL. Warden appends `/.well-known/openid-configuration` and fetches the JWKS from the discovered endpoint. |
-| `oidc_discovery_ca_pem` | No | PEM-encoded CA bundle for the discovery endpoint when its TLS chain isn't in the system roots. |
-| `jwks_url` | one of three | Direct JWKS endpoint URL when the issuer doesn't publish full OIDC discovery. |
-| `jwks_ca_pem` | No | PEM-encoded CA bundle for the JWKS endpoint. |
-| `jwt_validation_pubkeys` | one of three | PEM-encoded RSA or ECDSA public keys (comma-separated for rotation overlap). For air-gapped clusters and fixed-issuer setups. |
-| `bound_issuer` | No (but strongly recommended) | Expected value of the JWT's `iss` claim. Without this, any JWT signed by a key the configured source serves will pass. |
-| `bound_audiences` | No | Accepted values of the JWT's `aud` claim. Roles may override with their own list. |
-| `bound_subject` | No | Pinned `sub` claim. Roles may override. |
-| `bound_claims` | No | Map of arbitrary claim → required value. Roles may add their own claims. |
-| `user_claim` | No (default `sub`) | Which claim Warden uses as the principal identity. |
-| `groups_claim` | No | JWT claim carrying a list of group names. When set, group-derived policies are appended to the issued token. |
-| `group_policy_prefix` | No (default `group-`) | Prefix prepended to each group name to form the policy name. |
-| `token_ttl` | No (default `1h`) | Default TTL for issued Warden auth tokens; per-role `token_ttl` overrides. |
-| `default_role` | No | Used by transparent-mode flows when the caller doesn't specify a role. |
+| `oidc_discovery_url` | one of three | OIDC issuer URL. Warden appends `/.well-known/openid-configuration` and fetches the keys from the JWKS it names. |
+| `oidc_discovery_ca_pem` | No | PEM CA bundle for the discovery endpoint, when its TLS chain is not in the system roots. |
+| `jwks_url` | one of three | JWKS endpoint URL, for issuers without a discovery document. |
+| `jwks_ca_pem` | No | PEM CA bundle for the JWKS endpoint. |
+| `jwt_validation_pubkeys` | one of three | PEM-encoded RSA or ECDSA public keys. List several to overlap a key rotation. |
+| `bound_issuer` | No (strongly recommended) | Value the token's `iss` must equal. |
+| `bound_audiences` | **Yes**, when `entity_kind` is `agent` | Audiences a token must carry, any one of them. |
+| `bound_subject` | No | Value the token's `sub` must equal. |
+| `bound_claims` | No | Map of claim to required value, compared with its JSON type. |
+| `max_age` | No | Maximum age from the token's `iat`, such as `15m`. A token older than that, or without an `iat`, is refused. Empty or `0` leaves it unset. |
+| `user_claim` | No (default `sub`) | Claim recorded as the caller's principal. A token without it is refused. |
+| `token_ttl` | No (default `1h`) | How long an admission is reused before the token is verified again; never past the token's `exp`. |
+| `entity_kind` | No (default `agent`) | `agent` or `human`. |
+| `facts` | No | Map of claim name or JSON Pointer to the fact name it is published as. At most 32 entries; names use `a-z 0-9 _ . : / -`, never `mount` or `kind`. A write replaces the whole map. |
+| `alias_name_source` | No (default `sub`) | The fact whose first value is the native identity: `sub`, `iss`, `aud`, or a mapped fact. An empty value restores the default. |
 
-### Role configuration
-
-| Field | Required | Description |
-|---|---|---|
-| `bound_audiences` | No | Per-role audience binding; overrides the mount's `bound_audiences` when set. |
-| `bound_subject` | No | Per-role subject binding; overrides the mount's `bound_subject` when set. |
-| `bound_claims` | No | Per-role claim requirements; merged with the mount's `bound_claims` (both must pass). |
-| `user_claim` | No | Per-role override of the mount's `user_claim`. |
-| `token_policies` | No | Warden policies attached to the issued token (in addition to any group-derived policies). |
-| `token_ttl` | No (default `1h`) | TTL for issued tokens; overrides the mount-level `token_ttl`. |
-| `groups_claim` | No | Per-role override of the mount's `groups_claim`. |
-| `group_policy_prefix` | No | Per-role override of the mount's `group_policy_prefix`. |
-| `metadata_claims` | No | Map of source claim (literal or JSON Pointer) → token metadata key. Copies verified claims into the token's metadata for CEL `condition` matching via `token.metadata`. Values must be strings. |
-| `cred_spec_name` | No | Credential spec name for implicit-auth flows. |
-| `max_age` | No | Maximum elapsed time since the JWT's `iat` claim. Example: `30m`. Empty disables the check. |
+The built-in facts are `mount`, `kind`, `sub`, `iss` and `aud`. Tokens must be signed with RS256, RS384, RS512, ES256, ES384 or ES512, and carry an `exp`.
 
 ## Troubleshooting
 
-**Gateway request returns "authentication failed" with no detail.** This is by design — all authentication failures collapse to the same generic error so the response can't be used to enumerate which check is failing. The Warden server logs carry the specific reason (signature mismatch, expired token, missing required claim, bound-audiences mismatch, `max_age` exceeded, etc.). Check the Warden server log at the timestamp of the failed call.
+**A gateway request returns "authentication failed" with no detail.** By design, every admission failure gets the same answer, so a response cannot tell a caller which check failed. The server log carries the reason: a signature mismatch, an expired token, a missing bound claim, an audience mismatch, `max_age` exceeded, no `user_claim` in the token. Look at the log at the time of the failed call.
 
-**Gateway request returns "explicit login is not supported for roles with token_type=transparent".** Something is hitting `auth/<mount>/login` directly instead of going through transparent auth on a gateway URL. The JWT auth method is transparent-only; the explicit-login endpoint is reserved for internal use. Make sure your client is calling a provider gateway path (e.g. `/v1/<provider>/gateway/...`) with the JWT in the `Authorization: Bearer` header — not posting to `/auth/<mount>/login`.
+**A config write fails with `bound_audiences is required on agent mounts`.** Set `bound_audiences` to the audience your issuer puts in tokens meant for Warden, or set `entity_kind` to `human` for a mount that admits users.
 
-**"failed to fetch JWKS" / "OIDC discovery endpoint not reachable".** Warden hits the discovery URL (or JWKS URL) at config-write time to validate the configuration before persisting. Make sure the URL is reachable from the Warden server's network, and that the CA bundle (`oidc_discovery_ca_pem` / `jwks_ca_pem`) covers the endpoint's TLS chain if it's not a public CA. For air-gapped clusters, switch to `jwt_validation_pubkeys` with static PEM keys.
+**A config write fails with `oidc_discovery_url is not reachable` or `jwks_url is not reachable`.** Warden fetches the URL before it stores the configuration. Make sure it is reachable from the Warden server, and that `oidc_discovery_ca_pem` or `jwks_ca_pem` covers its TLS chain when it is not a public CA. For air-gapped clusters, use `jwt_validation_pubkeys`.
 
-**Tokens from one IdP pass, tokens from another IdP fail with no clear reason.** Pin `bound_issuer` to the expected `iss` value. Without it, any JWT signed by a key your discovery / JWKS source returns will pass the signature check, which can produce surprising allows when the IdP signs for multiple consumers.
+**A config write refuses a key.** Keys that bound roles to the mount were removed. The error names each one and what replaced it.
 
-**Group-based policies aren't being applied.** Verify the JWT actually carries the `groups` claim. Warden accepts three shapes for it: a JSON array of strings (`["engineering", "billing"]`), a comma-separated string (`"engineering,billing"`), or a single string (treated as a one-element list). A JSON-encoded string that *looks* like an array (`"[engineering, billing]"`) is not parsed and won't work. If the claim is named something other than `groups`, set `groups_claim` accordingly on the mount or role. Verify the resulting policy names (e.g. `oidc-engineering`) actually exist in Warden.
+**`role "inventory-agent" is not assumable through auth/jwt/: no group grants it to this caller`.** The token was admitted, but no group matched it. Check that the rule's `mount` is the mount's path with its trailing slash (`auth/jwt/`), that each fact the rule names is built in or mapped in `facts`, and that the token carries the values the rule expects. The audit entry's `role_denied_reason` and `groups` say what matched. If an entity claims the caller's native identity, only its static groups apply.
 
-**`max_age` rejects every login.** The JWT must carry an `iat` (issued-at) claim for the freshness check to work. Some IdPs omit `iat`; if yours does, you can't use `max_age` against tokens from it. Either configure the IdP to emit `iat` or drop `max_age` from the role.
+**A rule on a mapped fact never matches.** The rule names the fact name, not the claim (`tenant`, not `/tenant/id`). A JSON Pointer needs its leading `/`. A claim that holds an object gives no value; point into it instead.
+
+**Tokens from one IdP pass, tokens from another fail, or the reverse.** Pin `bound_issuer` to the expected `iss`. Without it, any token signed by a key your source returns passes the signature check, which can admit tokens the IdP signed for other consumers.
+
+**`max_age` refuses every token.** The token must carry an `iat` for the check to work. If your IdP omits it, configure the IdP to emit it or clear `max_age`.
+
+**`admission token presented explicitly; present the credential instead`.** The request presented, as a Warden token, what an explicit login against the mount returned. A login hands out nothing to present later: send the JWT itself as `Authorization: Bearer` on every request.
 
 ## See Also
 
-- [Authentication](/concepts/authentication/) — the credential forms and how transparent auth resolves an identity per request.
-- [Roles](/concepts/roles/) — how a validated credential maps to policies and token settings.
-- [Agent Identity](/agent-identity/) — how a workload or its sidecar presents this credential to Warden.
-- [Auth Methods](/auth-methods/) — the other auth methods Warden ships.
+- [Authentication](/identity/authentication/): auth mounts, facts and native identities.
+- [Groups](/identity/groups/) and [Roles](/identity/roles/): how an admitted caller is granted what it may do.
+- [Entities](/identity/entities/): registering agents in the identity store.
+- [Agent Identity](/agent-identity/): how a workload or its sidecar presents this credential to Warden.
+- [Auth Methods](/auth-methods/): the other auth methods Warden ships.

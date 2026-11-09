@@ -2,7 +2,55 @@
 title: "TFE"
 ---
 
-The TFE provider enables proxied access to the Terraform Enterprise (TFE) and HCP Terraform API through Warden. It forwards requests to the TFE REST API (Organizations, Workspaces, Runs, State Versions, Variables, Projects, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer <token>` header. One credential mode is supported: static API tokens (`apikey` source type). Vault/OpenBao can also be used as a credential source (`hvault` source type).
+The TFE provider enables proxied access to the Terraform Enterprise (TFE) and HCP Terraform API through Warden. It forwards requests to the TFE REST API (Organizations, Workspaces, Runs, State Versions, Variables, Projects, etc.) with automatic credential injection and policy evaluation. Credentials are injected via the `Authorization: Bearer <token>` header. Chain the token from your secret store (recommended), or store it in Warden (`apikey` source type).
+
+## How a request flows
+
+This mount injects `Authorization: Bearer <token>` from an **`api_key`** credential. The question is where that
+API token lives.
+
+The recommended setup keeps it in the vault that manages it, read per request.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the Terraform Enterprise API token from an external vault at a path templated by the agent's team and environment, and injects it to the Terraform Enterprise API" src="/images/warden-prov-tfe-vault-apikey.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to a KMS-backed
+   issuer unsigned, where one is configured.
+4. The issuer returns it signed.
+5. Warden authenticates to the **external vault** and reads
+   `secret/tfe/{{agent.team}}/{{agent.env}}`.
+6. The vault returns the API token for that team and environment.
+7. Warden injects it and forwards.
+
+The credential is served **verbatim** — nothing is minted. What chaining buys is custody:
+it stays in the store that manages it, and the read path decides who reaches which one.
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the credential, so most requests skip from step 2 to step 7. The entry is
+keyed by namespace, the agent's token id and the spec name — plus the user's token id when
+the mount carries a user.
+:::
+
+### The simpler variant
+
+<p align="center"><img alt="Warden reads a static Terraform Enterprise API token from its encrypted storage and injects it to the Terraform Enterprise API for every caller" src="/images/warden-prov-tfe-inline-apikey.png" width="860"></p>
+
+**Inline.** The credential sits in Warden's storage. Shortest to set up, weakest custody:
+one long-lived credential for every caller.
+
+## Credential modes
+
+| Mode | What Terraform Enterprise sees | Where the credential lives |
+|---|---|---|
+| **Chained** ✅ *recommended* | One long-lived credential, scoped by path | The vault; nothing in Warden |
+| **Inline** ⚠️ | One long-lived credential, shared | Warden's storage |
+
+Terraform Enterprise exposes no workload-identity federation and mints nothing per request, so the
+credential is long-lived in both rows; what changes is whether Warden holds it.
+
+See the [apikey credential driver](/credential-drivers/apikey/) for every source and spec
+key.
 
 ## Prerequisites
 
@@ -14,21 +62,23 @@ The TFE provider enables proxied access to the Terraform Enterprise (TFE) and HC
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup:
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/tfe-user \
-    token_policies="tfe-access" \
-    user_claim=sub \
-    cred_spec_name=tfe-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -79,83 +129,101 @@ Verify the configuration:
 warden read tfe/config
 ```
 
-## Step 3: Create a Credential Source and Spec
+## Step 3: Create a Role and Grant It
 
-### Option A: Static API Token
-
-The credential source holds only connection info (`api_url`). The API token is stored on the credential spec below, allowing multiple specs with different tokens to share one source.
-
-First, create an API token in HCP Terraform or your TFE instance:
-
-- **User token:** User Settings > Tokens > Create an API token
-- **Team token:** Organization > Settings > Teams > Team API Token > Generate
-- **Organization token:** Organization > Settings > API Token > Generate
-
-Save the token (it is only displayed once), then create the Warden credential source and spec:
+A [role](/identity/roles/) binds the credential spec and policy, and `provider_path` names the provider mount it is used with. Create it after the provider has its `auto_auth_path`; until then, agents cannot find the role through discovery. The spec and policy come in the next steps, so the write warns that they do not exist yet:
 
 ```bash
-warden cred source create tfe-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://app.terraform.io/api/v2 \
-  -config=verify_endpoint=/account/details \
-  -config=auth_header_type=bearer \
-  -config=display_name=TFE \
-  -config=extra_headers=Content-Type:application/vnd.api+json
+warden role create tfe-user -json '{
+  "policies": ["tfe-access"],
+  "cred_spec_name": "tfe-ops",
+  "provider_path": "tfe/"
+}'
 ```
 
-Create a credential spec that references the credential source. The spec carries the API token and gets associated with tokens at login time.
+Nobody holds the role yet. A virtual [group](/identity/groups/) grants it to the callers the JWT mount admits:
 
 ```bash
-warden cred spec create tfe-ops \
-  -source tfe-src \
-  -config api_key=your-tfe-api-token
+warden identity group create tfe-user-agents -json '{
+  "type": "virtual",
+  "roles": ["tfe-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
 ```
 
-The API token is validated at creation time via a `GET /account/details` call to the TFE API (SpecVerifier). If the token is invalid, spec creation will fail.
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
 
-> **Note:** Organization tokens cannot access `/account/details`. For organization tokens, use `-config=verify_endpoint=/organizations` instead.
+This rule matches every token the mount accepts. Add selectors on the token's facts, such as `sub`, to grant the role to fewer callers.
 
-### Option B: Vault/OpenBao as Credential Source
+## Step 4: Create a Credential Source and Spec
 
-Instead of storing API tokens directly in Warden, you can store them in a Vault/OpenBao KV v2 secret engine and have Warden fetch them at runtime.
+### Option A: Chained (recommended)
 
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your TFE token (e.g., at `secret/tfe/ops` with an `api_key` field)
-- An AppRole configured for Warden access
+The flow in the first diagram. The vault holds the credential; Warden reads it per request
+and injects it.
 
 ```bash
-# Create a Vault credential source
-warden cred source create tfe-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
+# The store Warden reads from, reached keylessly — no vault token in Warden
+warden cred source create vault-keyless -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-agents",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+
+warden cred spec create tfe-ops -json '{
+  "source": "vault-keyless",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "static_apikey",
+    "subject_token_source": "warden_identity",
+    "assertion_metadata_claims": "team,env",
+    "kv2_mount": "secret",
+    "secret_path": "tfe/{{agent.team}}/{{agent.env}}"
+  }
+}'
 ```
 
-Create a credential spec using the `static_apikey` mint method:
+The KV secret must carry the credential under **`api_key`**.
 
+Both principals are available to the path template: `{{agent.sub}}` is free,
+`{{agent.<claim>}}` needs `assertion_metadata_claims`, and `{{user.<claim>}}` needs
+`assertion_user_claims` plus a user on the request. Swap `{{agent.team}}` for
+`{{user.sub}}` to give each person their own credential. Templates resolve at **mint,
+not at write**, so a path naming an unprojected claim is accepted by `spec create` and
+fails on the first request.
+
+### Option B: Inline
+
+⚠️ 
 ```bash
-warden cred spec create tfe-ops \
-  -source tfe-vault-src \
-  -config mint_method=static_apikey \
-  -config kv2_mount=secret \
-  -config secret_path=tfe/ops
+warden cred source create tfe-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://app.terraform.io/api/v2",
+    "verify_endpoint": "/account/details",
+    "display_name": "Terraform Enterprise"
+  }
+}'
+
+printf '{"source":"tfe-src","min_ttl":3600,"max_ttl":86400,"config":{"api_key":"%s"}}' \
+  "$(cat /path/to/tfe-token)" | warden cred spec create tfe-ops -json -
 ```
 
-The KV v2 secret at `secret/tfe/ops` should contain an `api_key` field with the TFE API token. Warden fetches the secret from Vault on each credential request.
+Organization tokens cannot reach `/account/details` — use `"verify_endpoint": "/organizations"` for those.
 
-Verify:
+One long-lived credential for every caller. Prefer Option A.
 
-```bash
-warden cred spec read tfe-ops
-```
-
-## Step 4: Create a Policy
+## Step 5: Create a Policy
 
 Create a policy that grants access to the TFE provider gateway:
 
@@ -208,7 +276,7 @@ Verify:
 warden policy read tfe-access
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -302,13 +370,13 @@ Since Warden dev mode uses in-memory storage, all configuration is lost when the
 
 ## TLS Certificate Authentication
 
-Steps 1-3 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+The steps above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
+The role, credential spec and policy are identical. Replace the JWT mount (Step 1), its group (Step 3) and the requests (Step 6) with the following.
 
 ### Enable Cert Auth
 
@@ -321,23 +389,24 @@ warden auth enable cert
 Provide the PEM-encoded CA certificate that signs your client certificates:
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=tfe-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
 
-### Create a Cert Role
+### Grant the Role to Certificates
 
-Create a role that binds allowed certificate identities to a credential spec and policy:
+A virtual group grants `tfe-user` to the certificates the mount admits whose common name matches:
 
 ```bash
-warden write auth/cert/role/tfe-user \
-    allowed_common_names="agent-*" \
-    token_policies="tfe-access" \
-    cred_spec_name=tfe-ops
+warden identity group create tfe-user-agents -json '{
+  "type": "virtual",
+  "roles": ["tfe-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
 ```
 
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
+The `cn` selector supports glob patterns; you can also match on other certificate fields. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group) for the full set of fields.
 
 ### Configure Provider for Cert Auth
 
@@ -392,7 +461,7 @@ TFE enforces a rate limit of **30 requests per second** per authenticated user. 
 | Aspect | Details |
 |--------|---------|
 | **Storage** | API token is stored on the credential spec (not the source) |
-| **Validation** | Token is verified at spec creation via the configured verify endpoint |
+| **Validation** | Token is verified at spec creation when the source configures a `verify_endpoint` |
 | **Rotation** | Manual — create a new token in TFE and update the spec |
 | **Expiration** | Organization tokens: 2 years (default). User/Team tokens: configurable |
 

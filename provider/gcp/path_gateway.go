@@ -8,27 +8,19 @@ import (
 	"strings"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	"github.com/stephnangue/warden/provider/sdk/upstream"
 )
 
 // maxGatewayBodySize is the default max body size if not configured
 const maxGatewayBodySize = int64(10 << 20) // 10MB
 
 // Headers to remove before proxying
-var headersToRemove = []string{
+var headersToRemove = append(logical.WardenRequestHeaders(),
 	// Security headers (will be replaced with GCP Bearer token)
 	"Authorization",
-	"X-Warden-Token",
-	"X-Warden-Agent-Token",
-	// Retired in 0.20: the user credential now rides Authorization. Still
-	// stripped so a client that keeps sending the old header cannot leak the
-	// credential to the upstream.
-	"X-Warden-User-Token",
-	"X-Warden-Role",
-	"X-Warden-Provider",
-	"X-Warden-Subject-Token",
-	"X-Warden-Actor-Token",
 	// Hop-by-hop headers
 	"Connection",
 	"Keep-Alive",
@@ -45,7 +37,7 @@ var headersToRemove = []string{
 	"X-Forwarded-Port",
 	"X-Real-Ip",
 	"Forwarded",
-}
+)
 
 // gcpCredentialInfo holds extracted credential information
 type gcpCredentialInfo struct {
@@ -75,6 +67,17 @@ func (b *gcpBackend) handleGateway(ctx context.Context, req *logical.Request) {
 		http.Error(req.ResponseWriter, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The host comes from the client and the request leaves for it carrying
+	// a GCP access token: only an allowed host is reached.
+	if err := framework.ValidateTargetHost(gcpHost); err != nil {
+		http.Error(req.ResponseWriter, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !framework.HostAllowed(gcpHost, b.hostAllowlist()) {
+		b.Logger.Warn("target host not allowed", logger.String("host", gcpHost))
+		http.Error(req.ResponseWriter, fmt.Sprintf("target host %q is not allowed on this mount", gcpHost), http.StatusForbidden)
+		return
+	}
 
 	// Get GCP credential info (Bearer token)
 	var credInfo gcpCredentialInfo
@@ -88,16 +91,15 @@ func (b *gcpBackend) handleGateway(ctx context.Context, req *logical.Request) {
 	}
 
 	// Build target URL
-	targetURL := b.buildTargetURL(gcpHost, gcpPath, req.HTTPRequest.URL.RawQuery)
-
-	// Prepare request for proxying
-	r := req.HTTPRequest
-	parsedURL, err := url.Parse(targetURL)
+	parsedURL, err := b.buildTargetURL(gcpHost, gcpPath, req.HTTPRequest.URL.RawQuery)
 	if err != nil {
-		b.Logger.Error("Failed to parse target URL", logger.Err(err))
+		b.Logger.Error("Failed to build target URL", logger.Err(err))
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	// Prepare request for proxying
+	r := req.HTTPRequest
 	r.URL = parsedURL
 	r.Host = parsedURL.Host
 	r.RequestURI = "" // Required for outgoing requests
@@ -172,18 +174,8 @@ func (b *gcpBackend) getGCPCredentialInfo(req *logical.Request) (gcpCredentialIn
 }
 
 // buildTargetURL constructs the full GCP target URL
-func (b *gcpBackend) buildTargetURL(host, path, rawQuery string) string {
-	var sb strings.Builder
-	sb.WriteString("https://")
-	sb.WriteString(host)
-	sb.WriteString(path)
-
-	if rawQuery != "" {
-		sb.WriteString("?")
-		sb.WriteString(rawQuery)
-	}
-
-	return sb.String()
+func (b *gcpBackend) buildTargetURL(host, path, rawQuery string) (*url.URL, error) {
+	return upstream.URL("https://"+host, path, rawQuery)
 }
 
 // prepareHeaders removes unwanted headers and injects the GCP Bearer token

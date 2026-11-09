@@ -34,12 +34,13 @@ const cliOpsNamespace = "e2e-cli-ops"
 // setupCLITransparentOpsEnv sets up a namespace-level transparent operations
 // environment for CLI privilege escalation tests:
 //   - Namespace "e2e-cli-ops" with auto_auth_path="auth/cert/"
-//   - Cert auth mounted with mTLS client CA, default_role="reader"
-//   - reader role (read-only Warden API access, long-lived 1h token)
-//   - admin role (full Warden API access, short-lived 2m token)
+//   - Cert auth mounted with mTLS client CA
+//   - reader role (read-only Warden API access)
+//   - admin role (full Warden API access)
 //
-// The reader role is set as default_role, so reads don't require --role or
-// WARDEN_ROLE. Only writes use --role=admin to escalate privileges.
+// Both roles are granted to agent-* certificates; the request picks one, with
+// --role, since a transparent operation selects no role by default. Reads run
+// under reader, and writes escalate with --role=admin.
 //
 // Returns temp file paths for the client cert and key (signed by the mTLS CA).
 func setupCLITransparentOpsEnv(t *testing.T, port int) (clientCertFile, clientKeyFile string) {
@@ -59,7 +60,7 @@ func setupCLITransparentOpsEnv(t *testing.T, port int) (clientCertFile, clientKe
 	}
 
 	escapedPEM := strings.ReplaceAll(caCertPEM, "\n", "\\n")
-	configBody := fmt.Sprintf(`{"trusted_ca_pem":"%s","default_role":"reader"}`, escapedPEM)
+	configBody := fmt.Sprintf(`{"trusted_ca_pem":"%s"}`, escapedPEM)
 	status, body = h.NSAPIRequest(t, "PUT", "auth/cert/config", ns, port, configBody)
 	if status != 200 && status != 204 {
 		t.Fatalf("failed to configure cert auth in namespace (status %d): %s", status, string(body))
@@ -73,13 +74,10 @@ func setupCLITransparentOpsEnv(t *testing.T, port int) (clientCertFile, clientKe
 	h.NSAPIRequest(t, "POST", "sys/policies/cbp/admin-policy", ns, port,
 		`{"policy":"path \"sys/*\" {\n  capabilities = [\"read\", \"create\", \"update\", \"delete\", \"list\"]\n}\npath \"auth/*\" {\n  capabilities = [\"read\", \"create\", \"update\", \"delete\", \"list\"]\n}"}`)
 
-	// Reader cert role: long-lived (1h), read-only.
-	h.NSAPIRequest(t, "POST", "auth/cert/role/reader", ns, port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["reader-policy"],"token_ttl":3600}`)
-
-	// Admin cert role: short-lived (2m), full access
-	h.NSAPIRequest(t, "POST", "auth/cert/role/admin", ns, port,
-		`{"allowed_common_names":["agent-*"],"token_policies":["admin-policy"],"token_ttl":120}`)
+	// Reader: read-only. Admin: full access. Both granted to agent-* certs.
+	agents := h.Rule{"cn": {"agent-*"}}
+	h.GrantRoleInNS(t, port, ns, "auth/cert/", "reader", h.Role{Policies: []string{"reader-policy"}}, agents)
+	h.GrantRoleInNS(t, port, ns, "auth/cert/", "admin", h.Role{Policies: []string{"admin-policy"}}, agents)
 
 	// Generate client cert signed by mTLS CA
 	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-cli-ops")
@@ -94,8 +92,8 @@ func teardownCLITransparentOpsEnv(t *testing.T, port int) {
 	ns := cliOpsNamespace
 
 	// Cleanup within namespace
-	h.NSAPIRequest(t, "DELETE", "auth/cert/role/reader", ns, port, "")
-	h.NSAPIRequest(t, "DELETE", "auth/cert/role/admin", ns, port, "")
+	h.RevokeRoleInNSBestEffort(port, ns, "auth/cert/", "reader")
+	h.RevokeRoleInNSBestEffort(port, ns, "auth/cert/", "admin")
 	h.NSAPIRequest(t, "DELETE", "sys/auth/cert", ns, port, "")
 	h.NSAPIRequest(t, "DELETE", "sys/policies/cbp/reader-policy", ns, port, "")
 	h.NSAPIRequest(t, "DELETE", "sys/policies/cbp/admin-policy", ns, port, "")
@@ -107,8 +105,8 @@ func teardownCLITransparentOpsEnv(t *testing.T, port int) {
 }
 
 // TC-CLI-07: Transparent operations via CLI over mTLS with privilege escalation.
-// Reader role is the default (no --role needed for reads).
-// Admin role requires --role=admin flag for writes.
+// Reads run under --role=reader; writes escalate with --role=admin; a request
+// that selects no role is refused.
 // Operates on Warden's own API (namespace-level transparent operations), not gateway.
 func TestCLI_TransparentOps_PrivilegeEscalation(t *testing.T) {
 	port := h.GetLeaderPort(t)
@@ -123,9 +121,15 @@ func TestCLI_TransparentOps_PrivilegeEscalation(t *testing.T) {
 		"WARDEN_NAMESPACE":   cliOpsNamespace,
 	}
 
-	// Step 1: Read cert auth config — no --role needed (default_role=reader)
+	// Step 0: a request that selects no role is refused: nothing picks one.
+	if out, err := h.WardenCLIWithPort(t, port, env,
+		"-o", "json", "read", "auth/cert/config"); err == nil {
+		t.Fatalf("Step 0: expected a read without a role to be refused, got: %s", out)
+	}
+
+	// Step 1: Read cert auth config under the reader role
 	out, err := h.WardenCLIWithPort(t, port, env,
-		"-o", "json", "read", "auth/cert/config")
+		"-o", "json", "--role", "reader", "read", "auth/cert/config")
 	if err != nil {
 		t.Fatalf("Step 1: read auth/cert/config failed: %v\noutput: %s", err, out)
 	}
@@ -144,9 +148,9 @@ func TestCLI_TransparentOps_PrivilegeEscalation(t *testing.T) {
 		t.Fatalf("Step 2: expected success envelope with \"written\": true, got: %s", out)
 	}
 
-	// Step 3: Read back the created policy — default reader role
+	// Step 3: Read back the created policy under the reader role
 	out, err = h.WardenCLIWithPort(t, port, env,
-		"-o", "json", "read", "sys/policies/cbp/e2e-test-created")
+		"-o", "json", "--role", "reader", "read", "sys/policies/cbp/e2e-test-created")
 	if err != nil {
 		t.Fatalf("Step 3: read back policy failed: %v\noutput: %s", err, out)
 	}
@@ -154,11 +158,11 @@ func TestCLI_TransparentOps_PrivilegeEscalation(t *testing.T) {
 		t.Fatalf("Step 3: expected policy content in output, got: %s", out)
 	}
 
-	// Step 4: Verify default reader role cannot write
+	// Step 4: Verify the reader role cannot write
 	_, err = h.WardenCLIWithPort(t, port, env,
-		"-o", "json", "write", "sys/policies/cbp/e2e-test-forbidden",
+		"-o", "json", "--role", "reader", "write", "sys/policies/cbp/e2e-test-forbidden",
 		`policy=path "sys/health" { capabilities = ["read"] }`)
 	if err == nil {
-		t.Fatal("Step 4: expected write with default reader role to fail, but it succeeded")
+		t.Fatal("Step 4: expected write with the reader role to fail, but it succeeded")
 	}
 }

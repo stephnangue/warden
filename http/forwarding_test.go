@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-chi/chi/middleware"
+	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -323,3 +326,179 @@ func TestGetProxy_ErrorHandler_ConnectionError_NoLeader(t *testing.T) {
 // =============================================================================
 // wrapGenericHandler standby forwarding path
 // =============================================================================
+
+// The standby's proxy carries the request id this node assigned to the
+// active node, in the cluster's internal header, which would otherwise handle
+// — and audit — the request with none. The client's own X-Request-Id is left
+// as sent, a client-sent copy of the internal header never goes on, and a
+// request with no id is not given an invented one here.
+func TestGetProxy_DirectorCarriesRequestID(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	cert := &x509.Certificate{}
+	cert.Subject.CommonName = "fw-test"
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{{Leaf: cert}}}
+	f := newStandbyForwarder(log, func() *tls.Config { return tlsCfg }, 30)
+	proxy := f.getProxy("https://leader:8201", "https://leader:8200")
+	require.NotNil(t, proxy)
+
+	withID := httptest.NewRequest(http.MethodGet, "https://standby:8200/v1/aws/gateway", nil)
+	withID.Header.Set("X-Request-Id", "the-clients-own")
+	withID.Header.Set(listener.ForwardedRequestIDHeader, "forged")
+	withID = withID.WithContext(context.WithValue(withID.Context(), middleware.RequestIDKey, "standby-7/abc-000042"))
+	proxy.Director(withID)
+	assert.Equal(t, "standby-7/abc-000042", withID.Header.Get(listener.ForwardedRequestIDHeader))
+	assert.Equal(t, "the-clients-own", withID.Header.Get("X-Request-Id"))
+
+	without := httptest.NewRequest(http.MethodGet, "https://standby:8200/v1/aws/gateway", nil)
+	without.Header.Set(listener.ForwardedRequestIDHeader, "forged")
+	proxy.Director(without)
+	assert.Empty(t, without.Header.Values(listener.ForwardedRequestIDHeader))
+}
+
+// The standby vouches for a client certificate only when it took that
+// certificate from its own handshake with the client, and only from what its
+// listener recorded: a marker or a certificate header the request still
+// carries never goes on, since the active node reads XFCC first.
+func TestGetProxy_DirectorCarriesCertProvenance(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	leaf := &x509.Certificate{}
+	leaf.Subject.CommonName = "fw-test"
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{{Leaf: leaf}}}
+	f := newStandbyForwarder(log, func() *tls.Config { return tlsCfg }, 30)
+	proxy := f.getProxy("https://leader:8201", "https://leader:8200")
+	require.NotNil(t, proxy)
+
+	clientCert := &x509.Certificate{Raw: []byte("client-der")}
+	tests := []struct {
+		name       string
+		ctx        func(context.Context) context.Context
+		wantCert   bool
+		wantMarker string
+	}{
+		{
+			name: "handshake certificate",
+			ctx: func(ctx context.Context) context.Context {
+				return listener.WithHandshakeClientCert(ctx, clientCert)
+			},
+			wantCert:   true,
+			wantMarker: listener.ForwardedCertHandshakeTrue,
+		},
+		{
+			name: "header certificate",
+			ctx: func(ctx context.Context) context.Context {
+				return listener.WithForwardedClientCert(ctx, clientCert)
+			},
+			wantCert: true,
+		},
+		{
+			name: "no certificate",
+			ctx:  func(ctx context.Context) context.Context { return ctx },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "https://standby:8200/v1/aws/gateway", nil)
+			req.Header.Set(listener.ForwardedCertHandshakeHeader, "forged")
+			req.Header.Set("X-Forwarded-Client-Cert", "forged")
+			req.Header.Set("X-SSL-Client-Cert", "forged")
+			req = req.WithContext(tc.ctx(req.Context()))
+
+			proxy.Director(req)
+
+			assert.Empty(t, req.Header.Get("X-Forwarded-Client-Cert"))
+			assert.Equal(t, tc.wantMarker, req.Header.Get(listener.ForwardedCertHandshakeHeader))
+			if tc.wantCert {
+				assert.Contains(t, req.Header.Get("X-SSL-Client-Cert"), "BEGIN+CERTIFICATE")
+			} else {
+				assert.Empty(t, req.Header.Get("X-SSL-Client-Cert"))
+			}
+		})
+	}
+}
+
+// capturingTransport records the request the proxy sends, as it goes out.
+type capturingTransport struct{ sent *http.Request }
+
+func (c *capturingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.sent = r
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody, Request: r}, nil
+}
+
+// The active node takes the client's address from the rightmost
+// X-Forwarded-For entry, so what the standby sends must end with the address
+// this node resolved — exactly once — after whatever the client sent, or carry
+// no chain at all. Checked on the wire, through ServeHTTP: ReverseProxy
+// appends to the header itself after the Director runs.
+func TestGetProxy_ForwardedChainEndsWithTheClient(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	cert := &x509.Certificate{}
+	cert.Subject.CommonName = "fw-test"
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{{Leaf: cert}}}
+	f := newStandbyForwarder(log, func() *tls.Config { return tlsCfg }, 30)
+	proxy := f.getProxy("https://leader:8201", "https://leader:8200")
+	require.NotNil(t, proxy)
+	capture := &capturingTransport{}
+	proxy.Transport = capture
+
+	for _, tc := range []struct {
+		name, remoteAddr string
+		chain            []string
+		want             []string
+	}{
+		{"address with port", "203.0.113.7:5000", []string{"10.9.9.9"}, []string{"10.9.9.9, 203.0.113.7"}},
+		{"IPv6 address with port", "[2001:db8::7]:443", []string{"10.9.9.9"}, []string{"10.9.9.9, 2001:db8::7"}},
+		{"bare address", "203.0.113.7", []string{"10.9.9.9"}, []string{"10.9.9.9, 203.0.113.7"}},
+		{"bare IPv6 address", "2001:db8::7", []string{"10.9.9.9"}, []string{"10.9.9.9, 2001:db8::7"}},
+		{"client chain on two lines", "203.0.113.7:5000", []string{"10.9.9.9", "10.9.9.8"},
+			[]string{"10.9.9.9, 10.9.9.8, 203.0.113.7"}},
+		{"bare address, client chain on two lines", "203.0.113.7", []string{"10.9.9.9", "10.9.9.8"},
+			[]string{"10.9.9.9, 10.9.9.8, 203.0.113.7"}},
+		{"no address", "not-an-address", []string{"10.9.9.9"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "https://standby:8200/v1/aws/gateway", nil)
+			req.RemoteAddr = tc.remoteAddr
+			req.Header["X-Forwarded-For"] = tc.chain
+			req.Header.Set("X-Real-IP", "10.8.8.8")
+			proxy.ServeHTTP(httptest.NewRecorder(), req)
+
+			require.NotNil(t, capture.sent)
+			assert.Equal(t, tc.want, capture.sent.Header.Values("X-Forwarded-For"))
+			assert.Empty(t, capture.sent.Header.Values("X-Real-IP"), "the client's X-Real-IP must not reach the active node")
+		})
+	}
+}
+
+// A standby forwards the path the client sent, not the one it rewrote: the
+// active node rewrites it again, and a DPoP proof signs the client's.
+func TestGetProxy_ForwardsTheClientsPath(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	cert := &x509.Certificate{}
+	cert.Subject.CommonName = "fw-test"
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{{Leaf: cert}}}
+	f := newStandbyForwarder(log, func() *tls.Config { return tlsCfg }, 30)
+	proxy := f.getProxy("https://leader:8201", "https://leader:8200")
+	require.NotNil(t, proxy)
+	capture := &capturingTransport{}
+	proxy.Transport = capture
+
+	for _, tc := range []struct {
+		name, target, rewritten, wantPath, wantQuery string
+	}{
+		{"X-Warden-Provider prefix", "/github/user?per_page=5", "/v1/github/user", "/github/user", "per_page=5"},
+		{"role header rewrite", "/v1/aws/gateway/x", "/v1/aws/role/admin/gateway/x", "/v1/aws/gateway/x", ""},
+		{"encoded slash kept", "/v1/bedrock/gateway/model/a%2Fb/invoke", "/v1/bedrock/gateway/model/a/b/invoke", "/v1/bedrock/gateway/model/a%2Fb/invoke", ""},
+		{"absolute form", "https://standby:8200/v1/sys/mounts", "/v1/sys/mounts", "/v1/sys/mounts", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			req.URL.Path, req.URL.RawPath = tc.rewritten, ""
+			proxy.ServeHTTP(httptest.NewRecorder(), req)
+
+			require.NotNil(t, capture.sent)
+			assert.Equal(t, tc.wantPath, capture.sent.URL.EscapedPath())
+			assert.Equal(t, tc.wantQuery, capture.sent.URL.RawQuery)
+			assert.Equal(t, "leader:8201", capture.sent.URL.Host)
+		})
+	}
+}

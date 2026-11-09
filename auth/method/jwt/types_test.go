@@ -7,50 +7,6 @@ import (
 	"time"
 )
 
-func TestJWTRole_ParseTokenTTL(t *testing.T) {
-	t.Run("empty returns 1h", func(t *testing.T) {
-		r := &JWTRole{}
-		d, err := r.ParseTokenTTL()
-		require.NoError(t, err)
-		assert.Equal(t, time.Hour, d)
-	})
-
-	t.Run("valid string", func(t *testing.T) {
-		r := &JWTRole{TokenTTL: "30m"}
-		d, err := r.ParseTokenTTL()
-		require.NoError(t, err)
-		assert.Equal(t, 30*time.Minute, d)
-	})
-
-	t.Run("invalid", func(t *testing.T) {
-		r := &JWTRole{TokenTTL: "bad"}
-		_, err := r.ParseTokenTTL()
-		assert.Error(t, err)
-	})
-}
-
-func TestJWTRole_ParseMaxAge(t *testing.T) {
-	t.Run("empty returns 0", func(t *testing.T) {
-		r := &JWTRole{}
-		d, err := r.ParseMaxAge()
-		require.NoError(t, err)
-		assert.Equal(t, time.Duration(0), d)
-	})
-
-	t.Run("valid", func(t *testing.T) {
-		r := &JWTRole{MaxAge: "15m"}
-		d, err := r.ParseMaxAge()
-		require.NoError(t, err)
-		assert.Equal(t, 15*time.Minute, d)
-	})
-
-	t.Run("invalid", func(t *testing.T) {
-		r := &JWTRole{MaxAge: "bad"}
-		_, err := r.ParseMaxAge()
-		assert.Error(t, err)
-	})
-}
-
 // =============================================================================
 // mapToJWTAuthConfig Tests
 // =============================================================================

@@ -71,7 +71,7 @@ func TestDBAuthTokenCredType_ValidateConfig_RDS(t *testing.T) {
 		"region":      "us-east-1",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.NoError(t, err)
 }
 
@@ -84,9 +84,26 @@ func TestDBAuthTokenCredType_ValidateConfig_RDS_WrongSource(t *testing.T) {
 		"db_endpoint": "mydb.rds.amazonaws.com",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeGCP)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeGCP)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "aws source")
+}
+
+// The rds mint signs with the source's own credentials and never assumes
+// role_arn, so a spec naming it is refused where it is written, not stored to
+// sign as a principal other than the one it names.
+func TestDBAuthTokenCredType_ValidateConfig_RDS_RoleARNRefused(t *testing.T) {
+	ct := NewDBAuthTokenCredType()
+
+	config := map[string]string{
+		"mint_method": "rds_iam_token",
+		"db_user":     "app_readonly",
+		"db_endpoint": "mydb.abc123.us-east-1.rds.amazonaws.com",
+		"role_arn":    "arn:aws:iam::123456789012:role/db-access",
+	}
+
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
+	assert.ErrorContains(t, err, "role_arn is not supported for rds_iam_token")
 }
 
 func TestDBAuthTokenCredType_ValidateConfig_RDS_MissingEndpoint(t *testing.T) {
@@ -97,12 +114,15 @@ func TestDBAuthTokenCredType_ValidateConfig_RDS_MissingEndpoint(t *testing.T) {
 		"db_user":     "app_readonly",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "db_endpoint")
 }
 
-func TestDBAuthTokenCredType_ValidateConfig_CloudSQL(t *testing.T) {
+// No gcp mint path implements cloud_sql_iam_token, so a spec naming it is refused
+// where it is written. Accepting it here is what let one be stored and then fail on
+// every request with an error naming a key the operator set on purpose.
+func TestDBAuthTokenCredType_ValidateConfig_CloudSQL_Unimplemented(t *testing.T) {
 	ct := NewDBAuthTokenCredType()
 
 	config := map[string]string{
@@ -111,8 +131,9 @@ func TestDBAuthTokenCredType_ValidateConfig_CloudSQL(t *testing.T) {
 		"target_service_account": "db-reader@myproject.iam.gserviceaccount.com",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeGCP)
-	assert.NoError(t, err)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeGCP)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not implemented")
 }
 
 func TestDBAuthTokenCredType_ValidateConfig_CloudSQL_WrongSource(t *testing.T) {
@@ -124,12 +145,14 @@ func TestDBAuthTokenCredType_ValidateConfig_CloudSQL_WrongSource(t *testing.T) {
 		"target_service_account": "sa@proj.iam.gserviceaccount.com",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "gcp source")
 }
 
-func TestDBAuthTokenCredType_ValidateConfig_Azure(t *testing.T) {
+// No azure mint path implements azure_db_iam_token, so a spec naming it is refused
+// where it is written rather than accepted and then failing every mint.
+func TestDBAuthTokenCredType_ValidateConfig_Azure_NotImplemented(t *testing.T) {
 	ct := NewDBAuthTokenCredType()
 
 	config := map[string]string{
@@ -138,21 +161,13 @@ func TestDBAuthTokenCredType_ValidateConfig_Azure(t *testing.T) {
 		"db_host":     "mydb.postgres.database.azure.com",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAzure)
-	assert.NoError(t, err)
-}
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAzure)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azure_db_iam_token is not implemented")
 
-func TestDBAuthTokenCredType_ValidateConfig_Azure_MissingHost(t *testing.T) {
-	ct := NewDBAuthTokenCredType()
-
-	config := map[string]string{
-		"mint_method": "azure_db_iam_token",
-		"db_user":     "app-identity",
-	}
-
-	err := ct.ValidateConfig(config, credential.SourceTypeAzure)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "db_host")
+	err = ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azure source")
 }
 
 func TestDBAuthTokenCredType_ValidateConfig_Redshift_Provisioned(t *testing.T) {
@@ -165,7 +180,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_Provisioned(t *testing.T) {
 		"region":             "us-east-1",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.NoError(t, err)
 }
 
@@ -179,7 +194,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_Serverless(t *testing.T) {
 		"region":         "us-east-1",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.NoError(t, err)
 }
 
@@ -193,7 +208,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_WithDuration(t *testing.T) 
 		"duration_seconds":   "3600",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.NoError(t, err)
 }
 
@@ -206,7 +221,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_WrongSource(t *testing.T) {
 		"cluster_identifier": "x",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeGCP)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeGCP)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "aws source")
 }
@@ -219,7 +234,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_MissingEndpoint(t *testing.
 		"cluster_identifier": "my-cluster",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "db_endpoint")
 }
@@ -232,7 +247,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_NoClusterOrWorkgroup(t *tes
 		"db_endpoint": "x",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cluster_identifier")
 	assert.Contains(t, err.Error(), "workgroup_name")
@@ -248,7 +263,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_BothClusterAndWorkgroup(t *
 		"workgroup_name":     "my-wg",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "exactly one")
 }
@@ -264,7 +279,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_DurationOutOfRange(t *testi
 				"cluster_identifier": "my-cluster",
 				"duration_seconds":   d,
 			}
-			err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+			err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), "duration_seconds")
 		})
@@ -281,7 +296,7 @@ func TestDBAuthTokenCredType_ValidateConfig_Redshift_InvalidDuration(t *testing.
 		"duration_seconds":   "not-a-number",
 	}
 
-	err := ct.ValidateConfig(config, credential.SourceTypeAWS)
+	err := ct.ValidateConfig(credential.NewConfig(config), credential.SourceTypeAWS)
 	assert.Error(t, err)
 }
 

@@ -79,7 +79,7 @@ func RegisterBuiltinTypes(registry *credential.TypeRegistry) error {
 		return err
 	}
 
-	// Register generic key/value type (e.g. Vault KV v2 read via kv2_read)
+	// Register generic key/value type (an arbitrary stored payload, vended verbatim)
 	if err := registry.Register(NewKeyValueCredType()); err != nil {
 		return err
 	}

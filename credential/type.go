@@ -63,7 +63,7 @@ type Type interface {
 	// - "local": validates that config contains the credential values directly
 	// - "vault": validates that config contains Vault path/mount configuration
 	// Returns an error if required config values are missing or invalid
-	ValidateConfig(config map[string]string, sourceType string) error
+	ValidateConfig(config Config, sourceType string) error
 
 	// Parse converts raw credential data from source into structured Credential
 	// rawData contains the source-specific credential fields
@@ -86,6 +86,17 @@ type Type interface {
 	// SensitiveConfigFields returns the list of spec config keys that should be
 	// masked in output (e.g., "client_secret", "secret_id").
 	SensitiveConfigFields() []string
+
+	// StoredSecrets returns the long-lived secrets this spec config makes Warden
+	// hold: the secret config keys present with a non-empty value, or a
+	// description of one the server will seal (such as the token a connect-gated
+	// flow stores). Nil means the spec holds no secret of its own. Locators,
+	// identifiers and adjunct fields are not secrets.
+	//
+	// It judges the spec config alone. Whether the spec's source holds a secret,
+	// and the rule that a local-source spec is itself the credential, are decided
+	// by the caller.
+	StoredSecrets(config Config) []string
 
 	// FieldSchemas returns metadata about the credential's data fields
 	// Used for masking sensitive fields in responses
@@ -111,11 +122,11 @@ type PrimaryFieldProvider interface {
 // rotation_period for a connect-gated spec and skips its test-mint until connected.
 type ConnectGated interface {
 	// RequiresConnect reports whether this spec config uses a connect-gated flow.
-	RequiresConnect(config map[string]string) bool
+	RequiresConnect(config Config) bool
 
 	// IsConnected reports whether the one-time connect has completed for this spec
 	// config (e.g. a refresh token or static access token has been sealed).
-	IsConnected(config map[string]string) bool
+	IsConnected(config Config) bool
 }
 
 // ConfigSensitivity is an optional interface a credential Type implements when
@@ -131,7 +142,7 @@ type ConfigSensitivity interface {
 	// SensitiveConfigFieldsFor returns the spec-config keys to mask for this
 	// config. It supersedes SensitiveConfigFields rather than adding to it, so an
 	// implementation must include everything that list would have returned.
-	SensitiveConfigFieldsFor(config map[string]string) []string
+	SensitiveConfigFieldsFor(config Config) []string
 }
 
 // SystemManagedConfig is an optional interface a credential Type implements when

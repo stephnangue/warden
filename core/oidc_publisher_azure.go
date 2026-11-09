@@ -17,6 +17,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+
+	"github.com/stephnangue/warden/credential/drivers"
 )
 
 // azureUploadTimeout bounds a single blob upload, matching the http_put publisher's
@@ -367,7 +369,8 @@ func azureAcquireToken(ctx context.Context, tenantID, clientID, clientSecret, sc
 	if tok.AccessToken == "" {
 		return "", time.Time{}, fmt.Errorf("token response missing access_token")
 	}
-	expiresOn := time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
+	// A missing expires_in reads as already expired, so the next publish fetches again.
+	expiresOn := drivers.ExpiryFromExpiresIn(tok.ExpiresIn, 0, drivers.MaxTokenLifetime)
 	return tok.AccessToken, expiresOn, nil
 }
 

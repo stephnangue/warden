@@ -3,9 +3,9 @@ title: "Namespaces"
 ---
 
 A **namespace** is Warden's isolation boundary — its unit of multi-tenancy.
-Every [provider](/concepts/providers/) mount, [auth method](/concepts/authentication/#auth-methods),
-[role](/concepts/roles/), [policy](/concepts/policies/), [credential](/concepts/credentials/) source and
-spec, and [token](/concepts/tokens/) belongs to exactly one namespace, and the boundary
+Every [provider](/concepts/providers/) mount, [auth method](/auth-methods/),
+[role](/identity/roles/), [policy](/identity/policies/), [credential](/concepts/credentials/) source and
+spec, and [token](/identity/tokens/) belongs to exactly one namespace, and the boundary
 between namespaces is hard: configuration in one is invisible to another, and a
 policy in one cannot grant access in, or even name, another.
 
@@ -25,7 +25,8 @@ deleted, and is where server-wide operations live (see
 
 Namespaces are **hierarchical**. A namespace has a path like `team-a/` or
 `team-a/service-b/`, and a child can only be created beneath a parent that
-already exists. Paths are canonicalized to always end in `/`.
+already exists. Paths are canonicalized to always end in `/`. A path with an
+empty, `.` or `..` segment (`team-a//b/`, `team-a/../b/`) is refused with 400.
 
 ```
 ""                       ← root
@@ -41,6 +42,10 @@ There is no fixed depth limit. Each namespace is identified three ways:
 - **UUID** — the internal identifier used to prefix the namespace's storage,
   giving each namespace a fully separate slice of the backend.
 
+A namespace's own record (its path, metadata and settings) is kept with its
+parent, not inside the namespace. That is why only the parent writes it: see
+[Managing namespaces](#managing-namespaces).
+
 ## What Is Isolated
 
 Everything operational is scoped to a namespace and stored under that namespace's
@@ -48,6 +53,7 @@ own storage prefix:
 
 - provider mounts and auth-method mounts,
 - roles and policies,
+- the identity store: entities and groups,
 - credential sources and specs,
 - tokens, and their rotation and expiration state.
 
@@ -57,11 +63,22 @@ and is visible only there. Deleting a namespace tears all of it down together
 
 ### The one cross-namespace rule
 
-The boundary is one-directional along the hierarchy: a [token](/concepts/tokens/) issued
+The boundary is one-directional along the hierarchy: a [token](/identity/tokens/) issued
 in a **parent** namespace is valid in that namespace **and all of its
 descendants**, but never in a sibling or an ancestor. This is the *only* way
 identity crosses a namespace line — a child's token cannot reach up to its
 parent, and unrelated namespaces are completely sealed from one another.
+
+### People are administered centrally
+
+The same rule applies to a person's [ticket](/identity/human-operators/). A
+ticket issued by an `oidc` mount in a parent acts in that namespace and every
+namespace below it, and its role is always granted by the **parent's** groups
+and roles, whichever namespace the request goes to. Enable one `oidc` mount in
+root and write the groups there: people sign in once and are administered
+from one place. A child's own groups never grant a role to a parent's ticket.
+A tenant that runs its own sign-in enables an `oidc` mount in its namespace
+instead. See [Human operators](/identity/human-operators/#namespaces).
 
 ## Addressing a Namespace
 
@@ -94,15 +111,35 @@ rather than on a tenant's resources.
 The principle: a namespace governs its own tenants' mounts and identities; it
 does not touch the server everyone shares.
 
-## Transparent Auth per Namespace
+## Implicit Auth per Namespace
 
 A namespace carries a `custom_metadata` map. One key is meaningful to Warden:
 **`auto_auth_path`**, which names the auth mount used for
-[transparent authentication](/concepts/authentication/#transparent-authentication)
+[implicit authentication](/identity/authentication/#implicit-authentication)
 on *operational* requests in that namespace — the namespace-level counterpart to
 a [provider's](/concepts/providers/) own `auto_auth_path` for gateway requests. Set it so
 that callers in the namespace can authenticate implicitly from a JWT or
-certificate without an explicit login.
+certificate, presenting no Warden token.
+
+## Built-in Roles per Namespace
+
+The [built-in operator roles](/identity/built-in-roles/) (`warden-admin`,
+`warden-provider-admin`, `warden-security-admin`, `warden-viewer`) exist in
+a namespace only when it has them:
+
+- **Root always has them.**
+- **Any other namespace has them when its parent sets `enable_builtin_roles`**
+  on the namespace's record. A namespace cannot turn them on for itself,
+  since only its parent writes its record.
+- **Not inherited.** `acme/dev/` does not have them because `acme/` does.
+  Whoever writes `acme/dev/`'s record decides for it.
+- **Turning it off is refused** while a group of the namespace still grants
+  one of them. The refusal names each group, its type and the role.
+
+```bash
+warden namespace create acme -enable-builtin-roles
+warden namespace update acme -enable-builtin-roles=false
+```
 
 ## Managing Namespaces
 
@@ -113,14 +150,19 @@ path is positional; `custom_metadata` is set with repeatable `-metadata` flags:
 warden namespace create team-a
 warden namespace create team-a/service-b -metadata=env=prod -metadata=owner=platform
 
-warden namespace read   team-a            # id, uuid, path, custom_metadata, locked, tainted
+warden namespace read   team-a            # id, uuid, path, custom_metadata, enable_builtin_roles, locked, tainted
 warden namespace list                     # -recursive / -R to descend; -include-parent
 warden namespace update team-a -metadata=env=staging
 warden namespace delete team-a            # prompts; -f to skip
 ```
 
-Namespaces live under `sys/namespaces/<path>`. A few lifecycle rules:
+Namespaces live under `sys/namespaces/<path>`. The path is relative to the
+namespace the request runs in. A few lifecycle rules:
 
+- **The parent writes the record.** A namespace is created and updated from
+  its parent or an ancestor. A write from inside a namespace to itself is
+  refused with 400 (`refusing to modify a namespace from inside it; write it
+  from its parent`), so a tenant cannot change its own metadata or settings.
 - **Deletion cascades.** Removing a namespace revokes its tokens and clears its
   mounts, policies, and credential configuration in one operation; large
   deletions run asynchronously.
@@ -133,8 +175,10 @@ mid-creation or mid-deletion and should be treated as transient) and `locked`.
 
 ## See Also
 
-- [Authentication](/concepts/authentication/) — identity is established within a namespace.
-- [Tokens](/concepts/tokens/) — the parent→descendant validity rule in detail.
-- [Policies](/concepts/policies/) — per-namespace, isolated authorization.
+- [Authentication](/identity/authentication/) — identity is established within a namespace.
+- [Tokens](/identity/tokens/) — the parent→descendant validity rule in detail.
+- [Built-in roles](/identity/built-in-roles/) — what `enable_builtin_roles` turns on.
+- [Human operators](/identity/human-operators/) — central and tenant sign-in.
+- [Policies](/identity/policies/) — per-namespace, isolated authorization.
 - [Providers](/concepts/providers/) — namespace addressing on gateway requests.
 - [Credentials](/concepts/credentials/) — sources and specs are namespace-scoped.

@@ -9,22 +9,25 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"sync"
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/internal/cachesize"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
 
+// The three token types: a persisted bearer token carrying its own policies,
+// the cache-only token of a caller admitted by a transparent auth method, and
+// the self-contained session token an explicit login hands out.
 const (
-	TypeWardenToken    = "warden_token"
-	TypeJWTRole        = "jwt_role"
-	TypeCertRole       = "cert_role"
-	TypeKubernetesRole = "kubernetes_role"
-	TypeSpiffeRole     = "spiffe_role"
+	TypeServiceToken  = logical.TokenTypeService
+	TypeIdentityToken = logical.TokenTypeIdentity
+	TypeTicketToken   = logical.TokenTypeTicket
 )
 
 // Storage path constants for token store organization
@@ -71,10 +74,13 @@ const (
 
 // TokenStoreConfig holds configuration for the token store
 type TokenStoreConfig struct {
-	// CacheMaxCost is the maximum cost of cache (in bytes, roughly)
+	// CacheMaxCost is the memory budget of the token cache, in bytes: each
+	// entry is charged its approximate size (entryCost). The accessor index
+	// holds as many entries as the smallest entries fill it with.
 	CacheMaxCost int64
 
-	// CacheNumCounters is the number of keys to track frequency
+	// CacheNumCounters overrides the number of keys each cache tracks to
+	// decide what to evict; 0 derives it from the entries the cache can hold.
 	CacheNumCounters int64
 
 	// EnableMetrics enables collection of operational metrics
@@ -86,17 +92,17 @@ type TokenStoreConfig struct {
 	// "required" - reject tokens without IP binding or requests without client IP
 	IPBindingPolicy IPBindingPolicy
 
-	// CacheMinRetention is the minimum time to retain tokens in cache
-	// regardless of cost-based eviction. This prevents high token volume
-	// from evicting valid tokens prematurely. Defaults to 5 minutes.
+	// CacheMinRetention is the shortest cache TTL a token is given: a token
+	// closer than this to its expiry stays cached this long (its expiry is
+	// still checked on every lookup). It does not shield a token from being
+	// evicted from a full cache. Defaults to 5 minutes.
 	CacheMinRetention time.Duration
 }
 
 // DefaultTokenStoreConfig returns a production-ready default configuration
 func DefaultTokenStoreConfig() *TokenStoreConfig {
 	return &TokenStoreConfig{
-		CacheMaxCost:      100 << 20, // 100 MB
-		CacheNumCounters:  1e7,       // 10 million
+		CacheMaxCost:      100 << 20, // 100 MiB
 		EnableMetrics:     true,
 		IPBindingPolicy:   IPBindingOptional,
 		CacheMinRetention: 5 * time.Minute,
@@ -213,23 +219,24 @@ func NewTokenStore(core *Core, config *TokenStoreConfig) (*TokenStore, error) {
 		rootTokenManager: NewRootTokenManager(),
 	}
 
-	// Initialize primary cache (by ID)
-	cacheByID, err := ristretto.NewCache(&ristretto.Config[string, *TokenEntry]{
-		NumCounters: config.CacheNumCounters,
-		MaxCost:     config.CacheMaxCost,
-		BufferItems: 64,
-	})
+	// The primary cache (by ID) is bounded in bytes, each entry charged its
+	// size. The accessor index holds as many entries as the primary cache can,
+	// each charged 1, so it never runs out of room first; the two still evict
+	// independently once both are full.
+	byIDConfig := cachesize.Bytes[string, *TokenEntry](config.CacheMaxCost, tokenEntryStructBytes)
+	byAccessorConfig := cachesize.Entries[string, string](cachesize.MaxEntries(config.CacheMaxCost, tokenEntryStructBytes))
+	if config.CacheNumCounters > 0 {
+		byIDConfig.NumCounters = config.CacheNumCounters
+		byAccessorConfig.NumCounters = config.CacheNumCounters
+	}
+
+	cacheByID, err := ristretto.NewCache(byIDConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize ID cache: %w", err)
 	}
 	store.byID = cacheByID
 
-	// Initialize accessor cache (Tier 2)
-	cacheByAccessor, err := ristretto.NewCache(&ristretto.Config[string, string]{
-		NumCounters: config.CacheNumCounters / 10, // Smaller for accessor mappings
-		MaxCost:     config.CacheMaxCost / 10,
-		BufferItems: 64,
-	})
+	cacheByAccessor, err := ristretto.NewCache(byAccessorConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize accessor cache: %w", err)
 	}
@@ -307,11 +314,9 @@ func (s *TokenStore) UnloadFromCache() {
 // registerBuiltinTypes registers the built-in token types
 func (s *TokenStore) registerBuiltinTypes() error {
 	builtinTypes := []TokenType{
-		&WardenTokenType{},
-		&JWTRoleTokenType{},
-		&CertRoleTokenType{},
-		&KubernetesRoleTokenType{},
-		&SpiffeRoleTokenType{},
+		&ServiceTokenType{},
+		identityTokenType,
+		&TicketTokenType{core: s.core},
 	}
 
 	for _, tokenType := range builtinTypes {
@@ -328,14 +333,6 @@ func (s *TokenStore) registerBuiltinTypes() error {
 // callers don't need direct registry access.
 func (s *TokenStore) IsTransparentType(name string) bool {
 	return s.registry.IsTransparent(name)
-}
-
-// GetTransparentTokenTypeForAuthMethod returns the TransparentTokenType
-// registered to serve mounts of the given auth method type (e.g. "jwt",
-// "cert", "kubernetes"). Returns nil if no transparent type serves that
-// mount type. Thin wrapper over the registry.
-func (s *TokenStore) GetTransparentTokenTypeForAuthMethod(mountType string) TransparentTokenType {
-	return s.registry.GetTransparentTokenTypeForAuthMethod(mountType)
 }
 
 // GenerateToken creates a new namespace-aware token
@@ -373,7 +370,10 @@ func (s *TokenStore) GenerateToken(ctx context.Context, tokenTypeName string, au
 		s.metrics.IncrementTokensGenerated()
 	}
 
-	return entry, nil
+	// generateWithCollisionDetection hands back the entry the cache holds,
+	// whether it stored a new one or found one already there; the caller gets a
+	// copy, as from every lookup, so nothing it does reaches the cache.
+	return entry.Copy(), nil
 }
 
 // generateWithCollisionDetection generates a token with retry logic for collisions
@@ -393,29 +393,33 @@ func (s *TokenStore) generateWithCollisionDetection(
 
 	for i := 0; i < maxRetries; i++ {
 		// Create token entry with namespace fields
+		// No token is issued with a role or a credential spec: an admission
+		// token is granted both per request, on that request's copy.
 		entry := &TokenEntry{
-			Type:           meta.Name,
-			NamespaceID:    ns.ID,
-			NamespacePath:  ns.Path,
-			CreatedAt:      time.Now(),
-			PrincipalID:    authData.PrincipalID,
-			RoleName:       authData.RoleName,
-			MountAccessor:  authData.MountAccessor,
-			ExpireAt:       authData.ExpireAt,
-			Data:           make(map[string]string),
-			Policies:       authData.Policies,
-			CredentialSpec: authData.CredentialSpec,
-			CreatedByIP:    authData.ClientIP,
-			Actors:         authData.Actors,
-			Metadata:       authData.Metadata,
+			Type:          meta.Name,
+			NamespaceID:   ns.ID,
+			NamespacePath: ns.Path,
+			CreatedAt:     time.Now(),
+			PrincipalID:   authData.PrincipalID,
+			MountAccessor: authData.MountAccessor,
+			ExpireAt:      authData.ExpireAt,
+			Data:          make(map[string]string),
+			Policies:      authData.Policies,
+			CreatedByIP:   authData.ClientIP,
+			Actors:        authData.Actors,
+			Metadata:      authData.Metadata,
+			Admission:     authData.Admission,
 		}
 
-		// Generate accessor (Tier 2)
-		accessor, err := generateAccessor()
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate accessor: %w", err)
+		// Generate accessor (Tier 2). A stateless token has none: nothing could
+		// look it up by one, since its entry is rebuilt from the value alone.
+		if !meta.Stateless {
+			accessor, err := generateAccessor()
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate accessor: %w", err)
+			}
+			entry.Accessor = accessor
 		}
-		entry.Accessor = accessor
 
 		// Let the token type generate its values
 		clientData, err := tokenType.Generate(ctx, authData, entry)
@@ -430,9 +434,14 @@ func (s *TokenStore) generateWithCollisionDetection(
 		// Check for existing token with same ID
 		if existingEntry, found := s.byID.Get(entry.ID); found {
 			// Transparent token types use a deterministic ID (hash of credential
-			// + mountAccessor + role). Finding an existing token means this
-			// credential+mount+role already has a valid cache entry — return it
+			// + mountAccessor). Finding an existing token means this
+			// credential+mount already has a valid cache entry — return it
 			// instead of treating it as a collision.
+			//
+			// This returns the shared cached entry itself, whose Admission may
+			// differ from the one in authData (a concurrent login won).
+			// GenerateToken copies it before handing it out; a caller of this
+			// function must not modify it.
 			if s.registry.IsTransparent(meta.Name) {
 				return existingEntry, nil
 			}
@@ -453,13 +462,13 @@ func (s *TokenStore) generateWithCollisionDetection(
 
 		// Tier 1: Store in primary cache (byID) with TTL
 		// TTL is computed as max(remaining token lifetime, minimum retention)
-		// This prevents high token volume from evicting valid tokens prematurely
-		cost := int64(200)
 		cacheTTL := s.computeCacheTTL(entry)
-		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
+		s.byID.SetWithTTL(entry.ID, entry, entryCost(entry), cacheTTL)
 
 		// Tier 2: Store accessor mapping with same TTL
-		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
+		if entry.Accessor != "" {
+			s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 1, cacheTTL)
+		}
 
 		// Wait for all cache writes to complete
 		s.byID.Wait()
@@ -474,9 +483,10 @@ func (s *TokenStore) generateWithCollisionDetection(
 		}
 
 		// Register token with expiration manager for timer-based TTL enforcement.
-		// Transparent token types are cache-only, so don't persist their expiration entries.
+		// Transparent and stateless token types are cache-only, so don't persist
+		// their expiration entries.
 		if expMgr := s.core.GetExpirationManager(); expMgr != nil && ttl > 0 {
-			persist := !s.registry.IsTransparent(entry.Type)
+			persist := !s.registry.isCacheOnly(entry.Type)
 			if err := expMgr.RegisterToken(ctx, entry.ID, ttl, persist); err != nil {
 				s.logger.Warn("failed to register token with expiration manager",
 					logger.String("token_id", entry.ID),
@@ -498,19 +508,28 @@ func (s *TokenStore) generateWithCollisionDetection(
 	return nil, errors.New("failed to generate unique token")
 }
 
-// ResolveToken validates and resolves a token with namespace checking
-func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (string, string, error) {
+// ResolveToken validates a token with namespace checking and returns its
+// principal.
+func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (string, error) {
 	s.mu.RLock()
 	if s.closed {
 		s.mu.RUnlock()
-		return "", "", ErrStoreClosed
+		return "", ErrStoreClosed
 	}
 	s.mu.RUnlock()
+
+	if isTicketValue(tokenValue) {
+		te, err := s.core.lookupTicket(ctx, tokenValue, nil)
+		if err != nil {
+			return "", err
+		}
+		return te.PrincipalID, nil
+	}
 
 	// Extract namespace from context
 	ns, err := namespace.FromContext(ctx)
 	if err != nil || ns == nil {
-		return "", "", errors.New("namespace not found in context")
+		return "", errors.New("namespace not found in context")
 	}
 
 	// Detect token type
@@ -518,8 +537,8 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 	var tokenID string
 	if err != nil {
 		// Fallback for dev-mode custom tokens without standard prefix.
-		// Compute what the ID would be if this were a Warden token.
-		wt := &WardenTokenType{}
+		// Compute what the ID would be if this were a service token.
+		wt := &ServiceTokenType{}
 		candidateID := wt.ComputeID(tokenValue)
 		if _, found := s.byID.Get(candidateID); found {
 			tokenType = wt
@@ -529,7 +548,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 			tokenID = candidateID
 			_ = s.restoreTokenToCache(ctx, loaded, "ResolveToken-devFallback")
 		} else {
-			return "", "", fmt.Errorf("failed to detect token type: %w", err)
+			return "", fmt.Errorf("failed to detect token type: %w", err)
 		}
 	} else {
 		tokenID = tokenType.ComputeID(tokenValue)
@@ -549,18 +568,18 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		loadedEntry, err := s.loadToken(tokenID)
 		if err != nil {
 			if err == ErrTokenNotFound {
-				return "", "", ErrTokenNotFound
+				return "", ErrTokenNotFound
 			}
 			s.logger.Warn("failed to load token from storage on cache miss",
 				logger.String("token_id", tokenID),
 				logger.String("error", err.Error()))
-			return "", "", ErrTokenNotFound
+			return "", ErrTokenNotFound
 		}
 
 		// Restore to cache with remaining TTL
 		entry = loadedEntry
 		if err := s.restoreTokenToCache(ctx, entry, "ResolveToken"); err != nil {
-			return "", "", err
+			return "", err
 		}
 	} else {
 		if s.config.EnableMetrics {
@@ -576,14 +595,11 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		s.logger.Warn("token namespace not found",
 			logger.String("token_id", tokenID),
 			logger.String("token_namespace_id", entry.NamespaceID))
-		return "", "", ErrTokenNamespaceMismatch
+		return "", ErrTokenNamespaceMismatch
 	}
 
-	// Check if token's namespace is a parent of (or same as) the request namespace
-	// This allows hierarchical access: parent tokens work in all child namespaces
-	// ns.HasParent(tokenNs) returns true if tokenNs is a parent of ns
-	isValidNamespace := ns.UUID == tokenNs.UUID || ns.HasParent(tokenNs)
-	if !isValidNamespace {
+	// A token acts in its own namespace and every descendant.
+	if !namespace.Within(ns, tokenNs) {
 		if s.config.EnableMetrics {
 			s.metrics.IncrementNamespaceMismatches()
 		}
@@ -591,7 +607,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 			logger.String("token_id", tokenID),
 			logger.String("token_namespace", tokenNs.Path),
 			logger.String("request_namespace", ns.Path))
-		return "", "", ErrTokenNamespaceMismatch
+		return "", ErrTokenNamespaceMismatch
 	}
 
 	// Validate token value matches (defense against hash collisions)
@@ -603,7 +619,7 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		s.logger.Error("token value mismatch - possible hash collision",
 			logger.String("token_id", tokenID),
 			logger.String("lookup_key", lookupKey))
-		return "", "", ErrTokenNotFound
+		return "", ErrTokenNotFound
 	}
 
 	// Validate expiration
@@ -611,19 +627,19 @@ func (s *TokenStore) ResolveToken(ctx context.Context, tokenValue string) (strin
 		if s.config.EnableMetrics {
 			s.metrics.IncrementTokensExpired()
 		}
-		return "", "", ErrTokenExpired
+		return "", ErrTokenExpired
 	}
 
 	// Validate same-origin policy (IP binding)
 	if err := s.validateIPBinding(ctx, tokenID, entry); err != nil {
-		return "", "", err
+		return "", err
 	}
 
 	if s.config.EnableMetrics {
 		s.metrics.IncrementTokensResolved()
 	}
 
-	return entry.PrincipalID, entry.RoleName, nil
+	return entry.PrincipalID, nil
 }
 
 // LookupByAccessor looks up a token by its accessor
@@ -664,8 +680,7 @@ func (s *TokenStore) LookupByAccessor(ctx context.Context, accessor string) (*To
 		}
 
 		// Return a copy to prevent external modification
-		entryCopy := *entry
-		return &entryCopy, nil
+		return entry.Copy(), nil
 	}
 
 	// Retrieve full entry from ID cache
@@ -698,8 +713,7 @@ func (s *TokenStore) LookupByAccessor(ctx context.Context, accessor string) (*To
 	}
 
 	// Return a copy to prevent external modification
-	entryCopy := *entry
-	return &entryCopy, nil
+	return entry.Copy(), nil
 }
 
 // RevokeByAccessor revokes a token by its accessor
@@ -876,10 +890,9 @@ func (s *TokenStore) GenerateRootToken() (string, error) {
 			logger.String("old_token_id", oldTokenID))
 	}
 
-	// Get Warden token type
-	tokenType, err := s.registry.GetByName("warden_token")
+	tokenType, err := s.registry.GetByName(TypeServiceToken)
 	if err != nil {
-		return "", fmt.Errorf("warden token type not found: %w", err)
+		return "", fmt.Errorf("service token type not found: %w", err)
 	}
 
 	// Create AuthData with infinite TTL (for root namespace)
@@ -987,33 +1000,32 @@ func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
 
 	// Create new entry with custom token value (copy all fields from old entry)
 	newEntry := &TokenEntry{
-		Type:           oldEntry.Type,
-		NamespaceID:    oldEntry.NamespaceID,
-		NamespacePath:  oldEntry.NamespacePath,
-		CreatedAt:      oldEntry.CreatedAt,
-		PrincipalID:    oldEntry.PrincipalID,
-		RoleName:       oldEntry.RoleName,
-		MountAccessor:  oldEntry.MountAccessor,
-		ExpireAt:       oldEntry.ExpireAt,
-		Accessor:       oldEntry.Accessor,
-		Policies:       oldEntry.Policies,
-		CredentialSpec: oldEntry.CredentialSpec,
-		CreatedByIP:    oldEntry.CreatedByIP,
-		Data:           map[string]string{"token": customToken},
-		Actors:         oldEntry.Actors,
-		Metadata:       oldEntry.Metadata,
+		Type:          oldEntry.Type,
+		NamespaceID:   oldEntry.NamespaceID,
+		NamespacePath: oldEntry.NamespacePath,
+		CreatedAt:     oldEntry.CreatedAt,
+		PrincipalID:   oldEntry.PrincipalID,
+		MountAccessor: oldEntry.MountAccessor,
+		ExpireAt:      oldEntry.ExpireAt,
+		Accessor:      oldEntry.Accessor,
+		Policies:      oldEntry.Policies,
+		CreatedByIP:   oldEntry.CreatedByIP,
+		Data:          map[string]string{"token": customToken},
+		Actors:        oldEntry.Actors,
+		Metadata:      oldEntry.Metadata,
+		Admission:     oldEntry.Admission,
 	}
 
 	// Compute new ID from custom token value
-	wardenType := &WardenTokenType{}
-	newEntry.ID = wardenType.ComputeID(customToken)
+	serviceType := &ServiceTokenType{}
+	newEntry.ID = serviceType.ComputeID(customToken)
 
 	// Remove old entry from cache
 	s.byID.Del(oldTokenID)
 
 	// Store new entry in cache (no TTL for root token)
-	s.byID.SetWithTTL(newEntry.ID, newEntry, 200, 0)
-	s.byAccessor.SetWithTTL(newEntry.Accessor, newEntry.ID, 10, 0)
+	s.byID.SetWithTTL(newEntry.ID, newEntry, entryCost(newEntry), 0)
+	s.byAccessor.SetWithTTL(newEntry.Accessor, newEntry.ID, 1, 0)
 	s.byID.Wait()
 	s.byAccessor.Wait()
 
@@ -1040,8 +1052,9 @@ func (s *TokenStore) ReplaceRootTokenValue(customToken string) error {
 // Uses a transaction to ensure atomicity: both token and accessor are stored together
 // or neither is stored if any operation fails
 func (s *TokenStore) persistToken(entry *TokenEntry) error {
-	// Skip persistence for transparent token types — they are cache-only.
-	if s.registry.IsTransparent(entry.Type) {
+	// Skip persistence for transparent and stateless token types — they are
+	// cache-only. A ticket entry holds its raw value, so it must never be stored.
+	if s.registry.isCacheOnly(entry.Type) {
 		return nil
 	}
 
@@ -1147,7 +1160,7 @@ func (s *TokenStore) loadToken(tokenID string) (*TokenEntry, error) {
 // restoreTokenToCache restores a loaded token to both cache tiers with appropriate TTL
 // Returns the entry if successfully restored, or an error if the token is expired
 func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry, caller string) error {
-	cost := int64(200)
+	cost := entryCost(entry)
 
 	// Check if token is already expired
 	if !entry.ExpireAt.IsZero() {
@@ -1163,12 +1176,12 @@ func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry,
 		// Store in cache with TTL computed from remaining lifetime and minimum retention
 		cacheTTL := s.computeCacheTTL(entry)
 		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
-		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
+		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 1, cacheTTL)
 		s.byID.Wait()
 		s.byAccessor.Wait()
 
 		// Register with expiration manager for timer-based TTL enforcement
-		// Tokens restored from storage are always persisted (JWT role tokens are not stored)
+		// Tokens restored from storage are always persisted (identity tokens are not stored)
 		if expMgr := s.core.GetExpirationManager(); expMgr != nil {
 			if err := expMgr.RegisterToken(ctx, entry.ID, ttl, true); err != nil {
 				s.logger.Warn("failed to register restored token with expiration manager",
@@ -1186,12 +1199,12 @@ func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry,
 		// No expiration (non-expiring token) - use minimum retention for cache TTL
 		cacheTTL := s.computeCacheTTL(entry)
 		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
-		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
+		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 1, cacheTTL)
 		s.byID.Wait()
 		s.byAccessor.Wait()
 
 		// Register non-expiring token with expiration manager (TTL=0)
-		// Tokens restored from storage are always persisted (JWT role tokens are not stored)
+		// Tokens restored from storage are always persisted (identity tokens are not stored)
 		if expMgr := s.core.GetExpirationManager(); expMgr != nil {
 			if err := expMgr.RegisterToken(ctx, entry.ID, 0, true); err != nil {
 				s.logger.Warn("failed to register restored non-expiring token with expiration manager",
@@ -1207,12 +1220,26 @@ func (s *TokenStore) restoreTokenToCache(ctx context.Context, entry *TokenEntry,
 	}
 }
 
+// isRootTokenEntry reports whether entry is the root token: a persisted
+// (non-transparent) token that no auth mount issued, bound to the root
+// principal. GenerateRootToken binds the root to the root namespace UUID;
+// the earliest releases bound it to the literal "root". Recognition does
+// not depend on the token type's name, and a token any auth mount issued
+// is never the root, whatever principal its identity provider mapped.
+func (s *TokenStore) isRootTokenEntry(entry *TokenEntry) bool {
+	if entry == nil || entry.MountAccessor != "" || s.registry.isCacheOnly(entry.Type) {
+		return false
+	}
+	return entry.PrincipalID == namespace.RootNamespaceUUID || entry.PrincipalID == "root"
+}
+
 // loadAllTokensFromStorage loads all tokens from persistent storage into cache
 // This is called during token store initialization to restore tokens from storage
 func (s *TokenStore) loadAllTokensFromStorage(ctx context.Context) (int, error) {
 	loadedCount := 0
 	expiredCount := 0
 	failedCount := 0
+	var rootID string // ID of the root token registered by this load, if any
 
 	// List all token IDs from storage
 	tokenKeys, err := s.storage.List(ctx, tokenIDPrefix)
@@ -1249,14 +1276,21 @@ func (s *TokenStore) loadAllTokensFromStorage(ctx context.Context) (int, error) 
 		}
 
 		// Restore to cache with TTL computed from remaining lifetime and minimum retention
-		cost := int64(200)
 		cacheTTL := s.computeCacheTTL(entry)
-		s.byID.SetWithTTL(entry.ID, entry, cost, cacheTTL)
-		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 10, cacheTTL)
+		s.byID.SetWithTTL(entry.ID, entry, entryCost(entry), cacheTTL)
+		s.byAccessor.SetWithTTL(entry.Accessor, entry.ID, 1, cacheTTL)
 
-		// Check if this is the root token
-		if entry.Type == TypeWardenToken && entry.PrincipalID == "root" {
+		// Register the root token with the root token manager so it can be
+		// revoked or replaced after a restart. Only one root should exist;
+		// if storage holds more, the last one loaded wins.
+		if s.isRootTokenEntry(entry) {
 			if tokenValue, ok := entry.Data["token"]; ok {
+				if rootID != "" && rootID != entry.ID {
+					s.logger.Warn("more than one root token in storage: the last one loaded is the current root token, the others stay valid until revoked",
+						logger.String("previous_token_id", rootID),
+						logger.String("token_id", entry.ID))
+				}
+				rootID = entry.ID
 				s.rootTokenManager.SetRootToken(tokenValue, entry.ID)
 			}
 		}
@@ -1307,8 +1341,9 @@ func (s *TokenStore) loadTokenByAccessor(accessor string) (*TokenEntry, error) {
 // Uses a transaction to ensure atomicity: both token and accessor are deleted together
 // or neither is deleted if any operation fails
 func (s *TokenStore) deleteToken(entry *TokenEntry) error {
-	// Skip storage operations for transparent token types — they are cache-only.
-	if s.registry.IsTransparent(entry.Type) {
+	// Skip storage operations for transparent and stateless token types — they
+	// are cache-only.
+	if s.registry.isCacheOnly(entry.Type) {
 		return nil
 	}
 
@@ -1386,6 +1421,13 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	}
 	s.mu.RUnlock()
 
+	// A ticket is never in storage: its entry is the cache's, or rebuilt from
+	// the value. Without a request to prove anything, a ticket bound to a key
+	// does not open here; admitTicket opens it.
+	if isTicketValue(tokenValue) {
+		return c.lookupTicket(ctx, tokenValue, nil)
+	}
+
 	// Extract namespace from context
 	ns, err := namespace.FromContext(ctx)
 	if err != nil || ns == nil {
@@ -1397,8 +1439,8 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	var tokenID string
 	if err != nil {
 		// Fallback for dev-mode custom tokens without standard prefix.
-		// Compute what the ID would be if this were a Warden token.
-		wt := &WardenTokenType{}
+		// Compute what the ID would be if this were a service token.
+		wt := &ServiceTokenType{}
 		candidateID := wt.ComputeID(tokenValue)
 		if _, found := s.byID.Get(candidateID); found {
 			tokenType = wt
@@ -1457,9 +1499,8 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 		return nil, ErrTokenNamespaceMismatch
 	}
 
-	// Check if token's namespace is a parent of (or same as) the request namespace
-	isValidNamespace := ns.UUID == tokenNs.UUID || ns.HasParent(tokenNs)
-	if !isValidNamespace {
+	// A token acts in its own namespace and every descendant.
+	if !namespace.Within(ns, tokenNs) {
 		if s.config.EnableMetrics {
 			s.metrics.IncrementNamespaceMismatches()
 		}
@@ -1499,23 +1540,23 @@ func (c *Core) LookupToken(ctx context.Context, tokenValue string) (*TokenEntry,
 	}
 
 	// Return a copy to prevent external modification
-	entryCopy := *entry
-	return &entryCopy, nil
+	return entry.Copy(), nil
 }
 
-// LookupTransparentTokenWithRole looks up a cached transparent-auth token
-// keyed by (credential, mountAccessor, role). Used by performImplicitAuth
-// for both the cache-check and post-login resolution paths.
+// LookupTransparentToken looks up the cached identity token keyed by
+// (credential, mountAccessor): the admission of one credential at one mount,
+// whatever role a request asks for. Used by resolveTransparentIdentity for both
+// the cache-check and post-login resolution paths. credential is the raw
+// bearer (a JWT, a JWT-SVID) or a certificate's fingerprint.
 //
-// The cache hash uses tokenType.LookupValue, so each TransparentTokenType
-// controls how its credential collapses into a deterministic cache key.
-// Mount accessor is included so two mounts of the same auth type with
-// overlapping role names + the same credential cannot share an entry.
+// The mount accessor is part of the key, so two mounts presented the same
+// credential cannot share an entry.
 //
-// Returns ErrTokenNotFound on cache miss, ErrTokenNamespaceMismatch on
-// namespace boundary violation, ErrTokenExpired on TTL exhaustion,
-// ErrOriginViolation on IP binding violation.
-func (c *Core) LookupTransparentTokenWithRole(ctx context.Context, tokenType TransparentTokenType, credential, mountAccessor, role string) (*TokenEntry, error) {
+// It returns a copy of the cached entry, for one request. Returns
+// ErrTokenNotFound on cache miss, ErrTokenNamespaceMismatch on namespace
+// boundary violation, ErrTokenExpired on TTL exhaustion, ErrOriginViolation
+// on IP binding violation.
+func (c *Core) LookupTransparentToken(ctx context.Context, credential, mountAccessor string) (*TokenEntry, error) {
 	if c.Sealed() {
 		return nil, fmt.Errorf("the core is sealed")
 	}
@@ -1537,10 +1578,11 @@ func (c *Core) LookupTransparentTokenWithRole(ctx context.Context, tokenType Tra
 		return nil, errors.New("namespace not found in context")
 	}
 
-	typeName := tokenType.Metadata().Name
+	tokenType := identityTokenType
+	typeName := TypeIdentityToken
 
-	// Hash of (mountAccessor, credential, role) — matches what Generate stored.
-	lookupHash := tokenType.LookupValue(credential, mountAccessor, role)
+	// Hash of (mountAccessor, credential) — matches what Generate stored.
+	lookupHash := tokenType.LookupValue(credential, mountAccessor)
 	tokenID := tokenType.ComputeID(lookupHash)
 
 	// Lookup token in cache only — transparent tokens are not persisted to storage.
@@ -1566,8 +1608,7 @@ func (c *Core) LookupTransparentTokenWithRole(ctx context.Context, tokenType Tra
 		return nil, ErrTokenNamespaceMismatch
 	}
 
-	isValidNamespace := ns.UUID == tokenNs.UUID || ns.HasParent(tokenNs)
-	if !isValidNamespace {
+	if !namespace.Within(ns, tokenNs) {
 		if s.config.EnableMetrics {
 			s.metrics.IncrementNamespaceMismatches()
 		}
@@ -1616,8 +1657,8 @@ func (c *Core) LookupTransparentTokenWithRole(ctx context.Context, tokenType Tra
 		s.metrics.IncrementTokensResolved()
 	}
 
-	entryCopy := *entry
-	return &entryCopy, nil
+	// A copy: the request projects its role onto it, never onto the cached entry.
+	return entry.Copy(), nil
 }
 
 // Helper functions
@@ -1731,6 +1772,38 @@ func (s *TokenStore) validateIPBinding(ctx context.Context, tokenID string, entr
 	}
 
 	return nil
+}
+
+// The sizes of the structs a cached token holds, before the strings, slices
+// and maps they point to.
+var (
+	tokenEntryStructBytes = int64(reflect.TypeFor[TokenEntry]().Size())
+	actorRefBytes         = int64(reflect.TypeFor[logical.ActorRef]().Size())
+	admissionStructBytes  = int64(reflect.TypeFor[logical.Admission]().Size())
+)
+
+// entryCost is the token cache cost of entry: its approximate size in memory,
+// the struct, the strings, policies, data, metadata and actors it holds, and
+// the facts its admission retains, so the cache's budget is bytes it really
+// holds. Every write of a TokenEntry to the cache uses it: a token created,
+// restored from storage on a lookup miss, or a ticket decoded. It reads only
+// fields set before the entry is cached, and allocates nothing.
+func entryCost(e *TokenEntry) int64 {
+	n := tokenEntryStructBytes + int64(len(e.ID)+len(e.Accessor)+len(e.Type)+
+		len(e.NamespaceID)+len(e.NamespacePath)+len(e.CreatedByIP)+len(e.CreatedByReqID)+
+		len(e.PrincipalID)+len(e.RoleName)+len(e.MountAccessor)+len(e.CredentialSpec))
+	for _, p := range e.Policies {
+		n += int64(len(p))
+	}
+	n += cachesize.StringMapBytes(e.Data) + cachesize.StringMapBytes(e.Metadata)
+	n += int64(len(e.Actors)) * actorRefBytes
+	for _, a := range e.Actors {
+		n += int64(len(a.Subject) + len(a.Issuer))
+	}
+	if e.Admission != nil {
+		n += admissionStructBytes + e.Admission.Size()
+	}
+	return n
 }
 
 // computeCacheTTL calculates the cache TTL for a token entry.

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"strings"
 
 	"github.com/stephnangue/warden/core"
 )
@@ -51,7 +53,9 @@ func devModeInit(c *core.Core, customRootToken string) (*core.InitResult, error)
 // If devTLSCertDir is non-empty, it also prints the paths to the auto-generated
 // TLS certificate and key, along with usage instructions. If devTLSSpiffe is set,
 // it notes that the listener serves a SPIFFE SVID from the Workload API instead.
-func printDevBanner(w io.Writer, result *core.InitResult, devTLSCertDir string, devTLSSpiffe bool) {
+// It warns when listenAddr binds beyond loopback, since the root token is then
+// usable by anyone who can reach the listener.
+func printDevBanner(w io.Writer, result *core.InitResult, listenAddr, devTLSCertDir string, devTLSSpiffe bool) {
 	fmt.Fprintf(w, "\n")
 	fmt.Fprintf(w, "==> Warden server started in dev mode! <==\n")
 	fmt.Fprintf(w, "\n")
@@ -70,6 +74,12 @@ func printDevBanner(w io.Writer, result *core.InitResult, devTLSCertDir string, 
 	fmt.Fprintf(w, "Root Token: %s\n", result.RootToken)
 	fmt.Fprintf(w, "\n")
 
+	if !isLoopbackListenAddr(listenAddr) {
+		fmt.Fprintf(w, "WARNING! The dev listener binds %s, beyond this host's loopback\n", listenAddr)
+		fmt.Fprintf(w, "interface. Anyone who can reach it can use the root token above.\n")
+		fmt.Fprintf(w, "\n")
+	}
+
 	if devTLSCertDir != "" {
 		fmt.Fprintf(w, "Dev TLS Certificate:  %s/cert.pem\n", devTLSCertDir)
 		fmt.Fprintf(w, "Dev TLS Private Key:  %s/key.pem\n", devTLSCertDir)
@@ -77,7 +87,7 @@ func printDevBanner(w io.Writer, result *core.InitResult, devTLSCertDir string, 
 		fmt.Fprintf(w, "The certificate is self-signed, clients need to trust it:\n")
 		fmt.Fprintf(w, "\n")
 		fmt.Fprintf(w, "  $ export WARDEN_CACERT=%s/cert.pem\n", devTLSCertDir)
-		fmt.Fprintf(w, "  $ export WARDEN_ADDR=https://127.0.0.1:8400\n")
+		fmt.Fprintf(w, "  $ export WARDEN_ADDR=%s\n", devClientAddr("https", listenAddr))
 		fmt.Fprintf(w, "\n")
 	}
 
@@ -91,4 +101,31 @@ func printDevBanner(w io.Writer, result *core.InitResult, devTLSCertDir string, 
 
 	fmt.Fprintf(w, "Development mode should NOT be used in production installations!\n")
 	fmt.Fprintf(w, "\n")
+}
+
+// isLoopbackListenAddr reports whether a listener on addr is reachable only
+// from this host. An empty or unspecified host binds every interface.
+func isLoopbackListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// devClientAddr returns the URL a client on the same host uses to reach the
+// dev listener. A listener bound to every interface is reached on loopback.
+func devClientAddr(scheme, listenAddr string) string {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return scheme + "://" + listenAddr
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	return scheme + "://" + net.JoinHostPort(host, port)
 }

@@ -60,7 +60,7 @@ claude --version
 Download the **Warden CLI** onto your `PATH` (swap `darwin_arm64` for `darwin_amd64` or `linux_*`):
 
 ```bash
-VER=0.17.0
+VER=0.22.0
 curl -fsSL "https://github.com/stephnangue/warden/releases/download/v${VER}/warden_${VER}_darwin_arm64.tar.gz" \
   | tar -xz warden && chmod +x warden
 export PATH="$PWD:$PATH"
@@ -112,7 +112,7 @@ Register these **before** starting Warden — it fails closed without an availab
 
 ```bash
 docker compose up -d warden ghostunnel
-docker compose logs warden       # "starting HTTPS server address=127.0.0.1:8400"
+docker compose logs warden       # "starting HTTPS server address=0.0.0.0:8400"
 docker compose logs ghostunnel   # "using SPIFFE Workload API as certificate source"
 curl -s http://127.0.0.1:8200/v1/sys/health    # 200 ⇒ mTLS via SVID works end-to-end
 ```
@@ -141,7 +141,16 @@ warden write auth/spiffe/trust-domain/example.org \
   bundle_pem=@example.org-ca.pem
 
 warden read auth/spiffe/trust-domain/example.org    # x509_authority_count > 0, empty last_error
+
+warden write auth/spiffe/config '{
+  "bound_audiences": ["warden"]
+}'
 ```
+
+ghostunnel presents an X.509-SVID, which carries no audience; `bound_audiences` is what a
+JWT-SVID would need to carry. The mount records the SVID's `spiffe_id`, `trust_domain` and
+`path` as facts, and its native identity is the SPIFFE ID. It grants no role: a group does,
+in Step 7.
 
 ### Step 6 — route the Anthropic API (LLM)
 
@@ -166,10 +175,12 @@ warden policy write anthropic-access - <<'EOF'
 path "anthropic/role/+/gateway*" { capabilities = ["create", "read", "update", "delete", "patch"] }
 EOF
 
-warden write auth/spiffe/role/anthropic \
-  trust_domain="example.org" \
-  allowed_spiffe_ids="spiffe://example.org/ghostunnel" \
-  token_policies="anthropic-access" cred_spec_name="anthropic-ops" token_ttl="1h"
+warden role create anthropic -json '{
+  "description": "Inference calls to the Anthropic API",
+  "policies": ["anthropic-access"],
+  "cred_spec_name": "anthropic-ops",
+  "provider_path": "anthropic/"
+}'
 ```
 
 ### Step 7 — route GitHub's MCP server
@@ -178,7 +189,7 @@ warden write auth/spiffe/role/anthropic \
 warden provider enable -path=github-mcp -description="GitHub Copilot MCP" mcp
 
 warden write github-mcp/config <<'EOF'
-{ "mcp_url": "https://api.githubcopilot.com/mcp", "auto_auth_path": "auth/spiffe/", "timeout": "10m", "max_body_size": 10485760 }
+{ "mcp_url": "https://api.githubcopilot.com/mcp", "auto_auth_path": "auth/spiffe/", "max_body_size": 10485760 }
 EOF
 
 warden cred source create github-src -type=github -rotation-period=0 \
@@ -189,20 +200,47 @@ warden cred spec create github-ops -source github-src -config mint_method=pat -c
 warden policy write mcp-github-access - <<'EOF'
 path "github-mcp/role/+/gateway*" {
   capabilities = ["create", "read", "delete"]
-  # Deny-by-default: open every method+tool, then block the state-changing ones.
-  mcp {
-    allowed_methods = ["*"]
-    allowed_tools   = ["*"]
-    denied_tools    = ["delete_*", "create_*", "update_*", "push_*", "merge_*", "fork_*"]
+}
+EOF
+
+# Deny-by-default: open every method+tool, then block the state-changing ones.
+warden policy write -type mcp mcp-github-calls - <<'EOF'
+path "github-mcp/role/+/gateway*" {
+  methods { allowed = ["*"] }
+  tools {
+    allowed = ["*"]
+    denied  = ["delete_*", "create_*", "update_*", "push_*", "merge_*", "fork_*"]
   }
 }
 EOF
 
-warden write auth/spiffe/role/github \
-  trust_domain="example.org" \
-  allowed_spiffe_ids="spiffe://example.org/ghostunnel" \
-  token_policies="mcp-github-access" cred_spec_name="github-ops" token_ttl="30m"
+warden role create github -json '{
+  "description": "Read-only GitHub tools through the GitHub MCP server",
+  "policies": ["mcp-github-access", "mcp-github-calls"],
+  "cred_spec_name": "github-ops",
+  "provider_path": "github-mcp/"
+}'
+
+# One group grants both roles to the ghostunnel SVID
+warden identity group create workstation -json '{
+  "type": "virtual",
+  "description": "The workstation ghostunnel, by its SPIFFE ID",
+  "roles": ["anthropic", "github"],
+  "rules": [
+    {
+      "mount": ["auth/spiffe/"],
+      "spiffe_id": ["spiffe://example.org/ghostunnel"]
+    }
+  ]
+}'
 ```
+
+:::caution[In production, register the agent]
+The group above grants its roles to any caller its rule matches: fine for this quickstart, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant its roles through a [static group](/identity/groups/) that lists the entity. Mark the roles `governed_only` so no virtual group can grant them. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+One identity now holds two roles. Each request names its role in the URL path, and Warden
+checks on every request that a group grants it to the SVID.
 
 ### Step 8 — drive Claude Code (both routed over the SVID)
 
@@ -255,7 +293,8 @@ curl -sS http://127.0.0.1:8200/v1/github-mcp/role/github/gateway/ \
   -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
        "params":{"name":"delete_repository","arguments":{"owner":"me","repo":"demo"}}}'
-# {"error":"insufficient_permissions","error_description":"Tool 'delete_repository' not allowed."}  (403)
+# {"jsonrpc":"2.0","id":2,"error":{"code":-32090,"message":"Warden: Tool 'delete_repository' not allowed.",
+#   "data":{"error":"insufficient_permissions","error_description":"Tool 'delete_repository' not allowed.",…}}}  (403)
 ```
 
 The audit log now holds two decisions under the same keyless SVID — `allowed: true` for the read,
@@ -282,7 +321,7 @@ Warden's policy, and lands in one audit trail.
 
 4. **Policy + audit (Step 9):** the read tool's audit entry shows
    `auth.principal_id = "spiffe://example.org/ghostunnel"` with `allowed:true`; the `delete_*`
-   call returns `403 insufficient_permissions` and logs `allowed:false` — same keyless identity,
+   call returns `403` with JSON-RPC error `-32090` and logs `allowed:false` — same keyless identity,
    no repository changed.
 
 The workstation holds **zero long-lived credentials** — so even a fully cooperative (or fully
@@ -299,10 +338,22 @@ compromised) agent has nothing to hand over.
 You climbed both axes — from a certificate-with-a-key to a keyless SVID, and from one secret
 removed to all of them. Same Claude Code, same workflow; the laptop just stopped holding the keys.
 
+## In production
+
+The SVID already removed the last secret from the workstation. What remains is on the
+server side: this rung stores the Anthropic key and the GitHub PAT in Warden, which is why
+each `cred spec create` warns. In production, keep both in the secret store you already run
+and let Warden fetch them per request with
+[credential chaining](/federation/credential-chaining/), or replace the Anthropic key
+outright with its [keyless source](/credential-drivers/anthropic/) — so neither the
+workstation nor Warden holds a long-lived upstream secret.
+
 ## Troubleshooting
 
 - **GitHub `HTTP 404`** — the gateway URL must end `…/gateway/` (trailing slash).
-- **`403`** — the SVID didn't match a role's `allowed_spiffe_ids`, or the policy is missing.
+- **`403` `role "…" is not assumable through auth/spiffe/: no group grants it to this
+  caller`** — no group grants the role to this SVID: check the group's `spiffe_id` rule. A
+  `403` without that message means the policy is missing.
   **`401`** — no client SVID captured; check ghostunnel is up and `--verify-uri` matches.
 - **Warden exits "workload API X509 source unavailable"** — register the SVIDs (Step 2) before
   starting Warden (Step 3); check `docker compose logs spire-agent`.

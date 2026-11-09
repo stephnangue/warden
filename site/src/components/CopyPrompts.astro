@@ -1,0 +1,32 @@
+---
+/*
+ * Puts a copy button on every prompt of the getting started tour: each
+ * blockquote inside a .tour is a line the reader types to their agent. The
+ * fragments are generated Markdown, which cannot carry a button themselves.
+ */
+---
+
+<script>
+  function addCopyButtons() {
+    for (const quote of document.querySelectorAll<HTMLElement>('.tour blockquote')) {
+      if (quote.querySelector('.copy-prompt')) continue;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'copy-prompt';
+      button.textContent = 'Copy';
+      button.setAttribute('aria-label', 'Copy this prompt');
+      button.addEventListener('click', async () => {
+        const text = quote.querySelector('p')?.innerText.trim() ?? '';
+        try {
+          await navigator.clipboard.writeText(text);
+          button.textContent = 'Copied';
+        } catch {
+          button.textContent = 'Select and copy';
+        }
+        setTimeout(() => (button.textContent = 'Copy'), 1500);
+      });
+      quote.append(button);
+    }
+  }
+  addCopyButtons();
+</script>

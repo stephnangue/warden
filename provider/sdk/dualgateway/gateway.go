@@ -3,16 +3,20 @@ package dualgateway
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/stephnangue/warden/helper/copybuf"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 	"github.com/stephnangue/warden/provider/sdk/sigv4"
+	"github.com/stephnangue/warden/provider/sdk/upstream"
 )
 
 // wardenCredentialHeaders are the inbound channels that carry a credential for
@@ -24,11 +28,7 @@ import (
 // those too. A provider that injects into Authorization overwrites it a few
 // lines later; one that authenticates with some other header used to forward it
 // untouched, which is how a caller's Warden token reached the vendor.
-var wardenCredentialHeaders = []string{
-	"Authorization",
-	"X-Warden-Token", "X-Warden-Agent-Token", "X-Warden-Role", "X-Warden-Provider",
-	"X-Warden-Subject-Token", "X-Warden-Actor-Token", "X-Warden-User-Token",
-}
+var wardenCredentialHeaders = append(logical.WardenRequestHeaders(), "Authorization")
 
 // hopByHopHeaders do not survive a proxy hop by definition, plus the forwarding
 // metadata this hop has no reason to pass on.
@@ -146,12 +146,14 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 
 	// Build target URL — strip the Warden gateway prefix.
 	// Providers that route to multiple upstream hosts based on the request path
-	// can supply a RewriteAPITarget hook; otherwise we concatenate providerURL + apiPath.
+	// can supply a RewriteAPITarget hook; otherwise apiPath is appended to
+	// providerURL. Either way apiPath, the decoded path the request was
+	// authorized on, is escaped once and never decoded again.
 	apiPath := extractAPIPath(req.HTTPRequest.URL.Path)
-	var targetURL string
+	var target *url.URL
 	if b.spec.RewriteAPITarget != nil {
 		var rewriteErr error
-		targetURL, rewriteErr = b.spec.RewriteAPITarget(snap.providerURL, apiPath, snap.extraState)
+		target, rewriteErr = b.spec.RewriteAPITarget(snap.providerURL, apiPath, snap.extraState)
 		if rewriteErr != nil {
 			b.Logger.Warn("RewriteAPITarget rejected request",
 				logger.String("path", apiPath),
@@ -161,15 +163,23 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 			return
 		}
 	} else {
-		targetURL = strings.TrimRight(snap.providerURL, "/") + apiPath
+		var err error
+		target, err = upstream.URL(strings.TrimRight(snap.providerURL, "/"), apiPath, "")
+		if err != nil {
+			b.Logger.Error("failed to build target URL", logger.Err(err))
+			http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+			return
+		}
 	}
 
-	outReq, err := http.NewRequestWithContext(ctx, req.HTTPRequest.Method, targetURL, nil)
+	outReq, err := http.NewRequestWithContext(ctx, req.HTTPRequest.Method, target.String(), nil)
 	if err != nil {
 		b.Logger.Error("failed to create outgoing request", logger.Err(err))
 		http.Error(req.ResponseWriter, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+	// The URL as built, not a re-parse of its string form.
+	outReq.URL = target
 
 	// Copy headers, strip Warden/proxy headers
 	for k, vv := range req.HTTPRequest.Header {
@@ -179,6 +189,13 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 	}
 
 	stripInboundCredentials(outReq.Header)
+	// The headers Connection names are hop-by-hop too (RFC 9110 §7.6.1), so they
+	// go with it; read it before it is removed.
+	for _, h := range strings.Split(outReq.Header.Get("Connection"), ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			outReq.Header.Del(h)
+		}
+	}
 	for _, h := range hopByHopHeaders {
 		outReq.Header.Del(h)
 	}
@@ -199,7 +216,7 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 
 	b.Logger.Trace("API request details",
 		logger.String("method", req.HTTPRequest.Method),
-		logger.String("targetURL", targetURL),
+		logger.String("targetURL", target.Redacted()),
 		logger.String("path", apiPath),
 		logger.String("request_id", req.RequestID),
 	)
@@ -212,6 +229,25 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 
 	resp, err := transport.RoundTrip(outReq)
 	if err != nil {
+		// ctx, not the inbound request's context: only outReq carries the
+		// mount's deadline. It passed before the upstream answered, and the
+		// client is still waiting for an answer.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			b.Logger.Error("API forward timed out",
+				logger.Err(err),
+				logger.String("request_id", req.RequestID),
+			)
+			http.Error(req.ResponseWriter, "Gateway Timeout", http.StatusGatewayTimeout)
+			return
+		}
+		// The client went away first: nobody is reading a response.
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			b.Logger.Debug("API forward aborted: client closed connection",
+				logger.Err(err),
+				logger.String("request_id", req.RequestID),
+			)
+			return
+		}
 		b.Logger.Error("API forward failed", logger.Err(err))
 		http.Error(req.ResponseWriter, "Bad Gateway", http.StatusBadGateway)
 		return
@@ -225,21 +261,7 @@ func (b *dualgatewayBackend) handleAPIRequest(ctx context.Context, req *logical.
 	}
 	req.ResponseWriter.WriteHeader(resp.StatusCode)
 
-	if flusher, ok := req.ResponseWriter.(http.Flusher); ok {
-		buf := make([]byte, 32*1024)
-		for {
-			n, readErr := resp.Body.Read(buf)
-			if n > 0 {
-				req.ResponseWriter.Write(buf[:n])
-				flusher.Flush()
-			}
-			if readErr != nil {
-				break
-			}
-		}
-	} else {
-		io.Copy(req.ResponseWriter, resp.Body)
-	}
+	_, _ = copybuf.CopyResponse(req.ResponseWriter, resp.Body)
 }
 
 // handleS3Request proxies S3-compatible requests with SigV4 verification and re-signing.

@@ -2,17 +2,25 @@ package drivers
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,28 +56,28 @@ func TestGitHubDriverFactory_ValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  map[string]string
+		config  credential.Config
 		wantErr bool
 		errMsg  string
 	}{
 		{
 			name:    "valid default github_url",
-			config:  map[string]string{},
+			config:  credential.NewConfig(map[string]string{}),
 			wantErr: false,
 		},
 		{
 			name:    "valid explicit github_url",
-			config:  map[string]string{"github_url": "https://api.github.com"},
+			config:  credential.NewConfig(map[string]string{"github_url": "https://api.github.com"}),
 			wantErr: false,
 		},
 		{
 			name:    "valid GHE URL",
-			config:  map[string]string{"github_url": "https://github.example.com/api/v3"},
+			config:  credential.NewConfig(map[string]string{"github_url": "https://github.example.com/api/v3"}),
 			wantErr: false,
 		},
 		{
 			name:    "invalid github_url scheme",
-			config:  map[string]string{"github_url": "http://api.github.com"},
+			config:  credential.NewConfig(map[string]string{"github_url": "http://api.github.com"}),
 			wantErr: true,
 			errMsg:  "must use https://",
 		},
@@ -91,9 +99,9 @@ func TestGitHubDriverFactory_ValidateConfig(t *testing.T) {
 func TestGitHubDriverFactory_Create(t *testing.T) {
 	factory := &GitHubDriverFactory{}
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
-	driver, err := factory.Create(map[string]string{
+	driver, err := factory.Create(credential.NewConfig(map[string]string{
 		"github_url": "https://api.github.com",
-	}, log)
+	}), log)
 	require.NoError(t, err)
 	assert.NotNil(t, driver)
 	assert.Equal(t, credential.SourceTypeGitHub, driver.Type())
@@ -103,7 +111,7 @@ func TestGitHubDriver_Type(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.Equal(t, credential.SourceTypeGitHub, driver.Type())
@@ -113,7 +121,7 @@ func TestGitHubDriver_Cleanup(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 		httpClient: &http.Client{},
 	}
@@ -125,7 +133,7 @@ func TestGitHubDriver_Revoke_NoOp(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	// GitHub tokens expire naturally - revoke is a no-op
@@ -140,7 +148,7 @@ func TestGitHubDriver_NotRotatable(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	// GitHubDriver should not implement Rotatable
@@ -153,7 +161,7 @@ func TestGitHubDriver_MintPATCredential(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{"github_url": "https://api.github.com"},
+			Config: credential.NewConfig(map[string]string{"github_url": "https://api.github.com"}),
 		},
 		appTokens: make(map[string]*appTokenCache),
 	}
@@ -161,10 +169,10 @@ func TestGitHubDriver_MintPATCredential(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-pat",
 		Type: credential.TypeGitHubToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "pat",
 			"token":       "ghp_test123",
-		},
+		}),
 	}
 
 	rawData, _, ttl, leaseID, err := driver.MintCredential(context.Background(), spec)
@@ -178,7 +186,7 @@ func TestGitHubDriver_MintPATCredential_EmptyToken(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{"github_url": "https://api.github.com"},
+			Config: credential.NewConfig(map[string]string{"github_url": "https://api.github.com"}),
 		},
 		appTokens: make(map[string]*appTokenCache),
 	}
@@ -186,10 +194,10 @@ func TestGitHubDriver_MintPATCredential_EmptyToken(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-pat",
 		Type: credential.TypeGitHubToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "pat",
 			"token":       "",
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
@@ -199,16 +207,16 @@ func TestGitHubDriver_MintPATCredential_EmptyToken(t *testing.T) {
 
 func TestGitHubDriver_MintCredential_FailsClosedWhenChained(t *testing.T) {
 	driver := &GitHubDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: map[string]string{"github_url": "https://api.github.com"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: credential.NewConfig(map[string]string{"github_url": "https://api.github.com"})},
 		appTokens:  make(map[string]*appTokenCache),
 	}
 	spec := &credential.CredSpec{
 		Name: "chained",
 		Type: credential.TypeGitHubToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":               "pat",
 			credential.ConfigSecretSpec: "gh-secret",
-		},
+		}),
 	}
 	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
 	require.Error(t, err)
@@ -217,13 +225,13 @@ func TestGitHubDriver_MintCredential_FailsClosedWhenChained(t *testing.T) {
 
 func TestGitHubDriver_MintFromSecret_PAT(t *testing.T) {
 	driver := &GitHubDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: map[string]string{"github_url": "https://api.github.com"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: credential.NewConfig(map[string]string{"github_url": "https://api.github.com"})},
 		appTokens:  make(map[string]*appTokenCache),
 	}
 	spec := &credential.CredSpec{
 		Name:   "chained-pat",
 		Type:   credential.TypeGitHubToken,
-		Config: map[string]string{"mint_method": "pat", credential.ConfigSecretSpec: "gh-secret"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "pat", credential.ConfigSecretSpec: "gh-secret"}),
 	}
 	material := credential.SecretMaterial{Data: map[string]string{"token": "ghp_fetched"}, Field: "token"}
 
@@ -238,13 +246,13 @@ func TestGitHubDriver_MintFromSecret_PAT(t *testing.T) {
 // falling back to the conventional key name (which would mask the misconfiguration).
 func TestGitHubDriver_MintFromSecret_MisconfiguredFieldFailsClosed(t *testing.T) {
 	driver := &GitHubDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: map[string]string{"github_url": "https://api.github.com"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: credential.NewConfig(map[string]string{"github_url": "https://api.github.com"})},
 		appTokens:  make(map[string]*appTokenCache),
 	}
 	spec := &credential.CredSpec{
 		Name:   "chained-pat",
 		Type:   credential.TypeGitHubToken,
-		Config: map[string]string{"mint_method": "pat", credential.ConfigSecretSpec: "gh-secret"},
+		Config: credential.NewConfig(map[string]string{"mint_method": "pat", credential.ConfigSecretSpec: "gh-secret"}),
 	}
 	// secret_field points at "wrong", but the payload carries the token under the
 	// conventional "token" key. The old fallback would have used it silently.
@@ -270,7 +278,7 @@ func TestGitHubDriver_MintFromSecret_App(t *testing.T) {
 	defer server.Close()
 
 	driver := &GitHubDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: map[string]string{"github_url": server.URL}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: credential.NewConfig(map[string]string{"github_url": server.URL})},
 		httpClient: server.Client(),
 		appTokens:  make(map[string]*appTokenCache),
 	}
@@ -278,12 +286,12 @@ func TestGitHubDriver_MintFromSecret_App(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "chained-app",
 		Type: credential.TypeGitHubToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":               "app",
 			"app_id":                    "12345",
 			"installation_id":           "67890",
 			credential.ConfigSecretSpec: "gh-secret",
-		},
+		}),
 	}
 	material := credential.SecretMaterial{Data: map[string]string{"private_key": testKey}, Field: "private_key"}
 
@@ -297,7 +305,7 @@ func TestGitHubDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{"github_url": "https://api.github.com"},
+			Config: credential.NewConfig(map[string]string{"github_url": "https://api.github.com"}),
 		},
 		appTokens: make(map[string]*appTokenCache),
 	}
@@ -305,9 +313,9 @@ func TestGitHubDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-spec",
 		Type: credential.TypeGitHubToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "unknown",
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
@@ -320,13 +328,13 @@ func TestGitHubDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 // a migration message rather than defaulting to "app" and failing obscurely.
 func TestGitHubDriver_MintPaths_RejectLegacyAuthMethod(t *testing.T) {
 	driver := &GitHubDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: map[string]string{"github_url": "https://api.github.com"}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: credential.NewConfig(map[string]string{"github_url": "https://api.github.com"})},
 		appTokens:  make(map[string]*appTokenCache),
 	}
 	spec := &credential.CredSpec{
 		Name:   "legacy",
 		Type:   credential.TypeGitHubToken,
-		Config: map[string]string{"auth_method": "pat", "token": "ghp_legacy"},
+		Config: credential.NewConfig(map[string]string{"auth_method": "pat", "token": "ghp_legacy"}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
@@ -355,20 +363,20 @@ func TestGitHubDriver_VerifySpec_Dispatch(t *testing.T) {
 	defer server.Close()
 
 	driver := &GitHubDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: map[string]string{"github_url": server.URL}},
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: credential.NewConfig(map[string]string{"github_url": server.URL})},
 		httpClient: server.Client(),
 		appTokens:  make(map[string]*appTokenCache),
 	}
 
 	// pat mode → hits GET /user
 	patSpec := &credential.CredSpec{Name: "v-pat", Type: credential.TypeGitHubToken,
-		Config: map[string]string{"mint_method": "pat", "token": "ghp_verify"}}
+		Config: credential.NewConfig(map[string]string{"mint_method": "pat", "token": "ghp_verify"})}
 	require.NoError(t, driver.VerifySpec(context.Background(), patSpec))
 	assert.Equal(t, 1, calls, "pat mode verifies via GET /user")
 
 	// app mode → no-op, no API call
 	appSpec := &credential.CredSpec{Name: "v-app", Type: credential.TypeGitHubToken,
-		Config: map[string]string{"mint_method": "app", "app_id": "1", "installation_id": "2"}}
+		Config: credential.NewConfig(map[string]string{"mint_method": "app", "app_id": "1", "installation_id": "2"})}
 	require.NoError(t, driver.VerifySpec(context.Background(), appSpec))
 	assert.Equal(t, 1, calls, "app mode makes no verification call")
 }
@@ -395,7 +403,7 @@ func TestGitHubDriver_MintAppCredential(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{"github_url": server.URL},
+			Config: credential.NewConfig(map[string]string{"github_url": server.URL}),
 		},
 		httpClient: server.Client(),
 		appTokens:  make(map[string]*appTokenCache),
@@ -404,12 +412,12 @@ func TestGitHubDriver_MintAppCredential(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-app",
 		Type: credential.TypeGitHubToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":     "app",
 			"app_id":          "12345",
 			"private_key":     testKey,
 			"installation_id": "67890",
-		},
+		}),
 	}
 
 	rawData, _, ttl, _, err := driver.MintCredential(context.Background(), spec)
@@ -437,7 +445,7 @@ func TestGitHubDriver_MintAppCredential_Cached(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{"github_url": server.URL},
+			Config: credential.NewConfig(map[string]string{"github_url": server.URL}),
 		},
 		httpClient: server.Client(),
 		appTokens:  make(map[string]*appTokenCache),
@@ -446,12 +454,12 @@ func TestGitHubDriver_MintAppCredential_Cached(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-app",
 		Type: credential.TypeGitHubToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":     "app",
 			"app_id":          "12345",
 			"private_key":     testKey,
 			"installation_id": "67890",
-		},
+		}),
 	}
 
 	// First call mints
@@ -485,7 +493,7 @@ func TestGitHubDriver_MintAppCredential_PerSpecCache(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{"github_url": server.URL},
+			Config: credential.NewConfig(map[string]string{"github_url": server.URL}),
 		},
 		httpClient: server.Client(),
 		appTokens:  make(map[string]*appTokenCache),
@@ -494,22 +502,22 @@ func TestGitHubDriver_MintAppCredential_PerSpecCache(t *testing.T) {
 	specA := &credential.CredSpec{
 		Name: "spec-a",
 		Type: credential.TypeGitHubToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":     "app",
 			"app_id":          "12345",
 			"private_key":     testKey,
 			"installation_id": "111",
-		},
+		}),
 	}
 	specB := &credential.CredSpec{
 		Name: "spec-b",
 		Type: credential.TypeGitHubToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":     "app",
 			"app_id":          "12345",
 			"private_key":     testKey,
 			"installation_id": "222",
-		},
+		}),
 	}
 
 	// Mint for spec A
@@ -540,7 +548,7 @@ func TestGitHubDriver_MintInstallationToken_APIError(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{"github_url": server.URL},
+			Config: credential.NewConfig(map[string]string{"github_url": server.URL}),
 		},
 		httpClient: server.Client(),
 		appTokens:  make(map[string]*appTokenCache),
@@ -549,12 +557,12 @@ func TestGitHubDriver_MintInstallationToken_APIError(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-app",
 		Type: credential.TypeGitHubToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":     "app",
 			"app_id":          "12345",
 			"private_key":     testKey,
 			"installation_id": "67890",
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
@@ -577,7 +585,7 @@ func TestGitHubDriver_MintInstallationToken_EmptyToken(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{"github_url": server.URL},
+			Config: credential.NewConfig(map[string]string{"github_url": server.URL}),
 		},
 		httpClient: server.Client(),
 		appTokens:  make(map[string]*appTokenCache),
@@ -586,12 +594,12 @@ func TestGitHubDriver_MintInstallationToken_EmptyToken(t *testing.T) {
 	spec := &credential.CredSpec{
 		Name: "test-app",
 		Type: credential.TypeGitHubToken,
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method":     "app",
 			"app_id":          "12345",
 			"private_key":     testKey,
 			"installation_id": "67890",
-		},
+		}),
 	}
 
 	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
@@ -603,7 +611,7 @@ func TestGitHubDriver_GetGitHubURL(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{"github_url": "https://api.github.com/"},
+			Config: credential.NewConfig(map[string]string{"github_url": "https://api.github.com/"}),
 		},
 	}
 	// getGitHubURL trims trailing slash
@@ -614,7 +622,7 @@ func TestGitHubDriver_GetGitHubURL_Default(t *testing.T) {
 	driver := &GitHubDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeGitHub,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.Equal(t, "https://api.github.com", driver.getGitHubURL())
@@ -697,7 +705,14 @@ func TestGenerateAppJWT(t *testing.T) {
 
 	// JWT should have 3 parts separated by dots
 	parts := splitJWT(jwt)
-	assert.Len(t, parts, 3)
+	require.Len(t, parts, 3)
+
+	// GitHub expects exactly alg and typ: no kid, nothing else.
+	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	require.NoError(t, err)
+	var hdr map[string]string
+	require.NoError(t, json.Unmarshal(headerJSON, &hdr))
+	assert.Equal(t, map[string]string{"alg": "RS256", "typ": "JWT"}, hdr)
 }
 
 func TestGenerateAppJWT_NilKey(t *testing.T) {
@@ -724,4 +739,665 @@ func splitJWT(token string) []string {
 	}
 	parts = append(parts, token[start:])
 	return parts
+}
+
+// --- app installation token cache keying ---
+
+// assertionSignedBy reports whether the App JWT was signed with keyPEM. The
+// stand-in API never sees the private key itself, only what it signed, so this is
+// how a test tells which caller's key actually reached GitHub.
+func assertionSignedBy(t *testing.T, assertion, keyPEM string) bool {
+	t.Helper()
+
+	parts := strings.Split(assertion, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return false
+	}
+
+	key, err := parseRSAPrivateKey(keyPEM)
+	require.NoError(t, err)
+
+	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	return rsa.VerifyPKCS1v15(&key.PublicKey, crypto.SHA256, digest[:], sig) == nil
+}
+
+// newCachingGitHubDriver builds a driver against a stand-in API that maps each
+// signing key to its own installation token, so a test can tell which key a
+// returned token was minted from. keyForToken is consulted per request.
+func newCachingGitHubDriver(t *testing.T, tokenFor func(jwtAssertion string) (string, int)) (*GitHubDriver, *int) {
+	t.Helper()
+
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		token, status := tokenFor(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		if status != http.StatusCreated {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"token":      token,
+			"expires_at": time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	return &GitHubDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: credential.NewConfig(map[string]string{"github_url": server.URL})},
+		httpClient: server.Client(),
+		appTokens:  make(map[string]*appTokenCache),
+	}, &calls
+}
+
+func githubAppSpec(name string) *credential.CredSpec {
+	return &credential.CredSpec{
+		Name: name,
+		Type: credential.TypeGitHubToken,
+		Config: credential.NewConfig(map[string]string{
+			"mint_method":               "app",
+			"app_id":                    "12345",
+			"installation_id":           "67890",
+			credential.ConfigSecretSpec: "gh-key",
+		}),
+	}
+}
+
+// TestGitHubDriver_AppTokenCacheIsKeyedByKey is the crux: two callers of the same
+// spec whose chained private key resolves differently must each mint with their own
+// key. Keyed by spec name, the second is served the first's token and its key is
+// never exercised at all.
+func TestGitHubDriver_AppTokenCacheIsKeyedByKey(t *testing.T) {
+	keyA := generateTestRSAKey(t)
+	keyB := generateTestRSAKey(t)
+
+	// The stand-in cannot see the key, only the assertion signed with it, so it
+	// distinguishes callers by which key verifies the JWT signature.
+	driver, calls := newCachingGitHubDriver(t, func(assertion string) (string, int) {
+		switch {
+		case assertionSignedBy(t, assertion, keyA):
+			return "ghs_from_key_a", http.StatusCreated
+		case assertionSignedBy(t, assertion, keyB):
+			return "ghs_from_key_b", http.StatusCreated
+		default:
+			return "", http.StatusUnauthorized
+		}
+	})
+
+	spec := githubAppSpec("shared-spec")
+	mintWith := func(keyPEM string) map[string]interface{} {
+		rawData, _, _, _, err := driver.MintFromSecret(context.Background(), spec,
+			credential.SecretMaterial{Data: map[string]string{"private_key": keyPEM}, Field: "private_key"})
+		require.NoError(t, err)
+		return rawData
+	}
+
+	assert.Equal(t, "ghs_from_key_a", mintWith(keyA)["token"])
+
+	// Same key again must be served from cache.
+	assert.Equal(t, "ghs_from_key_a", mintWith(keyA)["token"])
+	assert.Equal(t, 1, *calls, "a repeated key must reuse the cached token")
+
+	// A different key must mint its own token, not inherit the first caller's.
+	assert.Equal(t, "ghs_from_key_b", mintWith(keyB)["token"])
+	assert.Equal(t, 2, *calls, "a different key must mint its own token")
+}
+
+// TestGitHubDriver_AppTokenCacheFollowsSpecConfig covers the direct path: a spec
+// edited to point at another installation must not keep serving the old one's
+// token. A spec update does not rebuild the driver, so nothing else would notice.
+func TestGitHubDriver_AppTokenCacheFollowsSpecConfig(t *testing.T) {
+	key := generateTestRSAKey(t)
+
+	var lastInstallation string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastInstallation = strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/app/installations/"), "/access_tokens")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"token":      "ghs_for_installation_" + lastInstallation,
+			"expires_at": time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		})
+	}))
+	defer server.Close()
+
+	driver := &GitHubDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: credential.NewConfig(map[string]string{"github_url": server.URL})},
+		httpClient: server.Client(),
+		appTokens:  make(map[string]*appTokenCache),
+	}
+
+	spec := &credential.CredSpec{
+		Name: "edited-spec",
+		Type: credential.TypeGitHubToken,
+		Config: credential.NewConfig(map[string]string{
+			"mint_method": "app", "app_id": "12345",
+			"installation_id": "111", "private_key": key,
+		}),
+	}
+	rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_for_installation_111", rawData["token"])
+
+	spec.Config = spec.Config.With("installation_id", "222")
+	rawData, _, _, _, err = driver.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_for_installation_222", rawData["token"],
+		"a spec repointed at another installation must not be served the old one's token")
+}
+
+// TestGitHubDriver_ChainedKeyRejectionIsRetryable pins the marking that lets the
+// minting layer evict a stale chained key and retry. Without it a key rotated where
+// it is held fails every request under the spec until the entry ages out.
+func TestGitHubDriver_ChainedKeyRejectionIsRetryable(t *testing.T) {
+	driver, _ := newCachingGitHubDriver(t, func(string) (string, int) {
+		return "", http.StatusUnauthorized
+	})
+
+	_, _, _, _, err := driver.MintFromSecret(context.Background(), githubAppSpec("chained-spec"),
+		credential.SecretMaterial{Data: map[string]string{"private_key": generateTestRSAKey(t)}, Field: "private_key"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
+
+// An inline key has no fresher copy to fetch, so marking its refusal would buy a
+// retry of the identical credentials.
+func TestGitHubDriver_InlineKeyRejectionIsNotRetryable(t *testing.T) {
+	driver, _ := newCachingGitHubDriver(t, func(string) (string, int) {
+		return "", http.StatusUnauthorized
+	})
+
+	spec := &credential.CredSpec{
+		Name: "inline-spec",
+		Type: credential.TypeGitHubToken,
+		Config: credential.NewConfig(map[string]string{
+			"mint_method": "app", "app_id": "12345",
+			"installation_id": "67890", "private_key": generateTestRSAKey(t),
+		}),
+	}
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
+
+func TestGitHubAppTokenCacheKey(t *testing.T) {
+	base := appTokenCacheKey("a", "i", "k", "", "")
+	assert.Equal(t, base, appTokenCacheKey("a", "i", "k", "", ""))
+	assert.NotEqual(t, base, appTokenCacheKey("a", "i", "k2", "", ""))
+	assert.NotEqual(t, base, appTokenCacheKey("a", "i2", "k", "", ""))
+	assert.NotEqual(t, base, appTokenCacheKey("a2", "i", "k", "", ""))
+	// A scope, either part of it, is a different token.
+	assert.NotEqual(t, base, appTokenCacheKey("a", "i", "k", "backend", ""))
+	assert.NotEqual(t, base, appTokenCacheKey("a", "i", "k", "", "contents:read"))
+	// Fields that would collide under plain concatenation must not.
+	assert.NotEqual(t, appTokenCacheKey("ab", "c", "d", "", ""), appTokenCacheKey("a", "bc", "d", "", ""))
+	assert.NotEqual(t, appTokenCacheKey("a", "i", "k", "backend", ""), appTokenCacheKey("a", "i", "k", "", "backend"))
+	assert.NotEqual(t, appTokenCacheKey("a", "i", "k", "ab", "c"), appTokenCacheKey("a", "i", "k", "a", "bc"))
+
+	assert.NotContains(t, appTokenCacheKey("app", "inst", "SECRETKEY", "", ""), "SECRETKEY",
+		"the private key must not sit in a map key")
+}
+
+// --- app installation token scoping ---
+
+func scopedAppSpec(name, keyPEM string, scope map[string]string) *credential.CredSpec {
+	spec := inlineAppSpec(name, "67890", keyPEM)
+	for k, v := range scope {
+		spec.Config = spec.Config.With(k, v)
+	}
+	return spec
+}
+
+func TestGitHubDriver_MintAppCredential_SendsScope(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var gotContentType string
+	var gotBody struct {
+		Repositories []string          `json:"repositories"`
+		Permissions  map[string]string `json:"permissions"`
+	}
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		writeInstallationToken(w, "ghs_scoped")
+	})
+
+	spec := scopedAppSpec("scoped", key, map[string]string{
+		"repositories": " frontend, backend ,frontend,",
+		"permissions":  "pull_requests:write, contents:read",
+	})
+	rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_scoped", rawData["token"])
+
+	assert.Equal(t, "application/json", gotContentType)
+	assert.Equal(t, []string{"backend", "frontend"}, gotBody.Repositories, "repositories are trimmed, deduplicated and sorted")
+	assert.Equal(t, map[string]string{"contents": "read", "pull_requests": "write"}, gotBody.Permissions)
+}
+
+// Only permissions set: the body must not carry an empty repositories list, which
+// GitHub could read as "no repositories".
+func TestGitHubDriver_MintAppCredential_PermissionsOnlyOmitsRepositories(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var gotBody map[string]json.RawMessage
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		writeInstallationToken(w, "ghs_perms_only")
+	})
+
+	_, _, _, _, err := driver.MintCredential(context.Background(),
+		scopedAppSpec("perms-only", key, map[string]string{"permissions": "contents:read"}))
+	require.NoError(t, err)
+	assert.NotContains(t, gotBody, "repositories")
+	assert.Contains(t, gotBody, "permissions")
+}
+
+func TestGitHubDriver_MintAppCredential_UnscopedSendsNoBody(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var gotBody []byte
+	var gotContentType string
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		writeInstallationToken(w, "ghs_unscoped")
+	})
+
+	_, _, _, _, err := driver.MintCredential(context.Background(), inlineAppSpec("unscoped", "67890", key))
+	require.NoError(t, err)
+	assert.Empty(t, gotBody, "an unscoped spec must keep sending no body")
+	assert.Empty(t, gotContentType)
+}
+
+// The crux of keying the cache on scope: a narrow spec must never be served the
+// token minted for a broader one on the same installation, whichever mints first.
+func TestGitHubDriver_AppTokenCacheIsKeyedByScope(t *testing.T) {
+	key := generateTestRSAKey(t)
+	broad := inlineAppSpec("broad", "67890", key)
+	backend := scopedAppSpec("backend", key, map[string]string{"repositories": "backend"})
+	frontend := scopedAppSpec("frontend", key, map[string]string{"repositories": "frontend"})
+
+	// newDriver answers each request with a token named after the scope it asked
+	// for, so a test can tell which scope a returned token was minted for.
+	newDriver := func(t *testing.T) (func(*credential.CredSpec) interface{}, *atomic.Int32) {
+		var calls atomic.Int32
+		driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			var body struct {
+				Repositories []string `json:"repositories"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if len(body.Repositories) == 0 {
+				writeInstallationToken(w, "ghs_whole_installation")
+				return
+			}
+			writeInstallationToken(w, "ghs_only_"+strings.Join(body.Repositories, "_"))
+		})
+		return func(spec *credential.CredSpec) interface{} {
+			rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
+			require.NoError(t, err)
+			return rawData["token"]
+		}, &calls
+	}
+
+	t.Run("broad first", func(t *testing.T) {
+		mint, calls := newDriver(t)
+		assert.Equal(t, "ghs_whole_installation", mint(broad))
+		assert.Equal(t, "ghs_only_backend", mint(backend), "a scoped spec must not inherit the broad token")
+		assert.Equal(t, "ghs_only_frontend", mint(frontend), "different scopes must not share a token")
+		assert.Equal(t, int32(3), calls.Load())
+
+		// Each is now cached under its own scope.
+		assert.Equal(t, "ghs_only_backend", mint(backend))
+		assert.Equal(t, "ghs_whole_installation", mint(broad))
+		assert.Equal(t, int32(3), calls.Load(), "a repeated scope must reuse its cached token")
+	})
+
+	t.Run("narrow first", func(t *testing.T) {
+		mint, calls := newDriver(t)
+		assert.Equal(t, "ghs_only_backend", mint(backend))
+		assert.Equal(t, "ghs_whole_installation", mint(broad), "an unscoped spec must not inherit a narrow token")
+		assert.Equal(t, "ghs_only_backend", mint(backend), "and the narrow spec must keep its own")
+		assert.Equal(t, int32(2), calls.Load())
+	})
+}
+
+func TestGitHubDriver_MintAppCredential_Scope422(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var calls atomic.Int32
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"The permissions requested are not granted to this installation."}`))
+	})
+	spec := scopedAppSpec("too-broad", key, map[string]string{"permissions": "administration:write"})
+
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "if repositories/permissions ask for more than the App was granted")
+	assert.Contains(t, err.Error(), "The permissions requested are not granted")
+	var statusErr *httputil.StatusError
+	require.ErrorAs(t, err, &statusErr)
+	assert.Equal(t, http.StatusUnprocessableEntity, statusErr.Status)
+
+	// The chained path must not mark a 422 as a stale key worth re-fetching.
+	chainedSpec := githubAppSpec("too-broad-chained")
+	chainedSpec.Config = chainedSpec.Config.With("permissions", "administration:write")
+	_, _, _, _, err = driver.MintFromSecret(context.Background(), chainedSpec,
+		credential.SecretMaterial{Data: map[string]string{"private_key": key}, Field: "private_key"})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+
+	// Not cached: the next attempt asks GitHub again.
+	_, _, _, _, err = driver.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+	assert.Equal(t, int32(3), calls.Load())
+}
+
+// Stored specs skip create-time validation, so the driver must refuse what
+// ValidateConfig would have, before any request leaves.
+func TestGitHubDriver_RefusesUnvalidatedScope(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var calls atomic.Int32
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		writeInstallationToken(w, "ghs_should_not_mint")
+	})
+	material := credential.SecretMaterial{Data: map[string]string{"private_key": key}, Field: "private_key"}
+
+	tests := []struct {
+		name    string
+		config  map[string]string
+		wantErr string
+	}{
+		{"legacy repository", map[string]string{"repository": "acme/backend"}, "'repository' is no longer supported"},
+		{"unparseable permissions", map[string]string{"permissions": "contents"}, "must be name:level"},
+		{"bad level", map[string]string{"permissions": "contents:owner"}, "level must be read, write or admin"},
+		{"owner in repository name", map[string]string{"repositories": "acme/backend"}, "must be a bare repository name"},
+		{"scope on a pat", map[string]string{"mint_method": "pat", "token": "ghp_x", "repositories": "backend"}, "apply only to mint_method=app"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+"/direct", func(t *testing.T) {
+			spec := scopedAppSpec("stored", key, tt.config)
+			_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+		t.Run(tt.name+"/chained", func(t *testing.T) {
+			spec := githubAppSpec("stored-chained")
+			for k, v := range tt.config {
+				if k == "token" {
+					continue // a chained PAT is fetched, not stored inline
+				}
+				spec.Config = spec.Config.With(k, v)
+			}
+			_, _, _, _, err := driver.MintFromSecret(context.Background(), spec, material)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+	assert.Equal(t, int32(0), calls.Load(), "a refused scope must never reach GitHub")
+}
+
+// --- app installation token mint concurrency ---
+
+// newGitHubDriverWithHandler builds a driver against a stand-in API served by h.
+// Unlike newCachingGitHubDriver it leaves call counting to the handler, so a test
+// driving concurrent mints can count safely.
+func newGitHubDriverWithHandler(t *testing.T, h http.HandlerFunc) *GitHubDriver {
+	t.Helper()
+	server := httptest.NewTLSServer(h)
+	t.Cleanup(server.Close)
+	return &GitHubDriver{
+		credSource: &credential.CredSource{Type: credential.SourceTypeGitHub, Config: credential.NewConfig(map[string]string{"github_url": server.URL})},
+		httpClient: server.Client(),
+		appTokens:  make(map[string]*appTokenCache),
+	}
+}
+
+func writeInstallationToken(w http.ResponseWriter, token string) {
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"token":      token,
+		"expires_at": time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+	})
+}
+
+func inlineAppSpec(name, installationID, keyPEM string) *credential.CredSpec {
+	return &credential.CredSpec{
+		Name: name,
+		Type: credential.TypeGitHubToken,
+		Config: credential.NewConfig(map[string]string{
+			"mint_method": "app", "app_id": "12345",
+			"installation_id": installationID, "private_key": keyPEM,
+		}),
+	}
+}
+
+// newGate returns a channel stand-in handlers block on and the func that opens it.
+// Opening is idempotent; register it with t.Cleanup after the driver is built so it
+// runs before the server's Close, which otherwise waits forever on a handler a
+// failed test never released.
+func newGate() (<-chan struct{}, func()) {
+	ch := make(chan struct{})
+	return ch, sync.OnceFunc(func() { close(ch) })
+}
+
+// waitFor fails the test if ch does not deliver within d.
+func waitFor[T any](t *testing.T, ch <-chan T, d time.Duration, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(d):
+		t.Fatalf("timed out waiting for %s", what)
+		var zero T
+		return zero
+	}
+}
+
+// The credential manager caches per caller, so N agents on one spec reach the
+// driver as N misses. They must cost one installation token, not N. This guards
+// the outcome, not the mechanism: a driver that serializes every mint behind one
+// lock passes too. DistinctKeysRunInParallel is what rules that driver out.
+func TestGitHubDriver_AppMint_CoalescesConcurrentMisses(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var calls atomic.Int32
+	arrived := make(chan struct{}, 1)
+	release, openGate := newGate()
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
+		<-release
+		writeInstallationToken(w, "ghs_shared")
+	})
+	t.Cleanup(openGate)
+
+	spec := inlineAppSpec("shared", "67890", key)
+	type result struct {
+		token interface{}
+		err   error
+	}
+	const n = 16
+	results := make(chan result, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
+			results <- result{rawData["token"], err}
+		}()
+	}
+
+	waitFor(t, arrived, 5*time.Second, "the first mint to reach the API")
+	openGate()
+	for i := 0; i < n; i++ {
+		res := waitFor(t, results, 5*time.Second, "a mint to return")
+		require.NoError(t, res.err)
+		assert.Equal(t, "ghs_shared", res.token)
+	}
+	assert.Equal(t, int32(1), calls.Load(), "concurrent misses for the same inputs must share one upstream call")
+}
+
+// Mints for unrelated inputs must not wait on each other. Each request here is
+// held until both have arrived, so a driver that serializes mints never sees the
+// second one and the test fails on the timeout.
+func TestGitHubDriver_AppMint_DistinctKeysRunInParallel(t *testing.T) {
+	key := generateTestRSAKey(t)
+	arrived := make(chan string, 2)
+	release, openGate := newGate()
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		installation := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/app/installations/"), "/access_tokens")
+		arrived <- installation
+		<-release
+		writeInstallationToken(w, "ghs_for_"+installation)
+	})
+	t.Cleanup(openGate)
+
+	errs := make(chan error, 2)
+	for _, installation := range []string{"111", "222"} {
+		spec := inlineAppSpec("spec-"+installation, installation, key)
+		go func() {
+			_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+			errs <- err
+		}()
+	}
+
+	got := map[string]bool{}
+	timeout := time.After(5 * time.Second)
+	for len(got) < 2 {
+		select {
+		case installation := <-arrived:
+			got[installation] = true
+		case <-timeout:
+			t.Fatalf("mints for different installations were serialized: only %v reached the API", got)
+		}
+	}
+	openGate()
+	for i := 0; i < 2; i++ {
+		require.NoError(t, waitFor(t, errs, 5*time.Second, "a mint to return"))
+	}
+}
+
+// A caller that gives up returns at once, but the mint it started keeps going for
+// the others waiting on it: one caller's cancelled request must not fail theirs or
+// cost a second installation token.
+func TestGitHubDriver_AppMint_CallerCancelDoesNotAbortFlight(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var calls atomic.Int32
+	arrived := make(chan struct{}, 2)
+	release, openGate := newGate()
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		arrived <- struct{}{}
+		<-release
+		writeInstallationToken(w, "ghs_survivor")
+	})
+	t.Cleanup(openGate)
+	spec := inlineAppSpec("shared", "67890", key)
+
+	ctxA, cancelA := context.WithCancel(context.Background())
+	errA := make(chan error, 1)
+	go func() {
+		_, _, _, _, err := driver.MintCredential(ctxA, spec)
+		errA <- err
+	}()
+	waitFor(t, arrived, 5*time.Second, "caller A's mint to reach the API")
+
+	type result struct {
+		token interface{}
+		err   error
+	}
+	resB := make(chan result, 1)
+	go func() {
+		rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
+		resB <- result{rawData["token"], err}
+	}()
+
+	cancelA()
+	assert.ErrorIs(t, waitFor(t, errA, 5*time.Second, "caller A to return after cancel"), context.Canceled)
+
+	openGate()
+	b := waitFor(t, resB, 5*time.Second, "caller B to return")
+	require.NoError(t, b.err)
+	assert.Equal(t, "ghs_survivor", b.token)
+	assert.Equal(t, int32(1), calls.Load(), "caller A's cancel must not abort the shared mint")
+}
+
+// chained decides whether a refusal is marked retryable. A chained and an inline
+// caller presenting the same key must each get their own classification, so they
+// must not share a mint even though they share a cache key.
+func TestGitHubDriver_AppMint_ChainedAndInlineDoNotShareErrors(t *testing.T) {
+	key := generateTestRSAKey(t)
+	arrived := make(chan struct{}, 2)
+	release, openGate := newGate()
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		arrived <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+	})
+	t.Cleanup(openGate)
+
+	chainedErr := make(chan error, 1)
+	inlineErr := make(chan error, 1)
+	go func() {
+		_, _, _, _, err := driver.MintFromSecret(context.Background(), githubAppSpec("chained"),
+			credential.SecretMaterial{Data: map[string]string{"private_key": key}, Field: "private_key"})
+		chainedErr <- err
+	}()
+	go func() {
+		_, _, _, _, err := driver.MintCredential(context.Background(), inlineAppSpec("inline", "67890", key))
+		inlineErr <- err
+	}()
+
+	waitFor(t, arrived, 5*time.Second, "the first mint to reach the API")
+	waitFor(t, arrived, 5*time.Second, "the second mint to reach the API (chained and inline must not share a flight)")
+	openGate()
+
+	assert.ErrorIs(t, waitFor(t, chainedErr, 5*time.Second, "the chained mint"), credential.ErrChainedSecretRejected)
+	err := waitFor(t, inlineErr, 5*time.Second, "the inline mint")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
+
+func TestGitHubDriver_AppMint_ErrorNotCached(t *testing.T) {
+	key := generateTestRSAKey(t)
+	var calls atomic.Int32
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		writeInstallationToken(w, "ghs_second_try")
+	})
+	spec := inlineAppSpec("flaky", "67890", key)
+
+	_, _, _, _, err := driver.MintCredential(context.Background(), spec)
+	require.Error(t, err)
+
+	rawData, _, _, _, err := driver.MintCredential(context.Background(), spec)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_second_try", rawData["token"])
+	assert.Equal(t, int32(2), calls.Load(), "a failed mint must not be cached")
+}
+
+// An installation token whose expires_at is already past would carry a lease of
+// zero or less: served, it reads as static or as expired at once. The mint fails.
+func TestGitHubDriver_AppMint_RefusesATokenAlreadyExpired(t *testing.T) {
+	key := generateTestRSAKey(t)
+	driver := newGitHubDriverWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"token":      "ghs_stale",
+			"expires_at": time.Now().Add(-time.Minute).Format(time.RFC3339),
+		})
+	})
+
+	_, _, _, _, err := driver.MintCredential(context.Background(), inlineAppSpec("stale", "67890", key))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already expired")
 }

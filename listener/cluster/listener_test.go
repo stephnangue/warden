@@ -8,14 +8,19 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/middleware"
+	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -400,4 +405,147 @@ func getFreePort(t *testing.T) int {
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 	return port
+}
+
+// A forwarded request keeps the id the forwarding node gave it and the client
+// address it resolved, and one that arrives without an id is given one, so no
+// forwarded request is handled — and audited — without an id. The internal
+// id header goes no further than the listener; the client's own X-Request-Id
+// is left alone.
+func TestClusterListener_ForwardedRequest(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	tlsCfg := generateTestClusterTLSConfig(t)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "%s|%s|%s|%s", middleware.GetReqID(r.Context()), listener.ClientIP(r),
+			r.Header.Get(listener.ForwardedRequestIDHeader), r.Header.Get("X-Request-Id"))
+	})
+	addr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	ln, err := NewClusterListener(ClusterListenerConfig{
+		Logger:        log,
+		Address:       addr,
+		Handler:       handler,
+		TLSConfigFunc: func() *tls.Config { return tlsCfg },
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ln.Start(ctx)
+	time.Sleep(200 * time.Millisecond)
+	defer ln.Stop()
+
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			Certificates: tlsCfg.Certificates,
+			RootCAs:      tlsCfg.RootCAs,
+		}},
+		Timeout: 5 * time.Second,
+	}
+	forward := func(headers map[string]string) []string {
+		req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s/v1/aws/gateway", addr), nil)
+		require.NoError(t, err)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return strings.Split(string(body), "|")
+	}
+
+	got := forward(map[string]string{
+		listener.ForwardedRequestIDHeader: "standby-7/abc-000042",
+		"X-Request-Id":                    "the-clients-own",
+		"X-Forwarded-For":                 "198.51.100.1, 203.0.113.7",
+	})
+	assert.Equal(t, "standby-7/abc-000042", got[0], "the forwarding node's id must be kept")
+	assert.Equal(t, "203.0.113.7", got[1], "the entry the forwarding node appended is the client")
+	assert.Empty(t, got[2], "the internal header must go no further")
+	assert.Equal(t, "the-clients-own", got[3], "the client's X-Request-Id is left alone")
+
+	got = forward(map[string]string{"X-Request-Id": "the-clients-own"})
+	assert.NotEqual(t, "the-clients-own", got[0], "the client's X-Request-Id is not the request's id")
+	assert.NotEmpty(t, got[0])
+
+	got = forward(nil)
+	assert.NotEmpty(t, got[0], "a request without an id must be given one")
+	assert.Equal(t, "127.0.0.1", got[1], "without X-Forwarded-For, the connection's address")
+}
+
+// A forwarded certificate counts as coming from a handshake only when the
+// forwarding node says so with the exact marker: no marker, as from an older
+// node, or any other value is a certificate a header supplied. The marker
+// says nothing without a certificate, and goes no further than the listener.
+func TestClusterListener_ForwardedCertHandshake(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	tlsCfg := generateTestClusterTLSConfig(t)
+	certHeader := url.QueryEscape(string(pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: tlsCfg.Certificates[0].Certificate[0],
+	})))
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "%t|%t|%s", listener.ForwardedClientCert(r.Context()) != nil,
+			listener.ClientCertFromHandshake(r.Context()), r.Header.Get(listener.ForwardedCertHandshakeHeader))
+	})
+	addr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	ln, err := NewClusterListener(ClusterListenerConfig{
+		Logger:        log,
+		Address:       addr,
+		Handler:       handler,
+		TLSConfigFunc: func() *tls.Config { return tlsCfg },
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ln.Start(ctx)
+	time.Sleep(200 * time.Millisecond)
+	defer ln.Stop()
+
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			Certificates: tlsCfg.Certificates,
+			RootCAs:      tlsCfg.RootCAs,
+		}},
+		Timeout: 5 * time.Second,
+	}
+
+	tests := []struct {
+		name          string
+		cert          string
+		marker        string
+		wantCert      bool
+		wantHandshake bool
+	}{
+		{name: "certificate with the marker", cert: certHeader, marker: listener.ForwardedCertHandshakeTrue, wantCert: true, wantHandshake: true},
+		{name: "certificate without the marker", cert: certHeader, wantCert: true},
+		{name: "certificate with another value", cert: certHeader, marker: "TRUE", wantCert: true},
+		{name: "marker without a certificate", marker: listener.ForwardedCertHandshakeTrue},
+		{name: "marker with an unusable certificate", cert: "not-a-cert", marker: listener.ForwardedCertHandshakeTrue},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s/v1/aws/gateway", addr), nil)
+			require.NoError(t, err)
+			if tc.cert != "" {
+				req.Header.Set("X-SSL-Client-Cert", tc.cert)
+			}
+			if tc.marker != "" {
+				req.Header.Set(listener.ForwardedCertHandshakeHeader, tc.marker)
+			}
+			resp, err := client.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+
+			got := strings.Split(string(body), "|")
+			assert.Equal(t, fmt.Sprint(tc.wantCert), got[0], "certificate present")
+			assert.Equal(t, fmt.Sprint(tc.wantHandshake), got[1], "from a handshake")
+			assert.Empty(t, got[2], "the internal marker must go no further")
+		})
+	}
 }

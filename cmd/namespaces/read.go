@@ -55,11 +55,12 @@ func runRead(cmd *cobra.Command, args []string) error {
 	}
 
 	data := map[string]any{
-		"id":      ns.ID,
-		"path":    ns.Path,
-		"locked":  ns.Locked,
-		"tainted": ns.Tainted,
-		"uuid":    ns.Uuid,
+		"id":                   ns.ID,
+		"path":                 ns.Path,
+		"locked":               ns.Locked,
+		"tainted":              ns.Tainted,
+		"uuid":                 ns.Uuid,
+		"enable_builtin_roles": ns.EnableBuiltinRoles,
 	}
 	if len(ns.CustomMetadata) > 0 {
 		meta := make(map[string]any, len(ns.CustomMetadata))
@@ -73,6 +74,7 @@ func runRead(cmd *cobra.Command, args []string) error {
 		headers := []string{"Key", "Value"}
 		rows := [][]any{
 			{"custom_metadata", formatCustomMetadata(ns.CustomMetadata)},
+			{"enable_builtin_roles", ns.EnableBuiltinRoles},
 			{"id", ns.ID},
 			{"locked", ns.Locked},
 			{"path", ns.Path},

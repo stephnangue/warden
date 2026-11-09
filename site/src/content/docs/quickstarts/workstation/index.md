@@ -11,7 +11,7 @@ Why bother? A credential on the workstation is three problems at once: it's **st
 machine** in plaintext (readable by any dependency, script, or tool that runs as you), it has
 **no central policy** (the raw key or token grants everything it can, with no per-task limits),
 and it leaves **no central audit** (calls hit the provider directly, with no record of who did
-what). Each rung moves a credential into Warden, which fixes all three: the secret leaves the
+what). Each rung moves a credential behind Warden, which fixes all three: the secret leaves the
 laptop, every request is policy-checked, and every call is audited under the caller's identity.
 And each rung *shows* the last two — it turns on the audit log and watches a request get denied
 by policy, rather than just asserting it.
@@ -21,8 +21,10 @@ by policy, rather than just asserting it.
 Warden is a **secure gateway for AI agents**. Your agent talks to Warden; Warden authenticates
 the caller, **enforces policy on the request** (which roles, which upstreams, even which
 parameters are allowed), injects the *real* upstream credential (an LLM API key, an OAuth
-token, cloud creds) **server-side**, proxies the request, and audits it. The secret lives in
-Warden, never on the workstation. A local **ghostunnel** sidecar gives the agent a
+token, cloud creds) **server-side**, proxies the request, and audits it. The secret is never
+on the workstation: Warden federates with the upstream, fetches the secret from your secret
+store per request, or — as these tutorials do, to stay short — stores it itself. A local
+**ghostunnel** sidecar gives the agent a
 cryptographic identity (an mTLS client certificate, or a SPIFFE SVID) that Warden uses to
 decide what it may reach.
 
@@ -56,7 +58,7 @@ column is a strict superset of the one before it:
 | Client **private key** | on disk | on disk | ✅ |
 
 By **03** the workstation holds **no long-lived credentials at all** — the identity is a
-keyless, auto-rotating SVID, and every upstream secret lives only in Warden.
+keyless, auto-rotating SVID, and no upstream secret is ever on the workstation.
 
 ## Prerequisites (the whole series)
 
@@ -66,8 +68,8 @@ The host needs almost nothing — everything runs in containers from published i
 |----------|-----|-------|
 | **Docker** (Desktop or Engine) with Compose v2 | all rungs | `docker compose version` (v2.23.1+ for 03) |
 | **Claude Code** CLI | all rungs | `claude --version` |
-| An **Anthropic API key** | 01–03 | from [console.anthropic.com](https://console.anthropic.com); it stays inside Warden |
-| A **GitHub PAT** (classic) | 02, 03 | `repo` + `read:org` scope; it stays inside Warden |
+| An **Anthropic API key** | 01–03 | from [console.anthropic.com](https://console.anthropic.com); it never reaches the workstation |
+| A **GitHub PAT** (classic) | 02, 03 | `repo` + `read:org` scope; it never reaches the workstation |
 
 Nothing to compile — `docker compose` pulls the published Warden and ghostunnel images. The only
 host binary is the **Warden CLI** for admin commands; each tutorial's prerequisites download it
@@ -78,6 +80,12 @@ TLS-verify).
 > is plain HTTP over loopback. That's inherent to the sidecar pattern; it's safe on a
 > single-user workstation because ghostunnel binds `127.0.0.1` only, so no other host can ride
 > the tunnel. SPIFFE doesn't change this — what it removes is the *private key on disk*.
+
+> **The tutorials store each upstream secret in Warden** — the shortest setup, and Warden
+> warns when you do it. In production, Warden need not hold them: chain each one from the
+> secret store you already run with [credential chaining](/federation/credential-chaining/),
+> or drop it entirely where the upstream supports [keyless federation](/federation/keyless-credentials/).
+> Each rung ends with an **In production** note on what changes.
 
 ## Where to start
 

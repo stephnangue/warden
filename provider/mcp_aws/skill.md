@@ -1,5 +1,5 @@
 ---
-name: mcp_aws
+name: mcp-aws
 description: "Talk to AWS-hosted MCP through Warden — without holding IAM keys. Your MCP client points at Warden under a role fixed at attach time (one attached server per role). Fronts both AWS's hosted MCP Server (aws-mcp.{region}.api.aws) and customer-owned MCP servers on Bedrock AgentCore."
 category: provider-guide
 provider: mcp_aws
@@ -27,8 +27,8 @@ Warden policy applies). Your role is the `role/<role>/gateway` segment of the UR
 this server was attached at — **fixed for this server**, and not changeable at
 runtime (an MCP client sends fixed headers, and the role can't be passed in a
 tool call). To act under a *different* role, call the MCP server the operator
-attached for that role: the operator attaches **one server per role**, named or
-described to match a `list_roles` entry.
+attached for that role: the operator attaches **one server per role**, each at
+that role's `url` from the `list_roles` discovery tool.
 
 ## Attaching the client
 
@@ -79,17 +79,36 @@ convention. A `401` means the JWT expired (typical TTL 5–60 min) — refresh i
   ask the operator to widen it, don't switch Warden roles unless a broader one
   exists.
 - **Warden policy can gate tools too — body-authoritative.** An operator may bind
-  an `mcp { }` block restricting JSON-RPC methods, tool names, and `tools/call`
-  arguments (including `service_name` / `operation_name` / `region_name`). A deny
-  is HTTP 403 with an RFC 6750 `WWW-Authenticate: Bearer
+  an MCP policy restricting JSON-RPC methods, tool names, and `tools/call`
+  arguments (including `service_name` / `operation_name` / `region_name`). Such a
+  policy is required: on an MCP mount with none in scope every call is denied. A
+  deny is HTTP 403 with an RFC 6750 `WWW-Authenticate: Bearer
   error="insufficient_permissions", error_description="..."` header naming the
-  offender — **independent** of IAM `AccessDenied` (a native AWS error streamed
+  offender, and a JSON-RPC error for that call (code `-32090`); the session
+  stays open. It is **independent** of IAM `AccessDenied` (a native AWS error streamed
   back). Read the `error_description` to tell them apart. Structural problems
   (malformed JSON-RPC, duplicate keys, oversized body) also fail closed.
 - **Streamable HTTP / SSE flows through transparently.** The `Mcp-Session-Id`
-  response header round-trips so follow-up requests reach the same session.
-- **Session timeout is mount-wide** (default 10 minutes); ask the operator to
-  raise it for longer sessions.
+  response header round-trips so follow-up requests reach the same session. It
+  is legacy-era; an upstream speaking 2026-07-28 holds no session and ignores
+  it.
+- **Both protocol eras are served.** `server/discover` needs no allow-list
+  entry — it is exempt like `initialize`, `ping` and `notifications/*` — though
+  an operator can still block it by name. If you send the 2026-07-28 transport
+  headers (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`), they must match
+  the body: a contradiction is refused with HTTP 400 and a JSON-RPC `-32020`,
+  which means fix the headers, not the policy. Announce that revision and your
+  JSON-RPC batches are refused too. Subscribing to a resource — modern
+  `subscriptions/listen` or legacy `resources/subscribe` — answers to the
+  `resources` allow-list, the same grant that governs reading it.
+- **Upstream skills are resources.** `skills/list`, `skills/get` and
+  `resources/directory/read` answer to that same `resources` grant, by URI:
+  `skills/list` lists only the skills you may fetch, and a `skills/get`
+  outside the grant is refused.
+- **Two mount-wide deadlines, picked by method.** `timeout` caps a single call
+  (default 60 seconds); `listen_timeout` caps a `subscriptions/listen` stream
+  (default 10 minutes), and only that method. Ask the operator to raise
+  whichever one your workload actually hits.
 - **STS credentials are short-lived.** A signed request is valid 15 minutes from
   `X-Amz-Date`; tool calls beyond that fail with a SigV4 expiration error rather
   than refreshing — restart the session for very long operations.

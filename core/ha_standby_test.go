@@ -89,7 +89,7 @@ func TestHA_StepDown(t *testing.T) {
 	require.NotNil(t, standby)
 
 	// Step down the active node
-	err := active.StepDown(nil)
+	err := active.StepDown()
 	require.NoError(t, err)
 
 	// The former standby should become active
@@ -142,7 +142,7 @@ func TestHA_StepDown_ReAcquire(t *testing.T) {
 	firstActiveAddr := active.redirectAddr
 
 	// Step down active -> standby should promote
-	err := active.StepDown(nil)
+	err := active.StepDown()
 	require.NoError(t, err)
 
 	newActive := waitForActiveNode(t, []*Core{standby}, 10*time.Second)
@@ -150,7 +150,7 @@ func TestHA_StepDown_ReAcquire(t *testing.T) {
 	assert.Equal(t, standby.redirectAddr, newActive.redirectAddr)
 
 	// Step down again -> original should re-acquire
-	err = newActive.StepDown(nil)
+	err = newActive.StepDown()
 	require.NoError(t, err)
 
 	reAcquired := waitForActiveNode(t, []*Core{core1, core2}, 10*time.Second)
@@ -490,7 +490,7 @@ func TestHA_SealedNodeReleasesLock(t *testing.T) {
 
 	// Step down active — since the sealed standby cannot contend for
 	// the lock, the original active should re-acquire.
-	err = active.StepDown(nil)
+	err = active.StepDown()
 	require.NoError(t, err)
 
 	newActive := waitForActiveNode(t, []*Core{active}, 10*time.Second)
@@ -541,7 +541,7 @@ func TestHA_SealDuringLockContention(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Step down active — the unsealed standby should become active
-	err = active.StepDown(nil)
+	err = active.StepDown()
 	require.NoError(t, err)
 
 	newActive := waitForActiveNode(t, []*Core{standbys[1], active}, 10*time.Second)

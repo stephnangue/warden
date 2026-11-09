@@ -40,7 +40,12 @@ combined with it. See [Dev Server](/concepts/dev-server/).
 warden server --dev
 warden server --dev --dev-root-token=root
 warden server --dev --dev-tls          # self-signed TLS listener
+warden server --dev-playground         # dev mode, plus the playground
 ```
+
+`--dev-playground` implies `--dev` and starts the playground beside it: an identity
+provider, a protected bank, and the roles and policies the
+[Getting started](/getting-started/) tour runs on.
 
 ## Flags
 
@@ -64,13 +69,22 @@ warden server --dev --dev-tls          # self-signed TLS listener
 | `--dev-tls-require-client-cert` | `false` | Require client certificates (needs `--dev-tls-ca-cert-file`). |
 | `--dev-tls-spiffe` | `false` | Serve dev TLS using a SPIFFE Workload API X509-SVID (auto-rotating). |
 | `--dev-tls-spiffe-socket` | `$SPIFFE_ENDPOINT_SOCKET` | Workload API socket for `--dev-tls-spiffe`. |
+| `--dev-tls-cert-dir` | *(a temp dir)* | Directory to write the auto-generated dev TLS certificate and key to, kept after shutdown. |
+| `--dev-tls-san` | *(none)* | Extra DNS name or IP for the auto-generated dev TLS certificate. Repeatable. |
+| `--dev-listen-address` | `127.0.0.1:8400` | Address the dev listener binds. Falls back to `WARDEN_DEV_LISTEN_ADDRESS`. |
+| `--dev-playground` | `false` | Start the playground: an identity provider, a protected bank and the tour's scenarios. Implies `--dev`. |
+| `--dev-playground-as-addr` | `127.0.0.1:8410` | Address the playground's identity provider listens on. |
+| `--dev-playground-bank-addr` | `127.0.0.1:8420` | Address the playground's bank listens on. |
 
-The dev-TLS flags require `--dev`. The SPIFFE serving mode is mutually exclusive
-with the file-based dev-TLS flags.
+The dev-TLS and dev-listener flags require `--dev`. The SPIFFE serving mode is
+mutually exclusive with the file-based dev-TLS flags, and with `--dev-playground`.
+The two playground address flags require `--dev-playground`.
 
 ## See Also
 
 - [Dev Server](/concepts/dev-server/) — what dev mode sets up and its limits.
+- [Getting started](/getting-started/) — the playground's tour.
+- [`warden dev`](/cli/dev/) — the playground's commands.
 - [Storage](/concepts/storage/) — production storage backends.
 - [Seal / Unseal](/concepts/seal-unseal/) — initialization and unsealing.
 - [High Availability](/concepts/high-availability/) — clustering and HA configuration.

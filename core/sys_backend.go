@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
@@ -15,6 +16,11 @@ type SystemBackend struct {
 	*framework.Backend
 	core   *Core
 	logger *logger.GatedLogger
+
+	// mcpHandler is the MCP discovery server (sys/mcp), built once, on first
+	// use, by discoveryMCP.
+	mcpOnce    sync.Once
+	mcpHandler http.Handler
 }
 
 // NewSystemBackend creates a new system backend using framework.Backend
@@ -32,13 +38,40 @@ func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
 			Unauthenticated: []string{
 				"init",
 				"health",
+			},
+			// Discovery: authorized on the presented credential, with no role,
+			// under the built-in policies (logical.Paths.Identity).
+			Identity: []string{
 				"introspect/roles",
+				"mcp",
+				// The sponsor surface: tickets only (isSponsorPath), outside
+				// identity/entity/, whose paths are root paths.
+				"identity/sponsor/*",
+			},
+			// The discovery server reads its JSON-RPC body raw, under the MCP
+			// gate, and writes its own response, a notification stream
+			// included (logical.Paths.Stream). It proxies nothing and, being
+			// an identity path, mints nothing.
+			Stream: []string{
+				"mcp",
 			},
 			Root: []string{
 				"auth/*",
 				"cred/*",
 				"audit/*",
 				"audit-hash/*",
+				"dev/*",
+				"roles",
+				"roles/*",
+				// The group, entity and lookup paths: identity/usage is a
+				// normal ACL path.
+				"identity/group",
+				"identity/group/*",
+				"identity/entity",
+				"identity/entity/*",
+				"identity/lookup",
+				"identity/config",
+				"step-down",
 			},
 		},
 		Paths: b.paths(),
@@ -57,8 +90,11 @@ func (b *SystemBackend) paths() []*framework.Path {
 	// Auth paths
 	paths = append(paths, b.pathAuth()...)
 
-	// Introspection aggregator — fans out to per-backend introspect/roles
+	// Role discovery from admissions and groups
 	paths = append(paths, b.pathIntrospectRoles()...)
+
+	// The MCP discovery server
+	paths = append(paths, b.pathMCP()...)
 
 	// Namespace paths
 	paths = append(paths, b.pathNamespaces()...)
@@ -78,12 +114,33 @@ func (b *SystemBackend) paths() []*framework.Path {
 	// Policy paths
 	paths = append(paths, b.pathPolicies()...)
 
+	// Namespace roles
+	paths = append(paths, b.pathRoles()...)
+
+	// Namespace groups
+	paths = append(paths, b.pathIdentityGroups()...)
+
+	// Namespace entities and their native identities
+	paths = append(paths, b.pathIdentityEntities()...)
+
+	// The sponsors' own paths on the entities they sponsor
+	paths = append(paths, b.pathIdentitySponsor()...)
+
+	// The namespace's identity verdict settings
+	paths = append(paths, b.pathIdentityConfig()...)
+
 	// Audit paths
 	paths = append(paths, b.pathAudit()...)
 	paths = append(paths, b.pathAuditHash()...)
 
 	// OpenAPI / schema endpoint (agent-facing introspection)
 	paths = append(paths, b.pathOpenAPI()...)
+
+	// Dev playground: present only on a server started with -dev-playground.
+	paths = append(paths, b.pathDev()...)
+
+	// HA leadership
+	paths = append(paths, b.pathStepDown()...)
 
 	return paths
 }
@@ -147,5 +204,7 @@ This includes:
 - Namespace management (create, list, delete)
 - Credential management (sources and specs)
 - Policy management (create, list, delete)
+- Role management (create, read, update, delete, list)
+- Group management (create, read, update, delete, list)
 - System initialization and management
 `

@@ -47,6 +47,7 @@ func createClusterTestCore(t *testing.T, clusterAddr string) *Core {
 
 	c, err := NewCore(conf)
 	require.NoError(t, err)
+	t.Cleanup(c.closeStores)
 	return c
 }
 

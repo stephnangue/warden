@@ -1,0 +1,170 @@
+// Package remotesign provides signing backends whose private key is held in an
+// external KMS and never leaves it. Warden keeps only a handle plus the public
+// key, and asks the KMS to sign each digest.
+//
+// A Backend produces a crypto.Signer (Signer), so remote signing substitutes
+// wherever a caller already holds one — the OIDC issuer's signing key today —
+// and signing and verification flow through the standard crypto.Signer /
+// crypto.PublicKey interfaces. Cloud KMS and PKCS#11/HSM backends can be added by
+// implementing Backend without touching any caller.
+//
+// The package deliberately depends on no other Warden package beyond logging, so
+// callers in any layer can use it without inverting their dependencies.
+package remotesign
+
+import (
+	"context"
+	"crypto"
+	"crypto/elliptic"
+	"errors"
+	"io"
+	"time"
+)
+
+// ErrRotationUnsupported is returned by a Backend whose keys are provisioned and
+// rotated out-of-band (e.g. an HSM referenced by label): NewVersion is not a
+// programmatic operation there, and the caller degrades to operator-managed
+// rotation. The transit backend supports rotation and never returns this.
+var ErrRotationUnsupported = errors.New("remotesign: backend does not support programmatic key rotation")
+
+// KeyRef names one immutable key version in the backend. Alg is carried so a
+// stateless Sign call can select the signing parameters (hash, and PKCS#1 v1.5
+// vs the KMS default) without inspecting key material.
+//
+// Version is opaque and backend-defined: a decimal counter for transit, an
+// identifier string for stores that name their versions, and empty for a backend
+// whose keys have no versions. Each backend parses its own form at its edge.
+type KeyRef struct {
+	KeyName string
+	Version string
+	Alg     string // JWS alg, e.g. "RS256" / "ES256"
+}
+
+// KeyInfo is a provisioned key version and its public half.
+type KeyInfo struct {
+	Ref       KeyRef
+	Public    crypto.PublicKey // *rsa.PublicKey or *ecdsa.PublicKey
+	CreatedAt time.Time        // KMS-side creation time; anchors rotation scheduling
+}
+
+// SigningBackend signs with keys whose private half never leaves the KMS. It is
+// all a holder of someone else's key needs: a consumer signing with a key it was
+// handed a capability for never creates or rotates that key.
+type SigningBackend interface {
+	// Type is the persisted discriminator, e.g. "transit".
+	Type() string
+	// PublicKey fetches one specific version's public key.
+	PublicKey(ctx context.Context, ref KeyRef) (crypto.PublicKey, error)
+	// Sign signs an already-hashed digest with the exact version in ref, honoring
+	// the crypto.Signer contract: RSA -> PKCS#1 v1.5 raw bytes, or RSASSA-PSS when
+	// opts is *rsa.PSSOptions; ECDSA -> ASN.1 DER.
+	Sign(ctx context.Context, ref KeyRef, digest []byte, opts crypto.SignerOpts) ([]byte, error)
+	// Close releases resources (e.g. stops token renewal).
+	Close()
+}
+
+// Backend is a SigningBackend that also provisions and rotates its own keys, as
+// the OIDC issuer needs.
+//
+// Create/rotate are optional capabilities: a backend whose keys are provisioned
+// out-of-band (HSM/KMIP) implements EnsureKey as "adopt an existing key by
+// reference" and may return ErrRotationUnsupported from NewVersion.
+type Backend interface {
+	SigningBackend
+	// EnsureKey ensures alg's key exists (idempotent) and returns its latest version.
+	EnsureKey(ctx context.Context, alg string) (KeyInfo, error)
+	// NewVersion rotates alg's key and returns the new latest version, or
+	// ErrRotationUnsupported for out-of-band-managed backends.
+	NewVersion(ctx context.Context, alg string) (KeyInfo, error)
+}
+
+// algParams maps a JWS alg to the backend-neutral signing parameters. This is the
+// table every compact JWS is signed by, the OIDC issuer's included; the core alg
+// table keeps only how to generate a key, and its algs must all appear here. What
+// a particular store calls a key type or a hash lives with that store's backend.
+type algParams struct {
+	hash  crypto.Hash    // the digest the caller must have used
+	isRSA bool           //
+	pss   bool           // RSASSA-PSS rather than PKCS#1 v1.5; RSA only
+	curve elliptic.Curve // nil for RSA; the curve whose width an ES* signature is padded to
+}
+
+var algParamsByAlg = map[string]algParams{
+	"RS256": {hash: crypto.SHA256, isRSA: true},
+	"RS384": {hash: crypto.SHA384, isRSA: true},
+	"PS256": {hash: crypto.SHA256, isRSA: true, pss: true},
+	"ES256": {hash: crypto.SHA256, isRSA: false, curve: elliptic.P256()},
+	"ES384": {hash: crypto.SHA384, isRSA: false, curve: elliptic.P384()},
+}
+
+// Signer adapts one (Backend, KeyRef) pair to crypto.Signer, so it drops into the
+// issuer's signingKey.key. It holds no private key material — Sign reaches the
+// backend. A nil backend makes it verification-only (Public works; Sign fails
+// closed), used for retired remote keys after a cutover or once the stanza is
+// removed.
+type Signer struct {
+	backend     SigningBackend
+	backendType string // persisted discriminator, retained even when backend is nil
+	ref         KeyRef
+	pub         crypto.PublicKey
+	timeout     time.Duration
+	ctx         context.Context // optional request-scoped context bound via WithContext
+}
+
+// NewSigner builds a signing-capable Signer bound to a live backend.
+func NewSigner(backend SigningBackend, ref KeyRef, pub crypto.PublicKey, timeout time.Duration) *Signer {
+	bt := ""
+	if backend != nil {
+		bt = backend.Type()
+	}
+	return &Signer{backend: backend, backendType: bt, ref: ref, pub: pub, timeout: timeout}
+}
+
+// NewVerifyingSigner builds a verification-only Signer (no live backend): Public
+// works, Sign fails closed. Used to reconstruct a retired remote key after a
+// cutover, or when the signer stanza has been removed — it keeps the key in the
+// JWKS so its in-flight assertions still verify. backendType is retained so the
+// key re-serializes as remote.
+func NewVerifyingSigner(backendType string, ref KeyRef, pub crypto.PublicKey) *Signer {
+	return &Signer{backendType: backendType, ref: ref, pub: pub}
+}
+
+// Public returns the cached public key (never a KMS round-trip).
+func (s *Signer) Public() crypto.PublicKey { return s.pub }
+
+// Ref returns the backend key reference this signer is bound to.
+func (s *Signer) Ref() KeyRef { return s.ref }
+
+// BackendType returns the backend discriminator ("transit"), retained even for a
+// verification-only signer so it round-trips through storage as a remote key.
+func (s *Signer) BackendType() string { return s.backendType }
+
+// CanSign reports whether this signer has a live backend (vs verification-only).
+func (s *Signer) CanSign() bool { return s.backend != nil }
+
+// Sign signs an already-hashed digest by asking the backend, under a per-call
+// timeout bounded further by any context bound via WithContext.
+func (s *Signer) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	if s.backend == nil {
+		return nil, errors.New("remotesign: no signing backend for this key (verification-only)")
+	}
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.timeout)
+		defer cancel()
+	}
+	return s.backend.Sign(ctx, s.ref, digest, opts)
+}
+
+// WithContext returns a shallow copy bound to ctx, so the mint request's
+// deadline/cancellation reaches the backend round-trip. Implements the optional
+// interface SignCompactJWS type-asserts.
+func (s *Signer) WithContext(ctx context.Context) crypto.Signer {
+	cp := *s
+	cp.ctx = ctx
+	return &cp
+}

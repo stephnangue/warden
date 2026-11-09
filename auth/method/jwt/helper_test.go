@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stephnangue/warden/logical"
+
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -440,77 +442,6 @@ func TestExtractClaim_TableDriven(t *testing.T) {
 	}
 }
 
-func TestExtractGroupsClaim(t *testing.T) {
-	tests := []struct {
-		name     string
-		claims   map[string]interface{}
-		claim    string
-		expected []string
-	}{
-		{
-			name:     "string array",
-			claims:   map[string]interface{}{"groups": []interface{}{"db-read", "monitoring"}},
-			claim:    "groups",
-			expected: []string{"db-read", "monitoring"},
-		},
-		{
-			name:     "single string",
-			claims:   map[string]interface{}{"role": "admin"},
-			claim:    "role",
-			expected: []string{"admin"},
-		},
-		{
-			name:     "comma-separated string",
-			claims:   map[string]interface{}{"groups": "db-read,monitoring, admin"},
-			claim:    "groups",
-			expected: []string{"db-read", "monitoring", "admin"},
-		},
-		{
-			name:     "missing claim",
-			claims:   map[string]interface{}{"sub": "user1"},
-			claim:    "groups",
-			expected: nil,
-		},
-		{
-			name:     "empty string",
-			claims:   map[string]interface{}{"groups": ""},
-			claim:    "groups",
-			expected: nil,
-		},
-		{
-			name:     "empty array",
-			claims:   map[string]interface{}{"groups": []interface{}{}},
-			claim:    "groups",
-			expected: []string{},
-		},
-		{
-			name:     "array with non-string elements skipped",
-			claims:   map[string]interface{}{"groups": []interface{}{"admin", 42, "reader"}},
-			claim:    "groups",
-			expected: []string{"admin", "reader"},
-		},
-		{
-			name:     "non-string non-array type returns nil",
-			claims:   map[string]interface{}{"groups": 42},
-			claim:    "groups",
-			expected: nil,
-		},
-		{
-			name:     "cognito:groups nested claim name",
-			claims:   map[string]interface{}{"cognito:groups": []interface{}{"db-read"}},
-			claim:    "cognito:groups",
-			expected: []string{"db-read"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			result := extractGroupsClaim(tc.claims, tc.claim)
-			assert.Equal(t, tc.expected, result)
-		})
-	}
-}
-
 func TestVerifyURLReachable_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -599,6 +530,30 @@ func TestExtractActChain_NestedChain(t *testing.T) {
 	require.Len(t, got, 2)
 	assert.Equal(t, "broker-beta", got[0].Subject)
 	assert.Equal(t, "agents/alpha", got[1].Subject)
+}
+
+func TestExtractActChain_Issuer(t *testing.T) {
+	// A layer's iss is kept only when it is a non-empty string, and never
+	// defaulted from the token's own iss: an assertion that re-emits the chain
+	// must pass through exactly what the IdP attested.
+	claims := map[string]interface{}{
+		"iss": "https://token-issuer.example.com",
+		"sub": "alice",
+		"act": map[string]interface{}{
+			"sub": "broker-beta",
+			"iss": "https://idp.example.com",
+			"act": map[string]interface{}{
+				"sub": "agents/alpha",
+				"iss": 42, // non-string: dropped, the layer itself is kept
+				"act": map[string]interface{}{"sub": "agents/root"},
+			},
+		},
+	}
+	got := extractActChain(claims)
+	require.Len(t, got, 3)
+	assert.Equal(t, logical.ActorRef{Subject: "broker-beta", Issuer: "https://idp.example.com"}, got[0])
+	assert.Equal(t, logical.ActorRef{Subject: "agents/alpha"}, got[1])
+	assert.Equal(t, logical.ActorRef{Subject: "agents/root"}, got[2])
 }
 
 func TestExtractActChain_NonObjectAct(t *testing.T) {

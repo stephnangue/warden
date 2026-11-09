@@ -2,8 +2,10 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +38,7 @@ type routeEntry struct {
 	rootPaths      atomic.Value
 	loginPaths     atomic.Value
 	streamingPaths atomic.Value // stores *radix.Tree for streaming paths
+	identityPaths  atomic.Value // stores *radix.Tree for identity paths
 	l              sync.RWMutex
 }
 
@@ -158,6 +161,10 @@ func (r *Router) Mount(prefix string, backend logical.Backend, mountEntry *Mount
 	}
 	re.loginPaths.Store(loginPathsEntry)
 	re.streamingPaths.Store(pathsToRadix(paths.Stream))
+	if err := validateIdentityPaths(backend, paths); err != nil {
+		return err
+	}
+	re.identityPaths.Store(pathsToRadix(paths.Identity))
 
 	switch {
 	case prefix == "":
@@ -231,6 +238,38 @@ func (r *Router) MatchingMountByAccessor(mountAccessor string) *MountEntry {
 	}
 
 	return raw.(*MountEntry)
+}
+
+// MatchingBackendByAccessor returns the mount whose accessor is exactly
+// mountAccessor, and its backend; both are nil when there is none. Unlike
+// MatchingMountByAccessor it never matches a mount whose accessor merely starts
+// with mountAccessor, so an accessor taken from a credential cannot name a
+// mount it does not spell out in full.
+func (r *Router) MatchingBackendByAccessor(mountAccessor string) (*MountEntry, logical.Backend) {
+	if mountAccessor == "" {
+		return nil, nil
+	}
+
+	r.mu.RLock()
+	raw, ok := r.mountAccessorCache.Get(mountAccessor)
+	if !ok {
+		r.mu.RUnlock()
+		return nil, nil
+	}
+	entry := raw.(*MountEntry)
+	routed, ok := r.root.Get(entry.APIPath())
+	r.mu.RUnlock()
+	if !ok {
+		return nil, nil
+	}
+
+	re := routed.(*routeEntry)
+	re.l.RLock()
+	defer re.l.RUnlock()
+	if re.mountEntry != entry {
+		return nil, nil
+	}
+	return entry, re.backend
 }
 
 // MountConflict determines if there are potential path conflicts
@@ -441,6 +480,28 @@ func (r *Router) MatchingMountEntry(ctx context.Context, path string) *MountEntr
 		return nil
 	}
 	return raw.(*routeEntry).mountEntry
+}
+
+// MatchingMountEntryAndBackend returns the MountEntry and the backend used for
+// a path, from one lookup; both are nil when no mount matches.
+func (r *Router) MatchingMountEntryAndBackend(ctx context.Context, path string) (*MountEntry, logical.Backend) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, nil
+	}
+	path = ns.Path + path
+
+	r.mu.RLock()
+	_, raw, ok := r.root.LongestPrefix(path)
+	r.mu.RUnlock()
+	if !ok {
+		return nil, nil
+	}
+
+	re := raw.(*routeEntry)
+	re.l.RLock()
+	defer re.l.RUnlock()
+	return re.mountEntry, re.backend
 }
 
 // MatchingBackend returns the backend used for a path
@@ -702,6 +763,25 @@ func (r *Router) LoginPath(ctx context.Context, path string) bool {
 
 // RootPath checks if the given path requires root privileges
 func (r *Router) RootPath(ctx context.Context, path string) bool {
+	return r.specialPath(ctx, path, func(re *routeEntry) *atomic.Value { return &re.rootPaths })
+}
+
+// StreamingPath checks if the given path is a streaming path.
+// Streaming paths should not have their request body parsed.
+func (r *Router) StreamingPath(ctx context.Context, path string) bool {
+	return r.specialPath(ctx, path, func(re *routeEntry) *atomic.Value { return &re.streamingPaths })
+}
+
+// IdentityPath checks if the given path is an identity path (see
+// logical.Paths.Identity).
+func (r *Router) IdentityPath(ctx context.Context, path string) bool {
+	return r.specialPath(ctx, path, func(re *routeEntry) *atomic.Value { return &re.identityPaths })
+}
+
+// specialPath reports whether path, in the namespace of ctx, matches one of
+// the special paths that set picks out of the mount it routes to: exact, or a
+// prefix for an entry that ended in '*'.
+func (r *Router) specialPath(ctx context.Context, path string, set func(*routeEntry) *atomic.Value) bool {
 	ns, err := namespace.FromContext(ctx)
 	if err != nil {
 		return false
@@ -723,9 +803,11 @@ func (r *Router) RootPath(ctx context.Context, path string) bool {
 	// Trim to get remaining path
 	remain := strings.TrimPrefix(adjustedPath, mount)
 
-	// Check the rootPaths of this backend
-	rootPaths := re.rootPaths.Load().(*radix.Tree)
-	match, raw, ok := rootPaths.LongestPrefix(remain)
+	tree, _ := set(re).Load().(*radix.Tree)
+	if tree == nil {
+		return false
+	}
+	match, raw, ok := tree.LongestPrefix(remain)
 	if !ok {
 		return false
 	}
@@ -740,45 +822,24 @@ func (r *Router) RootPath(ctx context.Context, path string) bool {
 	return match == remain
 }
 
-// StreamingPath checks if the given path is a streaming path.
-// Streaming paths should not have their request body parsed.
-func (r *Router) StreamingPath(ctx context.Context, path string) bool {
-	ns, err := namespace.FromContext(ctx)
-	if err != nil {
-		return false
+// validateIdentityPaths refuses identity paths on any backend but the system
+// backend, and an identity path that is also a root or an unauthenticated
+// path. A request to an identity path carries no role and may run under the
+// built-in policies alone, so which paths are identity paths is Warden's own
+// decision, never a plugin's.
+func validateIdentityPaths(backend logical.Backend, paths *logical.Paths) error {
+	if len(paths.Identity) == 0 {
+		return nil
 	}
-
-	adjustedPath := ns.Path + path
-
-	r.mu.RLock()
-	mount, raw, ok := r.root.LongestPrefix(adjustedPath)
-	r.mu.RUnlock()
-	if !ok {
-		return false
+	if backend == nil || backend.Class() != logical.ClassSystem {
+		return errors.New("only the system backend may declare identity paths")
 	}
-	re := raw.(*routeEntry)
-
-	re.l.RLock()
-	defer re.l.RUnlock()
-
-	// Trim to get remaining path
-	remain := strings.TrimPrefix(adjustedPath, mount)
-
-	// Check the streamingPaths of this backend
-	streamingPaths := re.streamingPaths.Load().(*radix.Tree)
-	match, raw, ok := streamingPaths.LongestPrefix(remain)
-	if !ok {
-		return false
+	for _, p := range paths.Identity {
+		if slices.Contains(paths.Root, p) || slices.Contains(paths.Unauthenticated, p) {
+			return fmt.Errorf("identity path %q is also a root or unauthenticated path", p)
+		}
 	}
-	prefixMatch := raw.(bool)
-
-	// Handle the prefix match case
-	if prefixMatch {
-		return strings.HasPrefix(remain, match)
-	}
-
-	// Handle the exact match case
-	return match == remain
+	return nil
 }
 
 // pathMatchesWildcardPath returns true if the path made up of the path slice

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
@@ -33,10 +34,11 @@ func runList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	auths, err := c.Sys().ListAuth()
+	auths, warnings, err := c.Sys().ListAuthWithWarnings(context.Background())
 	if err != nil {
 		return fmt.Errorf("error listing auth methods: %w", err)
 	}
+	helpers.PrintWarnings(warnings)
 
 	if len(auths) == 0 {
 		return helpers.RenderList(nil, func() {

@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,33 +37,34 @@ func TestIBMDriverFactory_SensitiveConfigFields(t *testing.T) {
 func TestIBMDriverFactory_ValidateConfig(t *testing.T) {
 	f := &IBMDriverFactory{}
 
-	t.Run("missing api_key", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "api_key")
+	// The schema no longer demands api_key: a source serving only access_keys specs
+	// never performs the grant, and a chained source is refused one outright. An
+	// iam_token spec still needs it, which VerifySpec and the mint path enforce.
+	t.Run("api_key is not required at source level", func(t *testing.T) {
+		require.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{})))
 	})
 
 	t.Run("valid minimal config", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"api_key": "test-api-key",
-		})
+		}))
 		require.NoError(t, err)
 	})
 
 	t.Run("valid full config", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"api_key":      "test-api-key",
 			"account_id":   "abc123",
 			"iam_endpoint": "https://iam.test.cloud.ibm.com",
-		})
+		}))
 		require.NoError(t, err)
 	})
 
 	t.Run("iam_endpoint rejects http scheme", func(t *testing.T) {
-		err := f.ValidateConfig(map[string]string{
+		err := f.ValidateConfig(credential.NewConfig(map[string]string{
 			"api_key":      "test-api-key",
 			"iam_endpoint": "http://iam.cloud.ibm.com",
-		})
+		}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "https")
 	})
@@ -69,25 +74,30 @@ func TestIBMDriverFactory_InferCredentialType(t *testing.T) {
 	f := &IBMDriverFactory{}
 
 	t.Run("iam_token", func(t *testing.T) {
-		ct, err := f.InferCredentialType(map[string]string{"mint_method": "iam_token"})
+		ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "iam_token"}))
 		require.NoError(t, err)
 		assert.Equal(t, credential.TypeOAuthBearerToken, ct)
 	})
 
 	t.Run("empty defaults to oauth bearer token", func(t *testing.T) {
-		ct, err := f.InferCredentialType(map[string]string{})
+		ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{}))
 		require.NoError(t, err)
 		assert.Equal(t, credential.TypeOAuthBearerToken, ct)
 	})
 
-	t.Run("iam_with_cos", func(t *testing.T) {
-		ct, err := f.InferCredentialType(map[string]string{"mint_method": "iam_with_cos"})
+	t.Run("access_keys", func(t *testing.T) {
+		ct, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "access_keys"}))
 		require.NoError(t, err)
 		assert.Equal(t, credential.TypeIBMCloudKeys, ct)
 	})
 
+	t.Run("iam_with_cos is gone", func(t *testing.T) {
+		_, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "iam_with_cos"}))
+		require.Error(t, err)
+	})
+
 	t.Run("unsupported mint method", func(t *testing.T) {
-		_, err := f.InferCredentialType(map[string]string{"mint_method": "invalid"})
+		_, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "invalid"}))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot infer credential type")
 	})
@@ -101,7 +111,7 @@ func TestIBMDriver_Type(t *testing.T) {
 	d := &IBMDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeIBM,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	assert.Equal(t, credential.SourceTypeIBM, d.Type())
@@ -111,7 +121,7 @@ func TestIBMDriver_Cleanup(t *testing.T) {
 	d := &IBMDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeIBM,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	require.NoError(t, d.Cleanup(context.TODO()))
@@ -121,21 +131,54 @@ func TestIBMDriver_Revoke_NoOp(t *testing.T) {
 	d := &IBMDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeIBM,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 	require.NoError(t, d.Revoke(context.TODO(), "some-lease-id"))
 }
 
 func TestIBMDriver_SupportsRotation(t *testing.T) {
-	t.Run("true when iamID is set", func(t *testing.T) {
-		d := &IBMDriver{iamID: "iam-1234"}
-		assert.True(t, d.SupportsRotation())
+	// SupportsRotation reports on configuration, not on whether discovery has run:
+	// a source holding a key can rotate, and PrepareRotation re-probes the identity
+	// if it has to. The factory always sets credSource, so these mirror a real
+	// driver rather than a bare struct.
+	withConfig := func(cfg map[string]string, iamID string) *IBMDriver {
+		return &IBMDriver{
+			credSource: &credential.CredSource{Type: credential.SourceTypeIBM, Config: credential.NewConfig(cfg)},
+			iamID:      iamID,
+		}
+	}
+
+	t.Run("true when the source holds a key", func(t *testing.T) {
+		assert.True(t, withConfig(map[string]string{"api_key": "k"}, "iam-1234").SupportsRotation())
 	})
 
-	t.Run("false when iamID is empty", func(t *testing.T) {
-		d := &IBMDriver{}
+	// The point of the change: a blip during discovery at creation time must not
+	// disable rotation for the life of the driver instance.
+	t.Run("true even before discovery has run", func(t *testing.T) {
+		assert.True(t, withConfig(map[string]string{"api_key": "k"}, "").SupportsRotation())
+	})
+
+	t.Run("false when the source holds no key", func(t *testing.T) {
+		assert.False(t, withConfig(map[string]string{}, "iam-1234").SupportsRotation())
+	})
+
+	// The key lives at its source of truth; whoever owns the referenced spec rotates
+	// it there. Asserted with iamID set, so it is the chaining that decides and not
+	// merely the absence of discovery.
+	t.Run("false when the source chains its key", func(t *testing.T) {
+		d := &IBMDriver{
+			credSource: &credential.CredSource{
+				Type:   credential.SourceTypeIBM,
+				Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "ibm-api-key"}),
+			},
+			iamID: "iam-1234",
+		}
 		assert.False(t, d.SupportsRotation())
+
+		_, _, _, err := d.PrepareRotation(context.TODO())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
 	})
 }
 
@@ -143,15 +186,15 @@ func TestIBMDriver_MintCredential_UnsupportedMintMethod(t *testing.T) {
 	d := &IBMDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeIBM,
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		},
 	}
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "invalid_method",
-		},
+		}),
 	}
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
@@ -279,10 +322,10 @@ func newTestIBMDriver(t *testing.T, serverURL string) *IBMDriver {
 	return &IBMDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeIBM,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"api_key":      "test-key",
 				"iam_endpoint": serverURL,
-			},
+			}),
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -299,9 +342,9 @@ func TestIBMDriver_MintIAMToken(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "iam_token",
-		},
+		}),
 	}
 
 	rawData, _, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
@@ -320,7 +363,7 @@ func TestIBMDriver_MintIAMToken_DefaultMintMethod(t *testing.T) {
 
 	spec := &credential.CredSpec{
 		Name:   "test-spec",
-		Config: map[string]string{}, // no mint_method = defaults to iam_token
+		Config: credential.NewConfig(map[string]string{}), // no mint_method = defaults to iam_token
 	}
 
 	rawData, _, _, _, err := d.MintCredential(context.TODO(), spec)
@@ -333,19 +376,48 @@ func TestIBMDriver_MintIAMToken_InvalidKey(t *testing.T) {
 	defer srv.Close()
 
 	d := newTestIBMDriver(t, srv.URL)
-	d.credSource.Config["api_key"] = "invalid-key"
+	d.credSource.Config = d.credSource.Config.With("api_key", "invalid-key")
 	d.tokenCache.Clear()
 
 	spec := &credential.CredSpec{
 		Name: "test-spec",
-		Config: map[string]string{
+		Config: credential.NewConfig(map[string]string{
 			"mint_method": "iam_token",
-		},
+		}),
 	}
 
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "IBM IAM token")
+}
+
+// An expiration already past would carry a lease of zero or less: served, the
+// token reads as static or as expired at once. The mint fails.
+func TestIBMDriver_MintIAMToken_RefusesATokenAlreadyExpired(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "stale-token",
+			"token_type":   "Bearer",
+			"expiration":   time.Now().Add(-time.Minute).Unix(),
+		})
+	}))
+	defer srv.Close()
+
+	t.Run("inline key", func(t *testing.T) {
+		_, _, _, _, err := newTestIBMDriver(t, srv.URL).MintCredential(context.TODO(), &credential.CredSpec{
+			Name:   "test-spec",
+			Config: credential.NewConfig(map[string]string{"mint_method": "iam_token"}),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "already expired")
+	})
+	t.Run("fetched key", func(t *testing.T) {
+		material := credential.SecretMaterial{Data: map[string]string{"api_key": "fetched-key"}}
+		_, _, _, _, err := newChainedIBMDriver(t, srv.URL).MintFromSecret(context.TODO(), bearerSpec(), material)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "already expired")
+	})
 }
 
 func TestIBMDriver_TokenCaching(t *testing.T) {
@@ -386,10 +458,10 @@ func TestIBMDriver_DiscoverAPIKeyDetails(t *testing.T) {
 	d := &IBMDriver{
 		credSource: &credential.CredSource{
 			Type: credential.SourceTypeIBM,
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"api_key":      "test-key",
 				"iam_endpoint": srv.URL,
-			},
+			}),
 		},
 		tokenCache: NewTokenCache(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
@@ -400,7 +472,44 @@ func TestIBMDriver_DiscoverAPIKeyDetails(t *testing.T) {
 
 	assert.Equal(t, "iam-ServiceId-abcdef", d.iamID)
 	assert.Equal(t, "ApiKey-12345", d.apiKeyID)
-	assert.Equal(t, "acc-123456", d.credSource.Config["account_id"])
+	assert.Equal(t, "acc-123456", d.discoveredAccountID)
+
+	// The discovered account is held on the driver, never written back into the
+	// config. That config belongs to the config store, which hands the same
+	// instance to readers taking no driver lock, so a write here raced them.
+	//
+	// The Config type now makes such a write a compile error rather than something
+	// a test has to catch; this stays as a guard on the discovery behaviour itself.
+	_, present := d.credSource.Config.Lookup("account_id")
+	assert.False(t, present, "discovery must not write back into the source config")
+}
+
+// An operator-configured account wins over whatever discovery reports, which is
+// what the removed write-back used to express by only filling an unset key.
+func TestIBMDriver_AccountID_ConfiguredWinsOverDiscovered(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := &IBMDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeIBM,
+			Config: credential.NewConfig(map[string]string{
+				"api_key":      "test-key",
+				"iam_endpoint": srv.URL,
+				"account_id":   "acc-operator",
+			}),
+		},
+		tokenCache: NewTokenCache(),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	require.NoError(t, d.discoverAPIKeyDetails(context.TODO()))
+
+	assert.Equal(t, "acc-123456", d.discoveredAccountID, "discovery still records what it saw")
+
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	assert.Equal(t, "acc-operator", d.accountIDLocked())
 }
 
 func TestIBMDriver_PrepareRotation(t *testing.T) {
@@ -408,7 +517,7 @@ func TestIBMDriver_PrepareRotation(t *testing.T) {
 	defer srv.Close()
 
 	d := newTestIBMDriver(t, srv.URL)
-	d.credSource.Config["account_id"] = "acc-123456"
+	d.credSource.Config = d.credSource.Config.With("account_id", "acc-123456")
 
 	newConfig, cleanupConfig, activateAfter, err := d.PrepareRotation(context.TODO())
 	require.NoError(t, err)
@@ -418,8 +527,36 @@ func TestIBMDriver_PrepareRotation(t *testing.T) {
 	assert.Equal(t, DefaultIBMActivationDelay, activateAfter)
 }
 
-func TestIBMDriver_PrepareRotation_NoIAMID(t *testing.T) {
-	d := &IBMDriver{iamID: ""}
+// Discovery is best-effort at creation time, so a blip there used to disable
+// rotation for the life of the driver instance — nothing ever re-ran it. Rotation
+// re-probes instead, which is the first point after creation that both needs the
+// identity and has a context to fetch it with.
+func TestIBMDriver_PrepareRotation_ReprobesDiscovery(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.iamID = "" // as if discovery had failed at Create
+	d.apiKeyID = ""
+
+	newConfig, _, _, err := d.PrepareRotation(context.TODO())
+	require.NoError(t, err)
+	assert.NotEmpty(t, newConfig["api_key"])
+	assert.Equal(t, "iam-ServiceId-abcdef", d.iamID, "the identity was recovered, not assumed")
+}
+
+// When the re-probe itself fails, the error says so rather than reporting the
+// source as unrotatable — the manager can then surface a cause an operator can act on.
+func TestIBMDriver_PrepareRotation_ReportsFailedReprobe(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.iamID = ""
+	d.tokenCache.Clear()
+
 	_, _, _, err := d.PrepareRotation(context.TODO())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "IAM identity not discovered")
@@ -450,10 +587,10 @@ func TestIBMDriverFactory_Create(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 
 	f := &IBMDriverFactory{}
-	driver, err := f.Create(map[string]string{
+	driver, err := f.Create(credential.NewConfig(map[string]string{
 		"api_key":      "test-key",
 		"iam_endpoint": srv.URL,
-	}, log)
+	}), log)
 	require.NoError(t, err)
 
 	ibmDriver, ok := driver.(*IBMDriver)
@@ -469,10 +606,10 @@ func TestIBMDriverFactory_Create_InvalidKey(t *testing.T) {
 	log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
 
 	f := &IBMDriverFactory{}
-	_, err := f.Create(map[string]string{
+	_, err := f.Create(credential.NewConfig(map[string]string{
 		"api_key":      "invalid-key",
 		"iam_endpoint": srv.URL,
-	}, log)
+	}), log)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "IBM Cloud authentication failed")
 }
@@ -490,9 +627,9 @@ func TestIBMDriver_VerifySpec(t *testing.T) {
 	t.Run("valid spec", func(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name: "test-spec",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "iam_token",
-			},
+			}),
 		}
 		err := d.VerifySpec(context.TODO(), spec)
 		require.NoError(t, err)
@@ -501,7 +638,7 @@ func TestIBMDriver_VerifySpec(t *testing.T) {
 	t.Run("default mint method", func(t *testing.T) {
 		spec := &credential.CredSpec{
 			Name:   "test-spec",
-			Config: map[string]string{},
+			Config: credential.NewConfig(map[string]string{}),
 		}
 		err := d.VerifySpec(context.TODO(), spec)
 		require.NoError(t, err)
@@ -509,14 +646,14 @@ func TestIBMDriver_VerifySpec(t *testing.T) {
 
 	t.Run("invalid api key fails verification", func(t *testing.T) {
 		d2 := newTestIBMDriver(t, srv.URL)
-		d2.credSource.Config["api_key"] = "invalid-key"
+		d2.credSource.Config = d2.credSource.Config.With("api_key", "invalid-key")
 		d2.tokenCache.Clear()
 
 		spec := &credential.CredSpec{
 			Name: "test-spec",
-			Config: map[string]string{
+			Config: credential.NewConfig(map[string]string{
 				"mint_method": "iam_token",
-			},
+			}),
 		}
 		err := d2.VerifySpec(context.TODO(), spec)
 		require.Error(t, err)
@@ -525,75 +662,138 @@ func TestIBMDriver_VerifySpec(t *testing.T) {
 }
 
 // ============================================================================
-// iam_with_cos Mint Method Tests
+// access_keys Mint Method Tests
 // ============================================================================
 
-func TestIBMDriver_MintIAMWithCOS_DualMode(t *testing.T) {
+func accessKeysSpec(secretSpec string) *credential.CredSpec {
+	cfg := map[string]string{"mint_method": "access_keys"}
+	if secretSpec != "" {
+		cfg[credential.ConfigSecretSpec] = secretSpec
+	}
+	return &credential.CredSpec{Name: "test-spec", Config: credential.NewConfig(cfg)}
+}
+
+func TestIBMDriver_MintFromSecret_ServesThePair(t *testing.T) {
 	srv := newIBMMockServer(t)
 	defer srv.Close()
 
 	d := newTestIBMDriver(t, srv.URL)
 
-	spec := &credential.CredSpec{
-		Name: "test-spec",
-		Config: map[string]string{
-			"mint_method":       "iam_with_cos",
-			"access_key_id":     "cos-access-key",
-			"secret_access_key": "cos-secret-key",
-		},
-	}
+	material := credential.SecretMaterial{Data: map[string]string{
+		"access_key_id":     "cos-access-key",
+		"secret_access_key": "cos-secret-key",
+	}}
 
-	rawData, _, ttl, leaseID, err := d.MintCredential(context.TODO(), spec)
+	rawData, _, ttl, leaseID, err := d.MintFromSecret(context.TODO(), accessKeysSpec("cos-pair"), material)
 	require.NoError(t, err)
 
-	assert.NotEmpty(t, rawData["access_token"])
 	assert.Equal(t, "cos-access-key", rawData["access_key_id"])
 	assert.Equal(t, "cos-secret-key", rawData["secret_access_key"])
-	assert.True(t, ttl > 0)
-	assert.Empty(t, leaseID, "IAM tokens should have no lease ID")
+	// The bearer half is gone: a spec serves one mode, and this one is COS.
+	assert.NotContains(t, rawData, "access_token")
+	assert.Equal(t, defaultIBMAccessKeysChainTTL, ttl)
+	assert.Empty(t, leaseID, "nothing was created, so nothing is revocable")
 }
 
-func TestIBMDriver_MintIAMWithCOS_APIOnly(t *testing.T) {
+func TestIBMDriver_MintFromSecret_HonoursSecretCacheTTL(t *testing.T) {
 	srv := newIBMMockServer(t)
 	defer srv.Close()
 
 	d := newTestIBMDriver(t, srv.URL)
 
-	spec := &credential.CredSpec{
-		Name: "test-spec",
-		Config: map[string]string{
-			"mint_method": "iam_with_cos",
-		},
-	}
+	spec := accessKeysSpec("cos-pair")
+	spec.Config = spec.Config.With(credential.ConfigSecretCacheTTL, "5m")
 
-	rawData, _, _, _, err := d.MintCredential(context.TODO(), spec)
+	material := credential.SecretMaterial{Data: map[string]string{
+		"access_key_id":     "ak",
+		"secret_access_key": "sk",
+	}}
+
+	_, _, ttl, _, err := d.MintFromSecret(context.TODO(), spec, material)
 	require.NoError(t, err)
-
-	assert.NotEmpty(t, rawData["access_token"])
-	_, hasAK := rawData["access_key_id"]
-	_, hasSK := rawData["secret_access_key"]
-	assert.False(t, hasAK, "COS keys should be absent when not configured")
-	assert.False(t, hasSK, "COS keys should be absent when not configured")
+	assert.Equal(t, 5*time.Minute, ttl)
 }
 
-func TestIBMDriver_MintIAMWithCOS_InvalidKey(t *testing.T) {
+// Half a pair is refused rather than served: the gateway's COS leg needs both, and
+// silently dropping one would surface as an opaque SigV4 failure at the provider.
+func TestIBMDriver_MintFromSecret_RequiresBothHalves(t *testing.T) {
 	srv := newIBMMockServer(t)
 	defer srv.Close()
 
 	d := newTestIBMDriver(t, srv.URL)
-	d.credSource.Config["api_key"] = "invalid-key"
-	d.tokenCache.Clear()
 
-	spec := &credential.CredSpec{
-		Name: "test-spec",
-		Config: map[string]string{
-			"mint_method": "iam_with_cos",
-		},
+	for _, tc := range []struct {
+		name string
+		data map[string]string
+	}{
+		{"missing secret_access_key", map[string]string{"access_key_id": "ak"}},
+		{"missing access_key_id", map[string]string{"secret_access_key": "sk"}},
+		{"empty payload", map[string]string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, _, err := d.MintFromSecret(context.TODO(), accessKeysSpec("cos-pair"), credential.SecretMaterial{Data: tc.data})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+		})
 	}
+}
 
+// The guard that holds once a source is converted to chaining with specs already
+// bound to it: the store cannot re-validate those, so the driver refuses again.
+func TestIBMDriver_MintFromSecret_RequiresSpecOwnReference(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+
+	material := credential.SecretMaterial{Data: map[string]string{
+		"access_key_id":     "ak",
+		"secret_access_key": "sk",
+	}}
+
+	_, _, _, _, err := d.MintFromSecret(context.TODO(), accessKeysSpec(""), material)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
+}
+
+// mint_method is validated at spec create, so an unknown one here means config
+// drifted. The material's meaning is defined by the method, so with an unknown one
+// there is no safe way to spend it.
+func TestIBMDriver_MintFromSecret_RefusesUnknownMintMethod(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+
+	spec := &credential.CredSpec{Name: "test-spec", Config: credential.NewConfig(map[string]string{"mint_method": "iam_with_cos"})}
+	_, _, _, _, err := d.MintFromSecret(context.TODO(), spec, credential.SecretMaterial{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "iam_with_cos")
+}
+
+// An access_keys spec reaching the direct mint path named no reference; nothing
+// here creates a pair, so it fails closed naming what is missing.
+func TestIBMDriver_MintCredential_AccessKeysRefusedWithoutChain(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+
+	_, _, _, _, err := d.MintCredential(context.TODO(), accessKeysSpec(""))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
+}
+
+func TestIBMDriver_MintCredential_IAMWithCOSNowUnsupported(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+
+	spec := &credential.CredSpec{Name: "test-spec", Config: credential.NewConfig(map[string]string{"mint_method": "iam_with_cos"})}
 	_, _, _, _, err := d.MintCredential(context.TODO(), spec)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to acquire IBM IAM token")
+	assert.Contains(t, err.Error(), "unsupported mint_method")
 }
 
 // ============================================================================
@@ -602,4 +802,690 @@ func TestIBMDriver_MintIAMWithCOS_InvalidKey(t *testing.T) {
 
 func TestIBMDriver_ImplementsSpecVerifier(t *testing.T) {
 	var _ credential.SpecVerifier = (*IBMDriver)(nil)
+}
+
+// TestIBMDriver_RotationDuringMintDiscardsStaleToken pins the generation guard in
+// getIAMToken. The IAM entry is keyed by a fixed string, so the generation is the only
+// thing separating a token minted by the current API key from one minted by a key that
+// has since been retired. A plain Set stamps the entry with whatever generation is
+// current when it lands, which files the retired key's token under the new generation —
+// and IBM does not revoke outstanding IAM tokens when CleanupRotation deletes the key
+// that minted them, so it would be served for its full hour.
+func TestIBMDriver_RotationDuringMintDiscardsStaleToken(t *testing.T) {
+	var d *IBMDriver
+	var callCount int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/identity/token" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		n := atomic.AddInt32(&callCount, 1)
+		// Retire the key that is minting this very token, mid-exchange. This is what
+		// CommitRotation does to a mint that is already in flight.
+		if n == 1 {
+			d.tokenCache.InvalidateGeneration()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": fmt.Sprintf("token-call-%d", n),
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+			"expiration":   time.Now().Add(1 * time.Hour).Unix(),
+		})
+	}))
+	defer srv.Close()
+
+	d = newTestIBMDriver(t, srv.URL)
+	d.tokenCache.Clear()
+
+	token, _, err := d.getIAMToken(context.TODO())
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount), "the in-flight token belonged to the retired key, so it must be minted again")
+	assert.Equal(t, "token-call-2", token, "the retired key's token must not be returned")
+
+	cached, _, ok := d.tokenCache.Get("iam", 30*time.Second)
+	require.True(t, ok, "the re-minted token is cached")
+	assert.Equal(t, "token-call-2", cached, "the retired key's token must never reach the cache")
+}
+
+// TestIBMDriver_ConcurrentRotationAndMintIsRaceFree covers the locking half:
+// CommitRotation replaces credSource.Config while mints read api_key and iam_endpoint
+// out of it. The assertions are modest — this test earns its keep under -race, which is
+// what catches the mint path reading the config without the lock that guards the swap.
+func TestIBMDriver_ConcurrentRotationAndMintIsRaceFree(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.tokenCache.Clear()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := d.getIAMToken(context.TODO())
+			assert.NoError(t, err)
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		assert.NoError(t, d.CommitRotation(context.TODO(), map[string]string{
+			"api_key":      "rotated-key",
+			"iam_endpoint": srv.URL,
+		}))
+	}()
+
+	wg.Wait()
+
+	assert.Equal(t, "rotated-key", d.getAPIKey(), "the driver ends on the rotated key whatever the interleaving")
+
+	// Whether an entry survives depends on the interleaving, but if one did it cannot
+	// be the retired key's: the config write and the generation bump share a critical
+	// section, so a mint that read the old key also captured the old generation.
+	// CommitRotation's own discovery repopulates the entry under the final generation,
+	// so an entry must exist — requiring it keeps this assertion from silently
+	// vanishing if that ever stops being true.
+	token, _, ok := d.tokenCache.Get("iam", 30*time.Second)
+	require.True(t, ok, "rotation leaves a usable entry behind")
+	assert.Equal(t, "test-iam-token-rotated-key", token,
+		"a token the retired key minted must never remain readable after rotation")
+}
+
+// TestIBMDriver_TokenFromRetiredKeyIsNeverServed drives the real interleaving rather
+// than simulating it: a mint's exchange is held open until an actual CommitRotation has
+// swapped the API key underneath it, so the response genuinely carries a token the
+// retired key minted. That token must never be returned or cached — the caller must
+// discard it and mint again against the key now in force.
+func TestIBMDriver_TokenFromRetiredKeyIsNeverServed(t *testing.T) {
+	mintStarted := make(chan struct{})
+	rotationDone := make(chan struct{})
+	var once sync.Once
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/identity/token", func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		apiKey := r.FormValue("apikey")
+
+		// Hold the outgoing key's exchange open until the rotation has landed. The
+		// rotated key's own exchanges pass straight through, so CommitRotation's
+		// verify is not deadlocked behind this.
+		if apiKey == "test-key" {
+			once.Do(func() { close(mintStarted) })
+			<-rotationDone
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "test-iam-token-" + apiKey,
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+			"expiration":   time.Now().Add(1 * time.Hour).Unix(),
+		})
+	})
+	mux.HandleFunc("/v1/apikeys/details", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": "ApiKey-12345", "iam_id": "iam-ServiceId-abcdef", "account_id": "acc-123456",
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.tokenCache.Clear()
+
+	var token string
+	var mintErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		token, _, mintErr = d.getIAMToken(context.TODO())
+	}()
+
+	<-mintStarted
+	require.NoError(t, d.CommitRotation(context.TODO(), map[string]string{
+		"api_key":      "rotated-key",
+		"iam_endpoint": srv.URL,
+	}))
+	close(rotationDone)
+	wg.Wait()
+
+	require.NoError(t, mintErr)
+	assert.Equal(t, "test-iam-token-rotated-key", token,
+		"the exchange completed against the retired key; its token must be discarded, not served")
+
+	cached, _, ok := d.tokenCache.Get("iam", 30*time.Second)
+	require.True(t, ok)
+	assert.NotEqual(t, "test-iam-token-test-key", cached, "the retired key's token must never reach the cache")
+}
+
+// ============================================================================
+// Source-level chaining: the api key is fetched per request, not stored
+// ============================================================================
+
+// newChainedIBMDriver builds a driver for a source that holds no api key of its
+// own, which is what a chained source looks like once Create has skipped the probe.
+func newChainedIBMDriver(t *testing.T, serverURL string) *IBMDriver {
+	t.Helper()
+	return &IBMDriver{
+		credSource: &credential.CredSource{
+			Type: credential.SourceTypeIBM,
+			Config: credential.NewConfig(map[string]string{
+				"iam_endpoint":              serverURL,
+				credential.ConfigSecretSpec: "ibm-api-key",
+			}),
+		},
+		tokenCache: NewTokenCache(),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+func bearerSpec() *credential.CredSpec {
+	return &credential.CredSpec{Name: "test-spec", Config: credential.NewConfig(map[string]string{"mint_method": "iam_token"})}
+}
+
+// A chained source keeps none of the config that describes a key it does not hold,
+// nor the rotation settings for a job it no longer does.
+func TestIBMDriverFactory_ValidateConfig_Chaining(t *testing.T) {
+	f := &IBMDriverFactory{}
+
+	t.Run("a reference alone is valid", func(t *testing.T) {
+		require.NoError(t, f.ValidateConfig(credential.NewConfig(map[string]string{
+			credential.ConfigSecretSpec: "ibm-api-key",
+		})))
+	})
+
+	for _, key := range []string{"api_key", "account_id", "activation_delay"} {
+		t.Run(key+" is refused beside a reference", func(t *testing.T) {
+			err := f.ValidateConfig(credential.NewConfig(map[string]string{
+				credential.ConfigSecretSpec: "ibm-api-key",
+				key:                         "some-value",
+			}))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), key)
+			assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
+		})
+	}
+}
+
+func TestIBMDriver_MintFromSecret_IAMToken(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newChainedIBMDriver(t, srv.URL)
+
+	material := credential.SecretMaterial{Data: map[string]string{"api_key": "fetched-key"}}
+
+	rawData, _, ttl, leaseID, err := d.MintFromSecret(context.TODO(), bearerSpec(), material)
+	require.NoError(t, err)
+
+	// The mock derives its token from the key it was given, so this proves the
+	// fetched key reached the grant rather than anything held on the source.
+	assert.Equal(t, "test-iam-token-fetched-key", rawData["access_token"])
+	assert.True(t, ttl > 0)
+	assert.Empty(t, leaseID, "IAM tokens expire naturally and cannot be revoked")
+}
+
+func TestIBMDriver_MintFromSecret_SecretFieldResolution(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newChainedIBMDriver(t, srv.URL)
+
+	t.Run("a resolved field wins over the conventional names", func(t *testing.T) {
+		material := credential.SecretMaterial{
+			Field: "ibm_key",
+			Data:  map[string]string{"ibm_key": "field-key", "api_key": "conventional-key"},
+		}
+		rawData, _, _, _, err := d.MintFromSecret(context.TODO(), bearerSpec(), material)
+		require.NoError(t, err)
+		assert.Equal(t, "test-iam-token-field-key", rawData["access_token"])
+	})
+
+	// A field that resolved to nothing is a misconfigured secret_field. Falling back
+	// would authenticate with some other value from the payload, so it is named.
+	t.Run("a resolved-but-empty field errors instead of falling back", func(t *testing.T) {
+		material := credential.SecretMaterial{
+			Field: "ibm_key",
+			Data:  map[string]string{"api_key": "conventional-key"},
+		}
+		_, _, _, _, err := d.MintFromSecret(context.TODO(), bearerSpec(), material)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+		assert.Contains(t, err.Error(), "ibm_key")
+	})
+
+	t.Run("api_key then apikey when no field is set", func(t *testing.T) {
+		for name, want := range map[string]string{"api_key": "a", "apikey": "b"} {
+			material := credential.SecretMaterial{Data: map[string]string{name: want}}
+			rawData, _, _, _, err := d.MintFromSecret(context.TODO(), bearerSpec(), material)
+			require.NoError(t, err)
+			assert.Equal(t, "test-iam-token-"+want, rawData["access_token"])
+		}
+	})
+
+	t.Run("neither present is incomplete", func(t *testing.T) {
+		material := credential.SecretMaterial{Data: map[string]string{"unrelated": "x"}}
+		_, _, _, _, err := d.MintFromSecret(context.TODO(), bearerSpec(), material)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+	})
+}
+
+// On the chained path the fetched key is the one thing that varies per mint, so an
+// authentication refusal is worth telling the minting layer about: it evicts the
+// cached secret and retries once with a fresh fetch.
+func TestIBMDriver_MintFromSecret_RejectionIsRetryable(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newChainedIBMDriver(t, srv.URL)
+
+	material := credential.SecretMaterial{Data: map[string]string{"api_key": "invalid-key"}}
+	_, _, _, _, err := d.MintFromSecret(context.TODO(), bearerSpec(), material)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
+
+// An inline source maps nothing: there is nothing to re-fetch, so the sentinel
+// would only buy a pointless second attempt.
+func TestIBMDriver_MintCredential_InlineRejectionIsNotRetryable(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.credSource.Config = d.credSource.Config.With("api_key", "invalid-key")
+	d.tokenCache.Clear()
+
+	_, _, _, _, err := d.MintCredential(context.TODO(), bearerSpec())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, credential.ErrChainedSecretRejected)
+}
+
+// The driver's token cache files every bearer under one fixed key, which is right
+// when a single stored key mints every token. A fetched key is resolved per caller
+// and the referenced spec may hand different callers different keys, so routing the
+// chained mint through that cache would serve one caller's IAM token to another --
+// an authorization bypass at IBM's end, where every action would be attributed to
+// whoever minted first. This pins that the chained path never touches it.
+func TestIBMDriver_ChainedMintBypassesTokenCache(t *testing.T) {
+	var exchanges int
+	var mu sync.Mutex
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		mu.Lock()
+		exchanges++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "test-iam-token-" + r.FormValue("apikey"),
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	d := newChainedIBMDriver(t, srv.URL)
+
+	mintAs := func(key string) string {
+		rawData, _, _, _, err := d.MintFromSecret(context.TODO(),
+			bearerSpec(), credential.SecretMaterial{Data: map[string]string{"api_key": key}})
+		require.NoError(t, err)
+		return rawData["access_token"].(string)
+	}
+
+	tokenA := mintAs("key-of-caller-A")
+	tokenB := mintAs("key-of-caller-B")
+
+	assert.Equal(t, "test-iam-token-key-of-caller-A", tokenA)
+	assert.Equal(t, "test-iam-token-key-of-caller-B", tokenB)
+	assert.NotEqual(t, tokenA, tokenB, "caller B must not be served caller A's token")
+	assert.Equal(t, 2, exchanges, "each caller's key is exchanged on its own")
+
+	// Nothing was filed under the shared slot, so no later inline path could serve
+	// a token minted from someone's fetched key either.
+	_, _, ok := d.tokenCache.Get("iam", 0)
+	assert.False(t, ok, "the chained path must not populate the shared token cache")
+}
+
+// A chained spec or source mints through MintFromSecret. Reaching MintCredential
+// means the routing was bypassed, so it fails closed rather than falling back to a
+// key this source may not even hold.
+func TestIBMDriver_MintCredential_FailsClosedWhenChained(t *testing.T) {
+	srv := newIBMMockServer(t)
+	defer srv.Close()
+
+	t.Run("source-level reference", func(t *testing.T) {
+		d := newChainedIBMDriver(t, srv.URL)
+		_, _, _, _, err := d.MintCredential(context.TODO(), bearerSpec())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
+	})
+
+	t.Run("spec-level reference", func(t *testing.T) {
+		d := newTestIBMDriver(t, srv.URL)
+		spec := bearerSpec()
+		spec.Config = spec.Config.With(credential.ConfigSecretSpec, "ibm-api-key")
+		_, _, _, _, err := d.MintCredential(context.TODO(), spec)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
+	})
+}
+
+// Create is both the store's source connection test and the path every lazy driver
+// creation takes, so an unskipped probe would refuse a keyless source at write and
+// fail every mint after.
+func TestIBMDriverFactory_Create_SkipsProbeWithoutKey(t *testing.T) {
+	// Atomic because the write happens on the httptest handler goroutine: the
+	// socket hop carries no happens-before edge the race detector recognises, and
+	// this counter is read precisely when the guard under test has regressed.
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		http.Error(w, "no source should reach me", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	f := &IBMDriverFactory{}
+
+	for name, config := range map[string]map[string]string{
+		"chained source": {
+			"iam_endpoint":              srv.URL,
+			credential.ConfigSecretSpec: "ibm-api-key",
+		},
+		"source serving only access_keys specs": {
+			"iam_endpoint": srv.URL,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			atomic.StoreInt32(&hits, 0)
+			log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+			d, err := f.Create(credential.NewConfig(config), log)
+			require.NoError(t, err)
+			require.NotNil(t, d)
+			assert.Zero(t, atomic.LoadInt32(&hits), "Create must make no upstream call without a stored key")
+		})
+	}
+}
+
+func TestIBMDriver_VerifySpec_ChainedSourceNeedsNoAPIKey(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		http.Error(w, "no verification should reach me", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	t.Run("chained source verifies without a call", func(t *testing.T) {
+		d := newChainedIBMDriver(t, srv.URL)
+		require.NoError(t, d.VerifySpec(context.TODO(), bearerSpec()))
+		assert.Zero(t, atomic.LoadInt32(&hits))
+	})
+
+	// The schema no longer demands api_key, so this is where its absence lands --
+	// naming the reference an operator could have set instead.
+	t.Run("an unchained source without a key names both alternatives", func(t *testing.T) {
+		d := &IBMDriver{
+			credSource: &credential.CredSource{
+				Type:   credential.SourceTypeIBM,
+				Config: credential.NewConfig(map[string]string{"iam_endpoint": srv.URL}),
+			},
+			tokenCache: NewTokenCache(),
+			httpClient: &http.Client{Timeout: 5 * time.Second},
+		}
+		err := d.VerifySpec(context.TODO(), bearerSpec())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "api_key")
+		assert.Contains(t, err.Error(), credential.ConfigSecretSpec)
+	})
+}
+
+// ============================================================================
+// Rotation: orphan containment
+// ============================================================================
+
+// Creating an API key is not idempotent, and an IBM key carries no expiry, so a
+// retried create leaves a fully privileged credential live on the tenant with
+// nothing tracking it. The create retries only what cannot have created a key.
+func TestIBMCreateRetryConfig_RetriesOnlyWhatCreatedNothing(t *testing.T) {
+	assert.Equal(t, httputil.RetryCreate, ibmCreateRetryConfig().Policy,
+		"a committed-but-unacknowledged create must not be repeated")
+
+	// The shared config keeps the 5xx wildcard and the replay of transport errors,
+	// which is correct for the idempotent calls that use it — this pins that they differ.
+	assert.Equal(t, httputil.RetryIdempotent, defaultIBMRetryConfig().Policy)
+	assert.Contains(t, defaultIBMRetryConfig().RetryableStatuses, 500)
+}
+
+// A rate-limited create was never processed, so it is retried and succeeds.
+func TestIBMDriver_CreateAPIKey_RetriesARateLimit(t *testing.T) {
+	var creates int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/identity/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "t", "expires_in": 3600})
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/apikeys" {
+			if atomic.AddInt32(&creates, 1) == 1 {
+				http.Error(w, "slow down", http.StatusTooManyRequests)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "ApiKey-new", "apikey": "secret"})
+			return
+		}
+		http.Error(w, "unexpected", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.authMu.Lock()
+	_, id, err := d.createAPIKey(context.TODO(), "iam-token", ibmRotationDescriptionPrefix+"ApiKey-old")
+	d.authMu.Unlock()
+
+	require.NoError(t, err)
+	assert.Equal(t, "ApiKey-new", id)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&creates))
+}
+
+// A 502 answered after IBM committed the key must produce one key, not two: the
+// create is attempted exactly once, and the error surfaces.
+func TestIBMDriver_CreateAPIKey_IsAttemptedOnce(t *testing.T) {
+	var creates int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/identity/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "t", "expires_in": 3600})
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/apikeys" {
+			atomic.AddInt32(&creates, 1)
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		http.Error(w, "unexpected", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.authMu.Lock()
+	_, _, err := d.createAPIKey(context.TODO(), "iam-token", ibmRotationDescriptionPrefix+"ApiKey-old")
+	d.authMu.Unlock()
+
+	require.Error(t, err)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&creates),
+		"a 5xx must not be retried: IBM may already have committed the key")
+}
+
+func TestIsIBMNotFound(t *testing.T) {
+	// IBM names the resource error in the body.
+	assert.True(t, isIBMNotFound(fmt.Errorf(`status 404: {"errors":[{"code":"not_found"}]}`)))
+	assert.True(t, isIBMNotFound(fmt.Errorf(`status 404: {"errors":[{"code": "not_found"}]}`)))
+
+	// A bare routing 404 carries no such marker. Treating it as success would make
+	// a mis-set iam_endpoint indistinguishable from a completed cleanup, so a live
+	// key would be reported as deleted.
+	assert.False(t, isIBMNotFound(fmt.Errorf("status 404: 404 page not found")))
+	assert.False(t, isIBMNotFound(nil))
+}
+
+// A key that is already gone is the goal state. Without this the pending cleanup
+// retries daily for a week and is then abandoned with an error, for a key nobody
+// can find.
+func TestIBMDriver_CleanupRotation_ToleratesAlreadyDeleted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/identity/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "t", "expires_in": 3600})
+			return
+		}
+		if r.Method == http.MethodDelete {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"errors":[{"code":"not_found","message":"API key not found"}]}`))
+			return
+		}
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	require.NoError(t, d.CleanupRotation(context.TODO(), map[string]string{"api_key_id": "ApiKey-gone"}))
+}
+
+// A routing 404 is still a failure: it means the request never reached a key
+// endpoint, so the key it names may well be alive.
+func TestIBMDriver_CleanupRotation_RoutingNotFoundStillFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/identity/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "t", "expires_in": 3600})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	err := d.CleanupRotation(context.TODO(), map[string]string{"api_key_id": "ApiKey-maybe-alive"})
+	require.Error(t, err)
+}
+
+// The sweep reclaims every key this source's rotation created and lost track of —
+// not just the current lineage. Matching only the current stamp reclaimed almost
+// nothing: an orphan exists precisely because its rotation was abandoned, and the
+// next rotation stamps a different lineage, so the orphan's own stamp is never
+// asked for again. Keys predating the lineage scheme were unreachable for the same
+// reason. What bounds the damage is the live-key exclusion, checked by id.
+func TestIBMDriver_SweepOrphanedRotationKeys_ReclaimsAbandonedLineages(t *testing.T) {
+	var deleted []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apikeys":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"apikeys": []map[string]string{
+				// This lineage's orphan — a retried or crashed create.
+				{"id": "ApiKey-orphan", "description": ibmRotationDescriptionPrefix + "ApiKey-12345"},
+				// An abandoned lineage: the key left live when an activation failed
+				// after its replacement was staged. Previously unreachable forever.
+				{"id": "ApiKey-abandoned", "description": ibmRotationDescriptionPrefix + "ApiKey-older"},
+				// Created before lineage stamps existed. Also previously unreachable.
+				{"id": "ApiKey-legacy", "description": ibmLegacyRotationDescription},
+				// The live key. Excluded by id, whatever its description says.
+				{"id": "ApiKey-12345", "description": ibmRotationDescriptionPrefix + "ApiKey-ancestor"},
+				// Not ours: no Warden rotation ever created it.
+				{"id": "ApiKey-human", "description": "created by a person"},
+				{"id": "ApiKey-blank", "description": ""},
+			}})
+		case r.Method == http.MethodDelete:
+			mu.Lock()
+			deleted = append(deleted, strings.TrimPrefix(r.URL.Path, "/v1/apikeys/"))
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.authMu.Lock()
+	d.sweepOrphanedRotationKeys(context.TODO(), "iam-token")
+	d.authMu.Unlock()
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.ElementsMatch(t, []string{"ApiKey-orphan", "ApiKey-abandoned", "ApiKey-legacy"}, deleted,
+		"every rotation key this source lost track of, and nothing it did not create")
+	assert.NotContains(t, deleted, "ApiKey-12345", "the live key must never be swept")
+}
+
+func TestIsIBMRotationKey(t *testing.T) {
+	assert.True(t, isIBMRotationKey(ibmRotationDescriptionPrefix+"ApiKey-abc"))
+	assert.True(t, isIBMRotationKey(ibmLegacyRotationDescription))
+	assert.False(t, isIBMRotationKey("created by a person"))
+	assert.False(t, isIBMRotationKey(""))
+}
+
+// Tidying up after a previous rotation must never fail the one that works.
+func TestIBMDriver_SweepOrphanedRotationKeys_SwallowsFailures(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "listing is down", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	d.authMu.Lock()
+	defer d.authMu.Unlock()
+	// The assertion is that this returns at all rather than panicking or blocking.
+	d.sweepOrphanedRotationKeys(context.TODO(), "iam-token")
+}
+
+func TestIBMPageTokenFromLink(t *testing.T) {
+	assert.Equal(t, "abc123",
+		ibmPageTokenFromLink("https://iam.cloud.ibm.com/v1/apikeys?pagesize=100&pagetoken=abc123"))
+	assert.Empty(t, ibmPageTokenFromLink("https://iam.cloud.ibm.com/v1/apikeys?pagesize=100"))
+	assert.Empty(t, ibmPageTokenFromLink("://not a url"))
+}
+
+// A rotation stamps the key it creates with the key it replaces, which is what
+// gives the next sweep a lineage to scope on.
+func TestIBMDriver_PrepareRotation_StampsTheReplacedKey(t *testing.T) {
+	var gotDescription string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/identity/token":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "t", "expires_in": 3600})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apikeys":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"apikeys": []map[string]string{}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apikeys":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			gotDescription, _ = body["description"].(string)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "ApiKey-new", "apikey": "new-key"})
+		default:
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	d := newTestIBMDriver(t, srv.URL)
+	_, cleanupConfig, _, err := d.PrepareRotation(context.TODO())
+	require.NoError(t, err)
+
+	assert.Equal(t, ibmRotationDescriptionPrefix+"ApiKey-12345", gotDescription,
+		"the new key must name the one it replaces, so a later sweep can scope on it")
+	assert.Equal(t, "ApiKey-12345", cleanupConfig["api_key_id"])
 }

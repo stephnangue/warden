@@ -78,8 +78,8 @@ func setupChainedSpecs(t *testing.T) {
 	// the same reason — this clears anything a killed run left behind, which would
 	// otherwise 409 the creates below.
 	clear := func() {
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+chainedAgentRole, leaderPort, "")
-		h.APIRequest(t, "DELETE", "auth/jwt/role/"+undeclaredAgentRole, leaderPort, "")
+		h.RevokeRole(t, leaderPort, "auth/jwt/", chainedAgentRole)
+		h.RevokeRole(t, leaderPort, "auth/jwt/", undeclaredAgentRole)
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+chainedSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+undeclaredSpec, leaderPort, "")
 		h.APIRequest(t, "DELETE", "sys/cred/specs/"+chainedSecretSpec, leaderPort, "")
@@ -112,12 +112,10 @@ func setupChainedSpecs(t *testing.T) {
 			"secret_spec":"`+chainedSecretSpec+`","secret_field":"api_key"}}`,
 		"create the chained consuming spec")
 
-	// The mount's own JWT agent role binds its default spec, so this row needs one
-	// bound to the chained spec instead.
-	mustWrite("POST", "auth/jwt/role/"+chainedAgentRole, `{
-		"token_policies":["`+datadogEnv.Policy()+`"],"cred_spec_name":"`+chainedSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the chained agent role")
+	// The agent role granted at the JWT mount binds its default spec, so this row
+	// needs one bound to the chained spec instead.
+	h.GrantRole(t, leaderPort, "auth/jwt/", chainedAgentRole,
+		h.Role{Policies: []string{datadogEnv.Policy()}, CredSpec: chainedSpec}, nil)
 
 	// The control source, identical but for the missing declaration.
 	mustWrite("POST", "sys/cred/sources/"+undeclaredSource,
@@ -129,10 +127,8 @@ func setupChainedSpecs(t *testing.T) {
 			"secret_spec":"`+chainedSecretSpec+`","secret_field":"api_key"}}`,
 		"create the chained spec on the undeclaring source")
 
-	mustWrite("POST", "auth/jwt/role/"+undeclaredAgentRole, `{
-		"token_policies":["`+datadogEnv.Policy()+`"],"cred_spec_name":"`+undeclaredSpec+`",
-		"user_claim":"sub","token_ttl":3600}`,
-		"create the undeclared agent role")
+	h.GrantRole(t, leaderPort, "auth/jwt/", undeclaredAgentRole,
+		h.Role{Policies: []string{datadogEnv.Policy()}, CredSpec: undeclaredSpec}, nil)
 }
 
 // TestChaining_VaultBackedCredentialCarriesItsDeclaredField is the row this

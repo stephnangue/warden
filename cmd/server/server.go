@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,12 +30,14 @@ import (
 	"github.com/stephnangue/warden/auth/method/cert"
 	"github.com/stephnangue/warden/auth/method/jwt"
 	authk8s "github.com/stephnangue/warden/auth/method/kubernetes"
+	authoidc "github.com/stephnangue/warden/auth/method/oidc"
 	"github.com/stephnangue/warden/auth/method/spiffe"
 	"github.com/stephnangue/warden/config"
 	"github.com/stephnangue/warden/core"
 	wardenseal "github.com/stephnangue/warden/core/seal"
 	wardenhttp "github.com/stephnangue/warden/http"
 	"github.com/stephnangue/warden/internal/configutil"
+	"github.com/stephnangue/warden/internal/playground"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/listener/api"
 	clusterlistener "github.com/stephnangue/warden/listener/cluster"
@@ -62,6 +67,7 @@ import (
 	"github.com/stephnangue/warden/provider/mcp"
 	mcp_aws "github.com/stephnangue/warden/provider/mcp_aws"
 	"github.com/stephnangue/warden/provider/mistral"
+	"github.com/stephnangue/warden/provider/msgraph"
 	"github.com/stephnangue/warden/provider/newrelic"
 	"github.com/stephnangue/warden/provider/openai"
 	"github.com/stephnangue/warden/provider/ovh"
@@ -106,16 +112,23 @@ var (
 	configPath string
 	configDir  string
 
-	flagDev          bool
-	flagDevRootToken string
+	flagDev              bool
+	flagDevRootToken     string
+	flagDevListenAddress string
 
 	flagDevTLS                  bool
+	flagDevTLSCertDir           string
+	flagDevTLSSANs              []string
 	flagDevTLSCertFile          string
 	flagDevTLSKeyFile           string
 	flagDevTLSCACertFile        string
 	flagDevTLSRequireClientCert bool
 	flagDevTLSSpiffe            bool
 	flagDevTLSSpiffeSocket      string
+
+	flagDevPlayground         bool
+	flagDevPlaygroundASAddr   string
+	flagDevPlaygroundBankAddr string
 
 	ServerCmd = &cobra.Command{
 		Use:   "server",
@@ -172,6 +185,7 @@ Usage: warden server [options]
 		"mcp":           mcp.Factory,
 		"mcp_aws":       mcp_aws.Factory,
 		"mistral":       mistral.Factory,
+		"msgraph":       msgraph.Factory,
 		"newrelic":      newrelic.Factory,
 		"openai":        openai.Factory,
 		"ovh":           ovh.Factory,
@@ -203,6 +217,7 @@ Usage: warden server [options]
 		"gitlab":        gitlab.Skill(),
 		"mcp":           mcp.Skill(),
 		"mcp_aws":       mcp_aws.Skill(),
+		"msgraph":       msgraph.Skill(),
 		"openai":        openai.Skill(),
 		"rds":           rds.Skill(),
 		"rest":          rest.Skill(),
@@ -216,6 +231,7 @@ Usage: warden server [options]
 		"cert":       cert.Factory,
 		"kubernetes": authk8s.Factory,
 		"spiffe":     spiffe.Factory,
+		"oidc":       authoidc.Factory,
 	}
 
 	storageBackends = map[string]physical.Factory{
@@ -230,16 +246,27 @@ func init() {
 	ServerCmd.Flags().StringVar(&configDir, "config-dir", "", "Path to a directory of .hcl configuration files, merged in lexical order")
 	ServerCmd.Flags().BoolVar(&flagDev, "dev", false, "Enable dev mode: inmem storage, auto-init, auto-unseal")
 	ServerCmd.Flags().StringVar(&flagDevRootToken, "dev-root-token", "", "Custom root token for dev mode (any string)")
+	ServerCmd.Flags().StringVar(&flagDevListenAddress, "dev-listen-address", "", "Address the dev mode listener binds (default 127.0.0.1:8400, or "+envDevListenAddress+" when set)")
 	ServerCmd.Flags().BoolVar(&flagDevTLS, "dev-tls", false, "Enable TLS for dev mode listener (auto-generates self-signed cert)")
+	ServerCmd.Flags().StringVar(&flagDevTLSCertDir, "dev-tls-cert-dir", "", "Directory to write the auto-generated dev TLS cert and key to, kept after shutdown (default: a temp dir removed on exit)")
+	ServerCmd.Flags().StringSliceVar(&flagDevTLSSANs, "dev-tls-san", nil, "Extra DNS name or IP for the auto-generated dev TLS cert (repeatable)")
 	ServerCmd.Flags().StringVar(&flagDevTLSCertFile, "dev-tls-cert-file", "", "Path to TLS certificate file for dev mode")
 	ServerCmd.Flags().StringVar(&flagDevTLSKeyFile, "dev-tls-key-file", "", "Path to TLS private key file for dev mode")
 	ServerCmd.Flags().StringVar(&flagDevTLSCACertFile, "dev-tls-ca-cert-file", "", "Path to CA certificate for client verification in dev mode")
 	ServerCmd.Flags().BoolVar(&flagDevTLSRequireClientCert, "dev-tls-require-client-cert", false, "Require client certificates when CA cert is configured in dev mode")
 	ServerCmd.Flags().BoolVar(&flagDevTLSSpiffe, "dev-tls-spiffe", false, "Serve dev-mode TLS using a SPIFFE Workload API X509-SVID (server-auth, auto-rotating)")
 	ServerCmd.Flags().StringVar(&flagDevTLSSpiffeSocket, "dev-tls-spiffe-socket", "", "Workload API socket for -dev-tls-spiffe (default: SPIFFE_ENDPOINT_SOCKET env var)")
+	ServerCmd.Flags().BoolVar(&flagDevPlayground, "dev-playground", false, "Start a dev server with a playground: an identity provider, a protected bank and scenarios to try Warden with (implies -dev)")
+	ServerCmd.Flags().StringVar(&flagDevPlaygroundASAddr, "dev-playground-as-addr", playground.DefaultASAddr, "Address the playground's identity provider and authorization server listen on")
+	ServerCmd.Flags().StringVar(&flagDevPlaygroundBankAddr, "dev-playground-bank-addr", playground.DefaultBankAddr, "Address the playground's bank listens on")
 }
 
 func run(cmd *cobra.Command, args []string) error {
+	// The playground is a dev server with fixtures.
+	if flagDevPlayground {
+		flagDev = true
+	}
+
 	// Validate flag combinations
 	if flagDevRootToken != "" && !flagDev {
 		return fmt.Errorf("-dev-root-token can only be used with -dev")
@@ -254,8 +281,18 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("-config and -config-dir are mutually exclusive")
 	}
 
-	// Infer -dev-tls from explicit cert file flags
-	if flagDevTLSCertFile != "" || flagDevTLSKeyFile != "" || flagDevTLSCACertFile != "" {
+	devListenAddr, err := resolveDevListenAddress(flagDev, flagDevListenAddress, os.Getenv(envDevListenAddress))
+	if err != nil {
+		return err
+	}
+
+	if err := validateDevTLSGenFlags(flagDev, flagDevTLSCertDir, flagDevTLSSANs, flagDevTLSCertFile, flagDevTLSKeyFile); err != nil {
+		return err
+	}
+
+	// Infer -dev-tls from explicit cert file flags and the generated-cert flags
+	if flagDevTLSCertFile != "" || flagDevTLSKeyFile != "" || flagDevTLSCACertFile != "" ||
+		flagDevTLSCertDir != "" || len(flagDevTLSSANs) > 0 {
 		flagDevTLS = true
 	}
 
@@ -285,11 +322,24 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	flagDevTLSSpiffe = resolvedSpiffe
 
+	if err := checkPlaygroundFlags(playgroundFlags{
+		playground:        flagDevPlayground,
+		addrSet:           cmd.Flags().Changed("dev-playground-as-addr") || cmd.Flags().Changed("dev-playground-bank-addr"),
+		spiffe:            flagDevTLSSpiffe,
+		requireClientCert: flagDevTLSRequireClientCert,
+		clientCAFile:      flagDevTLSCACertFile,
+	}); err != nil {
+		return err
+	}
+
 	// Load configuration: dev mode builds defaults, otherwise requires config file or dir
 	var conf *config.Config
 	switch {
 	case flagDev:
 		conf = config.DevConfig()
+		if devListenAddr != "" {
+			conf.Listeners[0].Address = devListenAddr
+		}
 	case configDir != "":
 		var err error
 		conf, err = config.LoadConfigDirWithLogger(configDir, config.StderrWarner{})
@@ -316,15 +366,19 @@ func run(cmd *cobra.Command, args []string) error {
 		if certFile == "" && keyFile == "" {
 			// Auto-generate self-signed certificate
 			var err error
-			certFile, keyFile, devTLSCertDir, err = generateDevTLSCert()
+			certFile, keyFile, devTLSCertDir, err = generateDevTLSCert(flagDevTLSCertDir, flagDevTLSSANs)
 			if err != nil {
 				return fmt.Errorf("failed to generate dev TLS certificate: %w", err)
 			}
-			defer func() {
-				if devTLSCertDir != "" {
-					os.RemoveAll(devTLSCertDir)
-				}
-			}()
+			// Only a temp dir is removed: a -dev-tls-cert-dir is kept so the
+			// certificate stays trustable from outside the process.
+			if flagDevTLSCertDir == "" {
+				defer func() {
+					if devTLSCertDir != "" {
+						os.RemoveAll(devTLSCertDir)
+					}
+				}()
+			}
 		}
 		conf.Listeners[0].TLSDisable = false
 		conf.Listeners[0].TLSCertFile = certFile
@@ -342,6 +396,23 @@ func run(cmd *cobra.Command, args []string) error {
 		conf.Listeners[0].TLSDisable = false
 		conf.Listeners[0].TLSSPIFFE = true
 		conf.Listeners[0].TLSSPIFFESocket = flagDevTLSSpiffeSocket
+	}
+
+	// The playground's fixtures start before the core, which serves its sys/dev
+	// paths from them; the bootstrap that wires Warden to them runs after unseal.
+	var pg *playground.Playground
+	if flagDevPlayground {
+		var err error
+		pg, err = startPlayground(conf.Listeners[0])
+		if err != nil {
+			return err
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = pg.Close(shutdownCtx)
+			_ = os.RemoveAll(filepath.Dir(pg.AuditPath()))
+		}()
 	}
 
 	// construct the logger with gate closed during initialization
@@ -427,6 +498,9 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	coreConfig := createCoreConfig(logger, conf, storage, barrierSeal, unwrapSeal, secureRandomReader)
+	if pg != nil {
+		coreConfig.DevPlayground = pg
+	}
 
 	newCore, newCoreError := core.NewCore(&coreConfig)
 	if newCoreError != nil {
@@ -443,6 +517,17 @@ func run(cmd *cobra.Command, args []string) error {
 		devInitResult, err = devModeInit(newCore, flagDevRootToken)
 		if err != nil {
 			return fmt.Errorf("dev mode initialization failed: %w", err)
+		}
+	}
+
+	// Wire Warden to the playground, then check discovery sees what a first-time
+	// user will be told to expect.
+	if pg != nil {
+		if err := bootstrapPlayground(cmd.Context(), newCore, devInitResult.RootToken, pg); err != nil {
+			// Shut the core down before the deferred cleanup removes the audit
+			// directory, so the audit device closes its file first.
+			_ = newCore.Shutdown()
+			return err
 		}
 	}
 
@@ -572,7 +657,14 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Print dev mode banner before opening the log gate
 	if flagDev && devInitResult != nil {
-		printDevBanner(cmd.OutOrStdout(), devInitResult, devTLSCertDir, flagDevTLSSpiffe)
+		printDevBanner(cmd.OutOrStdout(), devInitResult, conf.Listeners[0].Address, devTLSCertDir, flagDevTLSSpiffe)
+		if pg != nil {
+			scheme := "http"
+			if !conf.Listeners[0].TLSDisable {
+				scheme = "https"
+			}
+			printPlaygroundBanner(cmd.OutOrStdout(), pg, devClientAddr(scheme, conf.Listeners[0].Address))
+		}
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "\n==> Warden server started! Log data will stream in below:\n")
@@ -703,11 +795,15 @@ func initListeners(httpHandler http.Handler, c *core.Core, conf *config.Config, 
 	for _, lnConfig := range conf.Listeners {
 		switch lnConfig.Type {
 		case listenerTypeTCP, listenerTypeUnix:
+			readTimeout, writeTimeout, idleTimeout := lnConfig.HTTPTimeouts()
 			apiCfg := api.ApiListenerConfig{
 				Logger:         logger.WithSystem(subsystemListener),
 				Address:        lnConfig.Address,
 				TLSDisable:     lnConfig.TLSDisable,
 				TrustedProxies: lnConfig.TrustedProxies,
+				ReadTimeout:    readTimeout,
+				WriteTimeout:   writeTimeout,
+				IdleTimeout:    idleTimeout,
 			}
 
 			typeLabel := lnConfig.Type
@@ -789,9 +885,42 @@ func resolveDevSpiffeTLS(dev, spiffe bool, spiffeSocket string, devTLS bool, cer
 		return false, fmt.Errorf("-dev-tls-spiffe can only be used with -dev")
 	}
 	if devTLS || certFile != "" || keyFile != "" || caFile != "" {
-		return false, fmt.Errorf("-dev-tls-spiffe is mutually exclusive with -dev-tls and the -dev-tls-cert-file/-key-file/-ca-cert-file flags")
+		return false, fmt.Errorf("-dev-tls-spiffe is mutually exclusive with -dev-tls and the -dev-tls-cert-file/-key-file/-ca-cert-file/-cert-dir/-san flags")
 	}
 	return true, nil
+}
+
+// envDevListenAddress sets the dev listener address when -dev-listen-address
+// is not given. The container image sets it to all interfaces so a dev server
+// is reachable through a published port.
+const envDevListenAddress = "WARDEN_DEV_LISTEN_ADDRESS"
+
+// resolveDevListenAddress returns the address the dev listener binds: the
+// -dev-listen-address flag, else the env var, else "" to keep the loopback
+// default. The env var is ignored outside dev mode, so an image that sets it
+// still runs from a config file; the flag outside dev mode is an error.
+func resolveDevListenAddress(dev bool, flagAddr, envAddr string) (string, error) {
+	if flagAddr != "" && !dev {
+		return "", fmt.Errorf("-dev-listen-address can only be used with -dev")
+	}
+	if !dev {
+		return "", nil
+	}
+	addr, source := flagAddr, "-dev-listen-address"
+	if addr == "" {
+		addr, source = envAddr, envDevListenAddress
+	}
+	if addr == "" {
+		return "", nil
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("invalid %s %q: %w", source, addr, err)
+	}
+	if p, err := strconv.Atoi(port); err != nil || p < 1 || p > 65535 {
+		return "", fmt.Errorf("invalid %s %q: port must be a number between 1 and 65535", source, addr)
+	}
+	return addr, nil
 }
 
 // buildSpiffeSources constructs one SPIFFE Workload API source per distinct

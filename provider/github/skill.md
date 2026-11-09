@@ -12,22 +12,18 @@ upstream: GitHub REST API (api.github.com or GHE) and Git smart-HTTP (github.com
 ## What it does
 
 Warden proxies GitHub REST API requests. The agent calls a Warden
-URL; Warden authenticates the caller (JWT/cert), looks up the GitHub
-PAT bound to the chosen role, injects it as `Authorization: token <pat>`
-plus a default `X-GitHub-Api-Version` header, and forwards to GitHub.
-The agent **never holds a PAT**.
+URL; Warden authenticates the caller (JWT/cert), resolves the chosen
+role's GitHub credential — an App installation token it mints, or a
+PAT fetched from a secret store or held by Warden — injects it as
+`Authorization: token <token>` plus a default `X-GitHub-Api-Version`
+header, and forwards to GitHub. The agent **never holds a token**.
 
 ## Configure the CLI/SDK
 
-`<gateway-url>` comes from the role you chose: the `list_roles` discovery tool
-returns each role with a `description`, and for a non-MCP provider the operator
-embeds the role's **gateway URL** in it — a relative path
-`/v1/<namespace>/<mount>/role/<role>/gateway/`, with the namespace, mount, and role already baked in. Prepend `$WARDEN_ADDR` (the address you already
-used to discover your roles).
-
-The `role/<role>/` segment in `<gateway-url>` is the role this call runs under.
-To act under a *different* role, use the `<gateway-url>` of that role from
-`list_roles` — each role provides its own role-bearing URL in its description.
+`<gateway-url>` is the `url` of the role you chose, as returned by the
+`list_roles` discovery tool. Prepend `$WARDEN_ADDR` (the address you already
+used to discover your roles). Each role has its own `url`: to act under a
+*different* role, use that role's `url`.
 
 Present your identity on every call: `Authorization: Bearer <jwt>`, or an mTLS
 client certificate. A `401` means the JWT expired (typical TTL 5–60 min) —
@@ -43,7 +39,7 @@ and switch role by using the target role's `<gateway-url>` (or sending an
 `X-Warden-Role` header).
 
 (Examples use a concrete `<gateway-url>` of `/v1/github/role/repo-reader/gateway/`;
-substitute the one from your role's `list_roles` description.)
+substitute your role's `url`.)
 
 ### curl / raw HTTP
 
@@ -132,7 +128,7 @@ dispatches per-request based on path shape — `.git/info/refs`,
 host with HTTP Basic Auth instead of the REST `Authorization: token`.
 
 (Examples use a concrete `<gateway-url>` of `/v1/github/role/repo-reader/gateway/`;
-substitute the one from your role's `list_roles` description.)
+substitute your role's `url`.)
 
 ### Clone
 

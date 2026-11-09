@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // RFC 8693 §3 token-type identifiers. These label the format of a subject or
@@ -66,6 +67,16 @@ const (
 	SourceWardenIdentity = "warden_identity"
 )
 
+// subjectTokenSources and actorTokenSources are the accepted values of the two
+// *_token_source keys. They are the single source of truth for both the
+// ValidateExchangeSpecConfig OneOf check and the assertion-profile reserved-name
+// drift test, so a value added here cannot become a registrable profile name
+// without failing that test. Unexported so they cannot be widened at runtime.
+var (
+	subjectTokenSources = []string{SourceAgentIdentity, SourceUserIdentity, SourceNone, SourceWardenIdentity}
+	actorTokenSources   = []string{SourceAgentIdentity, SourceWardenIdentity, SourceNone}
+)
+
 // ConfigAssertionAudience is the spec-config key naming the `aud` of a
 // warden_identity assertion — the upstream the assertion is minted for. Required
 // and non-empty whenever subject_token_source=warden_identity: it is the control
@@ -73,18 +84,28 @@ const (
 const ConfigAssertionAudience = "assertion_audience"
 
 // ConfigAssertionMetadataClaims is the spec-config key naming which of the
-// caller's login-derived metadata keys to project into a warden_identity
-// assertion (comma-separated). Absent/empty projects nothing — the assertion
-// crosses a trust boundary to a third-party upstream, so disclosure is opt-in and
-// operator-chosen, never the whole metadata map. Valid only when
-// subject_token_source=warden_identity.
+// caller's login-derived metadata keys to project (comma-separated). Absent/empty
+// projects nothing.
+//
+// It gates two things, which is why it is valid under more than one subject source.
+// Under warden_identity the projection is embedded in the assertion, which crosses
+// a trust boundary to a third-party upstream — so disclosure is opt-in and
+// operator-chosen, never the whole metadata map. On both warden_identity and
+// agent_identity the same list also names which claims a request path may template
+// via {{agent.<claim>}}; there the list is what keeps a templated value inside the
+// cache key, since only the projected set is fingerprinted.
+//
+// The values are the operator's assertion that a claim is fit to select a secret
+// by. Warden verifies them at login and no caller can supply them, but whether a
+// claim is one an agent could influence at its identity provider is a property of
+// that provider, invisible here.
 const ConfigAssertionMetadataClaims = "assertion_metadata_claims"
 
 // AssertionMetadataKeys parses the comma-separated ConfigAssertionMetadataClaims
 // value into a de-duplicated, order-preserving list of metadata key names,
 // ignoring blank entries and surrounding whitespace. Returns nil when unset.
-func AssertionMetadataKeys(config map[string]string) []string {
-	return splitClaimKeys(config[ConfigAssertionMetadataClaims])
+func AssertionMetadataKeys(config Config) []string {
+	return splitClaimKeys(config.Get(ConfigAssertionMetadataClaims))
 }
 
 // splitClaimKeys parses a comma-separated claim-key list into a de-duplicated,
@@ -111,22 +132,24 @@ func splitClaimKeys(raw string) []string {
 }
 
 // ConfigAssertionUserClaims is the spec-config key naming which user claims to
-// project into the nested warden_user claim of a warden_identity assertion
-// (comma-separated). warden_user always carries the user's identity "sub" (the raw
-// principal); listing metadata keys additionally projects the user token's
+// project (comma-separated) for a warden_identity assertion and for {{user.*}}
+// request templating. The projection always carries the user's identity "sub" (the
+// raw principal); listing metadata keys additionally projects the user token's
 // login-derived metadata under those names. It scopes a security-sensitive
 // downstream path (a templated Vault policy / a per-user secret_path), so — unlike
 // assertion_metadata_claims — a named-but-absent metadata claim FAILS CLOSED. It is
-// opt-in: absent/empty emits NO warden_user claim (a spec that does not ask never
-// discloses the user); when set it must name at least one claim — list "sub" alone
-// for an identity-only warden_user. Valid only when subject_token_source=warden_identity.
+// opt-in: absent/empty discloses no user (a spec that does not ask never does);
+// when set it must name at least one claim — list "sub" alone for identity only.
+// Under the default profile, a set value makes the assertion a delegation token
+// naming the user as sub, where the core discloses the user to the profile (see
+// buildAssertionSetup). Valid only when subject_token_source=warden_identity.
 const ConfigAssertionUserClaims = "assertion_user_claims"
 
 // AssertionUserClaimKeys parses the comma-separated ConfigAssertionUserClaims value
 // into a de-duplicated, order-preserving list of user metadata key names. Returns
 // nil when unset.
-func AssertionUserClaimKeys(config map[string]string) []string {
-	return splitClaimKeys(config[ConfigAssertionUserClaims])
+func AssertionUserClaimKeys(config Config) []string {
+	return splitClaimKeys(config.Get(ConfigAssertionUserClaims))
 }
 
 // Assertion signing algorithms selectable per warden_identity spec via
@@ -148,8 +171,8 @@ const ConfigAssertionAlgorithm = "assertion_algorithm"
 
 // AssertionAlgorithm returns the spec's configured assertion signing algorithm,
 // defaulting to RS256 when unset.
-func AssertionAlgorithm(config map[string]string) string {
-	if a := config[ConfigAssertionAlgorithm]; a != "" {
+func AssertionAlgorithm(config Config) string {
+	if a := config.Get(ConfigAssertionAlgorithm); a != "" {
 		return a
 	}
 	return DefaultAssertionAlg
@@ -163,6 +186,51 @@ func AssertionAlgorithm(config map[string]string) string {
 // other value is emitted verbatim. Valid only when
 // subject_token_source=warden_identity.
 const ConfigAssertionResource = "assertion_resource"
+
+// ConfigAssertionTTL is the spec-config key requesting the lifetime of this spec's
+// warden_identity assertion, as a Go duration string ("90s", "2m"). Absent/empty
+// means the issuer's own assertion_ttl.
+//
+// It is a REQUEST, never an override: the issuer mints with
+// min(requested, issuer assertion_ttl), so a spec can shorten its assertions but
+// never lengthen them. The ceiling matters because the issuer prunes a retired
+// signing key once it has been retired for its assertion_ttl plus a grace, on the
+// premise that no assertion it signed can still be live; a spec allowed past the
+// ceiling would mint assertions that outlive their key.
+//
+// The ceiling is enforced at mint rather than compared at spec-create: the issuer's
+// value can change after a spec is stored, and because every spec write re-runs
+// validation, rejecting here would make lowering the issuer TTL break unrelated
+// edits to specs that were valid when written. So a request above the ceiling is
+// reduced at mint rather than refused; spec create and update return a warning when
+// that will happen, so the reduction is not silent. Spec-create checks only that the
+// value is a duration of at least MinAssertionTTL. Valid only when
+// subject_token_source or actor_token_source is warden_identity.
+const ConfigAssertionTTL = "assertion_ttl"
+
+// MinAssertionTTL is the shortest assertion lifetime a spec may request.
+//
+// Not a guessed number: it equals the issuer's clock-skew leeway. The issuer
+// backdates nbf by that leeway on the premise that a verifier's clock may LAG by up to
+// that much; by the same premise it may LEAD by that much, so an assertion living less
+// than the leeway can be judged expired on arrival. Below that the failure is
+// deterministic: exp is truncated to whole seconds, so a sub-second request mints
+// exp == iat — expired at birth. A core test pins this constant against the issuer's
+// leeway so the two cannot drift.
+const MinAssertionTTL = time.Minute
+
+// RequestedAssertionTTL returns the spec's requested assertion lifetime, or 0 when
+// unset (meaning: use the issuer's). The value is validated at spec-create; a
+// persisted value that no longer parses, or is not positive, also yields 0, which
+// falls back to the issuer's lifetime — the safe direction, since that is the
+// ceiling anyway. (Passing a non-positive value on instead would trip the issuer's
+// ttl guard and fail every mint for the spec.)
+func RequestedAssertionTTL(config Config) time.Duration {
+	if d := GetDuration(config, ConfigAssertionTTL, 0); d > 0 {
+		return d
+	}
+	return 0
+}
 
 // AssertionResourceNone is the ConfigAssertionResource value that suppresses the
 // warden_resource claim entirely (opt-out), for deployments that do not want a
@@ -242,10 +310,24 @@ type ExchangeInputs struct {
 	// UserClaims carries the secondary (user) principal's projected claims so a
 	// driver can scope its request per user — the kv2_read driver templates
 	// secret_path from {{user.<claim>}}. Set by core from the same projection that
-	// feeds the warden_user assertion claim. Not hashed by Fingerprint (the cache is
+	// feeds the assertion's user level. Not hashed by Fingerprint (the cache is
 	// already isolated per user by the ":u:" key dimension); nil for an agent-only
 	// request.
 	UserClaims map[string]string
+
+	// AgentClaims carries the primary (agent) principal's claims so a driver can
+	// scope its request per agent — the same {{agent.<claim>}} templating the user
+	// claims above serve for their own principal. Always carries "sub" (the raw
+	// principal); metadata claims are those the spec allow-listed.
+	//
+	// Not hashed by Fingerprint, for the same reason UserClaims is not, but by a
+	// different mechanism: the agent IS the exchange subject, so every value here is
+	// already a function of what the fingerprint keys on — the raw subject token
+	// under agent_identity, or SubjectCacheIdentity (which folds the same allow-listed
+	// projection) under warden_identity. Anything templatable that fell outside that
+	// coverage could be served across sessions of one principal, which is why the
+	// allow-list and the fingerprinted projection must stay the same set.
+	AgentClaims map[string]string
 }
 
 // Validate performs structural checks only. It does not verify token contents
@@ -356,8 +438,8 @@ func (e *ExchangeInputs) Fingerprint() string {
 
 // SpecRequestsExchange reports whether a spec's config opts into token
 // exchange, i.e. subject_token_source is set to something other than "none".
-func SpecRequestsExchange(config map[string]string) bool {
-	src := config[ConfigSubjectTokenSource]
+func SpecRequestsExchange(config Config) bool {
+	src := config.Get(ConfigSubjectTokenSource)
 	return src != "" && src != SourceNone
 }
 
@@ -365,10 +447,10 @@ func SpecRequestsExchange(config map[string]string) bool {
 // exchange-related keys in a spec config. It does not check that any driver
 // supports exchange — an exchange spec bound to a non-exchange source fails
 // closed at mint time instead.
-func ValidateExchangeSpecConfig(config map[string]string) error {
+func ValidateExchangeSpecConfig(config Config) error {
 	if err := ValidateSchema(config,
-		StringField(ConfigSubjectTokenSource).OneOf(SourceAgentIdentity, SourceUserIdentity, SourceNone, SourceWardenIdentity),
-		StringField(ConfigActorTokenSource).OneOf(SourceAgentIdentity, SourceWardenIdentity, SourceNone),
+		StringField(ConfigSubjectTokenSource).OneOf(subjectTokenSources...),
+		StringField(ConfigActorTokenSource).OneOf(actorTokenSources...),
 		StringField(ConfigAssertionAlgorithm).OneOf(AssertionAlgRS256, AssertionAlgES256),
 	); err != nil {
 		return err
@@ -377,59 +459,92 @@ func ValidateExchangeSpecConfig(config map[string]string) error {
 	// the subject or the actor. Since actor≠none requires subject=user_identity
 	// (enforced below), at most one slot is ever warden_identity, so these keys apply
 	// unambiguously to whichever it is.
-	mintsAssertion := config[ConfigSubjectTokenSource] == SourceWardenIdentity ||
-		config[ConfigActorTokenSource] == SourceWardenIdentity
+	mintsAssertion := config.Get(ConfigSubjectTokenSource) == SourceWardenIdentity ||
+		config.Get(ConfigActorTokenSource) == SourceWardenIdentity
 	// A Warden-minted subject must declare the audience it is minted for — an
 	// empty/absent aud is replayable at any upstream whose trust policy does not pin
 	// aud. That check is source-aware (some source types derive the audience from
 	// their own config) and needs the source, so it runs one layer up in the core
 	// config store, not in this source-agnostic structural validator. It is enforced
 	// again at mint time, defence in depth.
-	// Projecting metadata into the assertion only makes sense when Warden mints it;
-	// on a reused/caller-supplied token Warden does not control the claims.
-	if config[ConfigAssertionMetadataClaims] != "" && !mintsAssertion {
-		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
-			ConfigAssertionMetadataClaims, SourceWardenIdentity)
+	// The key has two jobs, and they permit different subject sources. Projecting
+	// metadata INTO an assertion only makes sense when Warden mints it — on a
+	// reused/caller-supplied token Warden does not control the claims. But the same
+	// list also names which claims may be templated into a request path
+	// ({{agent.<claim>}}), and that holds for a forwarded agent token too: the values
+	// are login-derived and Warden-verified whichever way the subject travels. So
+	// agent_identity is permitted, where it gates templating alone.
+	if config.Get(ConfigAssertionMetadataClaims) != "" &&
+		!mintsAssertion && config.Get(ConfigSubjectTokenSource) != SourceAgentIdentity {
+		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s', or the subject is '%s'",
+			ConfigAssertionMetadataClaims, SourceWardenIdentity, SourceAgentIdentity)
 	}
-	// Projecting user claims into the assertion's warden_user claim (which also
-	// scopes a per-user secret_path) only makes sense when Warden mints the assertion.
-	if raw := config[ConfigAssertionUserClaims]; raw != "" {
+	// Projecting user claims for the assertion (they also scope a per-user
+	// secret_path) only makes sense when Warden mints the assertion.
+	if raw := config.Get(ConfigAssertionUserClaims); raw != "" {
 		if !mintsAssertion {
 			return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
 				ConfigAssertionUserClaims, SourceWardenIdentity)
 		}
 		// A set-but-empty value (e.g. " , ") parses to zero keys and would silently
 		// disclose nothing while looking configured — reject it. "sub" is allowed: it
-		// is the identity opt-in (warden_user.sub is always the user's raw principal),
-		// projected from identity, not from metadata.
+		// is the identity opt-in (the projected "sub" is always the user's raw
+		// principal), projected from identity, not from metadata.
 		if len(AssertionUserClaimKeys(config)) == 0 {
 			return fmt.Errorf("field '%s': must name at least one claim", ConfigAssertionUserClaims)
 		}
 	}
 	// The assertion algorithm only applies to a Warden-minted assertion.
-	if config[ConfigAssertionAlgorithm] != "" && !mintsAssertion {
+	if config.Get(ConfigAssertionAlgorithm) != "" && !mintsAssertion {
 		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
 			ConfigAssertionAlgorithm, SourceWardenIdentity)
 	}
 	// Naming a resource in the assertion only makes sense when Warden mints it.
-	if config[ConfigAssertionResource] != "" && !mintsAssertion {
+	if config.Get(ConfigAssertionResource) != "" && !mintsAssertion {
 		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
 			ConfigAssertionResource, SourceWardenIdentity)
+	}
+	// Selecting the assertion's claim shape only makes sense when Warden mints it.
+	// That the NAMED profile exists, and that a source-pinned profile matches the
+	// source, is checked one layer up in the core config store — it needs the
+	// registry and the source type, which this source-agnostic validator has
+	// neither of.
+	if config.Get(ConfigAssertionProfile) != "" && !mintsAssertion {
+		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
+			ConfigAssertionProfile, SourceWardenIdentity)
+	}
+	// Requesting an assertion lifetime only makes sense when Warden mints one. The
+	// value must be a positive duration; whether it exceeds the issuer's own
+	// assertion_ttl is deliberately NOT checked here — the issuer caps it at mint,
+	// and its value can change after this spec is stored (see ConfigAssertionTTL).
+	if raw := config.Get(ConfigAssertionTTL); raw != "" {
+		if !mintsAssertion {
+			return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
+				ConfigAssertionTTL, SourceWardenIdentity)
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return fmt.Errorf("field '%s': must be a duration (e.g. '90s', '2m')", ConfigAssertionTTL)
+		}
+		if d < MinAssertionTTL {
+			return fmt.Errorf("field '%s': must be at least %s, the verifier clock-skew the issuer tolerates (a shorter assertion can be expired on arrival)",
+				ConfigAssertionTTL, MinAssertionTTL)
+		}
 	}
 	// An actor is only meaningful in the delegation shape — the agent acting on
 	// behalf of a distinct user subject — so an actor requires
 	// subject_token_source=user_identity. This subsumes both the old "actor needs a
 	// subject" rule and the old "actor=warden_identity needs a distinct-principal
 	// subject" rule.
-	actorSrc := config[ConfigActorTokenSource]
-	if actorSrc != "" && actorSrc != SourceNone && config[ConfigSubjectTokenSource] != SourceUserIdentity {
+	actorSrc := config.Get(ConfigActorTokenSource)
+	if actorSrc != "" && actorSrc != SourceNone && config.Get(ConfigSubjectTokenSource) != SourceUserIdentity {
 		return fmt.Errorf("field '%s': an actor is only meaningful in the delegation shape, so '%s' must be '%s'",
 			ConfigActorTokenSource, ConfigSubjectTokenSource, SourceUserIdentity)
 	}
 	// Defence in depth: one inbound token cannot be both subject and actor. Under
 	// the rule above this is unreachable (actor≠none forces subject=user_identity,
 	// so subject=agent_identity ∧ actor=agent_identity cannot arrive), but keep it.
-	if config[ConfigSubjectTokenSource] == SourceAgentIdentity && actorSrc == SourceAgentIdentity {
+	if config.Get(ConfigSubjectTokenSource) == SourceAgentIdentity && actorSrc == SourceAgentIdentity {
 		return fmt.Errorf("field '%s': cannot be '%s' when '%s' is also '%s' (one inbound token cannot be both subject and actor)",
 			ConfigActorTokenSource, SourceAgentIdentity, ConfigSubjectTokenSource, SourceAgentIdentity)
 	}

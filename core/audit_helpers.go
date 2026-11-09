@@ -2,7 +2,7 @@ package core
 
 import (
 	"context"
-	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,8 +12,9 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// buildAuditRequest converts logical.Request to audit.Request
-// NOTE: Raw data passed through - format layer handles salting/omission via config
+// buildAuditRequest converts logical.Request to audit.Request. The request's
+// headers and body are never copied: they carry the caller's credentials and,
+// once a provider has prepared the upstream call, the minted ones.
 func buildAuditRequest(req *logical.Request, ns *namespace.Namespace) *audit.Request {
 	if req == nil {
 		return nil
@@ -40,7 +41,6 @@ func buildAuditRequest(req *logical.Request, ns *namespace.Namespace) *audit.Req
 		MountType:       req.MountType,
 		MountClass:      req.MountClass,
 		ClientIP:        req.ClientIP,
-		Data:            copyMapAny(req.Data), // Raw - format layer handles
 		Unauthenticated: req.Unauthenticated,
 		Streamed:        req.Streamed,
 		Transparent:     req.Transparent,
@@ -48,7 +48,6 @@ func buildAuditRequest(req *logical.Request, ns *namespace.Namespace) *audit.Req
 
 	if req.HTTPRequest != nil {
 		auditReq.Method = req.HTTPRequest.Method
-		auditReq.Headers = copyHeaders(req.HTTPRequest.Header) // Raw - format layer handles
 	}
 
 	if ns != nil {
@@ -59,8 +58,9 @@ func buildAuditRequest(req *logical.Request, ns *namespace.Namespace) *audit.Req
 	return auditReq
 }
 
-// buildAuditResponse converts logical.Response to audit.Response
-// NOTE: Raw data passed through - format layer handles salting/omission via config
+// buildAuditResponse converts logical.Response to audit.Response. Its headers
+// and body are never copied, as for the request: a login's body holds the token
+// it issued. The issued credential is recorded on its own, salted by the format.
 func buildAuditResponse(resp *logical.Response, req *logical.Request, cred *credential.Credential) *audit.Response {
 	if resp == nil {
 		return nil
@@ -71,14 +71,9 @@ func buildAuditResponse(resp *logical.Response, req *logical.Request, cred *cred
 	// For non-streaming responses, backends set StatusCode explicitly.
 	auditResp := &audit.Response{
 		StatusCode: resp.StatusCode,
-		Data:       copyMapAny(resp.Data), // Raw - format layer handles
 		MountClass: resp.MountClass,
 		Streamed:   resp.Streamed,
 		Warnings:   resp.Warnings,
-	}
-
-	if resp.Headers != nil {
-		auditResp.Headers = copyHeaders(resp.Headers) // Raw - format layer handles
 	}
 
 	if cred != nil {
@@ -116,6 +111,27 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 		auditAuth.NamespaceID = te.NamespaceID
 		auditAuth.NamespacePath = te.NamespacePath
 		auditAuth.CreatedByIP = te.CreatedByIP
+		auditAuth.MountAccessor = te.MountAccessor
+		if adm := te.Admission; adm != nil {
+			auditAuth.AliasName = adm.AliasName
+			if n := adm.Mount.Load(); n != nil {
+				auditAuth.EntityKind = n.Kind
+			}
+			if !adm.AuthTime.IsZero() {
+				auditAuth.AuthTime = adm.AuthTime.Unix()
+			}
+			if adm.Binding != nil {
+				auditAuth.DPoPJKT = adm.Binding.JKT
+			}
+			// A ticket on an identity path names no mount, so it takes no
+			// role; the mount that admitted it is still the issuing one.
+			if auditAuth.MountAccessor == "" && te.Type == logical.TokenTypeTicket {
+				auditAuth.MountAccessor = adm.MountAccessor
+			}
+		}
+		if e := te.Entity; e != nil {
+			auditAuth.EntityID, auditAuth.EntityName, auditAuth.GovernedBy = e.ID, e.Name, e.GovernedBy()
+		}
 
 		if !te.ExpireAt.IsZero() {
 			auditAuth.ExpiresAt = te.ExpireAt.Unix()
@@ -134,9 +150,6 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 		if auth.PrincipalID != "" {
 			auditAuth.PrincipalID = auth.PrincipalID
 		}
-		if auth.RoleName != "" {
-			auditAuth.RoleName = auth.RoleName
-		}
 		if len(auth.Policies) > 0 {
 			auditAuth.Policies = auth.Policies
 		}
@@ -153,20 +166,20 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 				}
 				auditAuth.PolicyResults.GrantingPolicies = policies
 			}
-			// Surface the MCP decision into the audit record when an
-			// mcp { } rule-set was consulted. The audit's PolicyResults
-			// owns the wire shape; the in-memory MCPDecision flows in
-			// from logical.Auth.MCPDecision via the request handler.
+			// Surface the MCP decision into the audit record. The audit's
+			// PolicyResults owns the wire shape; the in-memory MCPDecision
+			// flows in from logical.Auth.MCPDecision via the request handler.
 			if auth.MCPDecision != nil {
 				auditAuth.PolicyResults.MCPDecision = auth.MCPDecision
 			}
 			// Surface the path-level CEL condition decision (non-MCP paths)
 			// so denials carry their reason. Already Sanitized at evaluation.
-			// The condition's referenced inputs (incl. any token.metadata.*
+			// The condition's referenced inputs (incl. any agent.metadata.*
 			// it read) ride ConditionResult.Inputs.
 			if auth.Condition != nil {
 				auditAuth.PolicyResults.Condition = auth.Condition
 			}
+			auditAuth.PolicyResults.DenyingPolicy = auth.DenyingPolicy
 		}
 	}
 
@@ -181,31 +194,33 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 }
 
 // toAuditActors translates the RFC 8693 "act" delegation chain from the logical
-// layer into its audit-layer shape.
+// layer into its audit-layer shape, issuer included where the inbound layer had
+// one. It builds a fresh slice, so the entry never aliases the token entry's chain,
+// which the token cache shares across requests.
 func toAuditActors(actors []logical.ActorRef) []audit.ActorRef {
 	if len(actors) == 0 {
 		return nil
 	}
 	out := make([]audit.ActorRef, len(actors))
 	for i, a := range actors {
-		out[i] = audit.ActorRef{Subject: a.Subject}
+		out[i] = audit.ActorRef{Subject: a.Subject, Issuer: a.Issuer}
 	}
 	return out
 }
 
-// buildAuditAuthResult converts logical.Auth (from login response) to audit.AuthResult
+// buildAuditAuthResult converts logical.Auth (from login response) to
+// audit.AuthResult. A login is an admission: it carries no role, no credential
+// spec and no metadata, so the entry records none.
 func buildAuditAuthResult(auth *logical.Auth) *audit.AuthResult {
 	if auth == nil {
 		return nil
 	}
 
 	return &audit.AuthResult{
-		TokenType:      auth.TokenType,
-		PrincipalID:    auth.PrincipalID,
-		RoleName:       auth.RoleName,
-		Policies:       auth.Policies,
-		TokenTTL:       int64(auth.TokenTTL.Seconds()),
-		CredentialSpec: auth.CredentialSpec,
+		TokenType:   auth.TokenType,
+		PrincipalID: auth.PrincipalID,
+		Policies:    auth.Policies,
+		TokenTTL:    int64(auth.TokenTTL.Seconds()),
 	}
 }
 
@@ -249,34 +264,6 @@ func buildAuditCredential(cred *credential.Credential) *audit.Credential {
 	return auditCred
 }
 
-// copyMapAny creates a shallow copy of a map[string]any
-func copyMapAny(data map[string]any) map[string]any {
-	if data == nil {
-		return nil
-	}
-	result := make(map[string]any, len(data))
-	for k, v := range data {
-		result[k] = v
-	}
-	return result
-}
-
-// copyHeaders creates a copy of HTTP headers
-func copyHeaders(headers http.Header) map[string][]string {
-	if headers == nil {
-		return nil
-	}
-	result := make(map[string][]string, len(headers))
-	for k, v := range headers {
-		if v != nil {
-			copied := make([]string, len(v))
-			copy(copied, v)
-			result[k] = copied
-		}
-	}
-	return result
-}
-
 // buildRequestAuditEntry creates an audit.LogEntry for a request
 func (c *Core) buildRequestAuditEntry(
 	ctx context.Context,
@@ -293,19 +280,100 @@ func (c *Core) buildRequestAuditEntry(
 		Request:   buildAuditRequest(req, ns),
 		Auth:      buildAuditAuth(auth, te),
 	}
+	stampRoleGrant(entry, req)
+	stampDiscovery(entry, req)
+	stampProof(entry, req)
 	stampUserAttribution(entry, req)
+	stampMCPClient(entry, req)
 
 	if outerErr != nil {
-		entry.Error = outerErr.Error()
+		entry.Error = auditErrorText(outerErr)
 	}
 
 	return entry
 }
 
+// stampProof records the DPoP proof a bound ticket's request carried. A no-op
+// for every other request.
+func stampProof(entry *audit.LogEntry, req *logical.Request) {
+	if entry == nil || req == nil || req.ProofID == "" {
+		return
+	}
+	if entry.Auth == nil {
+		entry.Auth = &audit.Auth{}
+	}
+	entry.Auth.ProofID = req.ProofID
+}
+
+// stampRoleGrant records how the request's role was decided when its token
+// takes its role per request: the granting group, or why none granted it, and
+// the caller's groups. A no-op for every other request, whose entry reads as
+// before. The groups are copied: the slice is shared with the cached
+// membership.
+func stampRoleGrant(entry *audit.LogEntry, req *logical.Request) {
+	rg := req.RoleGrant()
+	if entry == nil || rg == nil {
+		return
+	}
+	if entry.Auth == nil {
+		entry.Auth = &audit.Auth{}
+	}
+	if rg.Granted() {
+		entry.Auth.RoleGrantedBy = rg.GrantedBy
+		entry.Auth.RoleGroupType = string(rg.GroupType)
+	} else {
+		entry.Auth.RoleDeniedReason = rg.DeniedReason
+	}
+	entry.Auth.IdentityStatus = rg.IdentityStatus
+	if len(rg.Groups) > 0 {
+		entry.Auth.Groups = slices.Clone(rg.Groups)
+	}
+}
+
+// stampSponsored records the sponsor group a request on a sponsor path acted
+// through. A no-op for every other request.
+func stampSponsored(entry *audit.LogEntry, req *logical.Request) {
+	if entry == nil || req == nil || req.SponsoredBy == "" {
+		return
+	}
+	if entry.Auth == nil {
+		entry.Auth = &audit.Auth{}
+	}
+	entry.Auth.SponsoredBy = req.SponsoredBy
+}
+
+// stampDiscovery records how a request on an identity path was admitted
+// without a service token: the mounts that admitted its credential, with the
+// principal each admitted, and how many roles were granted there; or that it
+// ran anonymously. A no-op for every other request. The caller is never told
+// any of it.
+func stampDiscovery(entry *audit.LogEntry, req *logical.Request) {
+	d := req.Discovery
+	if entry == nil || d == nil {
+		return
+	}
+	if entry.Auth == nil {
+		entry.Auth = &audit.Auth{}
+	}
+	da := &audit.DiscoveryAuth{
+		RolesGranted:         d.RolesGranted,
+		Anonymous:            d.Anonymous,
+		CredentialUnverified: d.CredentialUnverified,
+	}
+	if len(d.AdmittedBy) > 0 {
+		da.AdmittedBy = make([]audit.AdmittedMount, len(d.AdmittedBy))
+		for i, m := range d.AdmittedBy {
+			da.AdmittedBy[i] = audit.AdmittedMount{Mount: m.Mount, PrincipalID: m.PrincipalID, AliasName: m.AliasName, EntityID: m.EntityID}
+		}
+	}
+	entry.Auth.Discovery = da
+}
+
 // stampUserAttribution records the secondary (user) principal onto an audit
 // entry's Auth block for per-user attribution — so a mint performed for a user is
-// traceable to that user. It is a no-op when the request carried no user
-// principal. Identity only: the raw user credential is never logged.
+// traceable to that user, with the namespace, role and verified act chain a
+// delegation assertion asserts for it. It is a no-op when the request carried no
+// user principal. Identity only: the raw user credential is never logged.
 func stampUserAttribution(entry *audit.LogEntry, req *logical.Request) {
 	if entry == nil || req == nil || req.User == nil || req.User.TokenEntry == nil {
 		return
@@ -315,9 +383,43 @@ func stampUserAttribution(entry *audit.LogEntry, req *logical.Request) {
 	}
 	ute := req.User.TokenEntry
 	entry.Auth.User = &audit.UserAttribution{
-		Subject:     ute.PrincipalID,
-		TokenID:     ute.ID,
-		NamespaceID: ute.NamespaceID,
+		Subject:       ute.PrincipalID,
+		TokenID:       ute.ID,
+		NamespaceID:   ute.NamespaceID,
+		NamespacePath: ute.NamespacePath,
+		Actors:        toAuditActors(ute.Actors),
+	}
+}
+
+// stampMCPClient records the client's self-description on the audit entry.
+//
+// It rides the request descriptor rather than the authorization result
+// because it took no part in one: the value is unverified, unauthenticated,
+// and set by the caller. It is here so an operator reading a denial can tell
+// which agent build produced it, and for nothing else.
+//
+// Stamped even when the request was refused — the client that sent a body
+// Warden rejected is exactly the one an operator wants named.
+func stampMCPClient(entry *audit.LogEntry, req *logical.Request) {
+	if entry == nil || req == nil || req.MCPDescriptor == nil {
+		return
+	}
+	desc := req.MCPDescriptor
+	if desc.ClientInfoName == "" && desc.ClientInfoVersion == "" {
+		return
+	}
+	if entry.Auth == nil {
+		entry.Auth = &audit.Auth{}
+	}
+	// PolicyResults is allocated only when policy evaluation produced
+	// results, and a request refused before that — which is exactly a
+	// request worth attributing — has none.
+	if entry.Auth.PolicyResults == nil {
+		entry.Auth.PolicyResults = &audit.PolicyResults{}
+	}
+	entry.Auth.PolicyResults.MCPClient = &audit.MCPClientInfo{
+		Name:    desc.ClientInfoName,
+		Version: desc.ClientInfoVersion,
 	}
 }
 
@@ -344,16 +446,28 @@ func (c *Core) buildResponseAuditEntry(
 		Auth:      buildAuditAuth(auth, te),
 		Response:  buildAuditResponse(resp, req, cred),
 	}
+	stampRoleGrant(entry, req)
+	stampSponsored(entry, req)
+	stampDiscovery(entry, req)
+	stampProof(entry, req)
 	stampUserAttribution(entry, req)
+	stampMCPClient(entry, req)
 
 	// Capture error from multiple sources:
 	// 1. outerErr - errors from request processing (e.g., routing errors)
 	// 2. resp.Err - errors from backend handlers (e.g., validation errors)
 	if outerErr != nil {
-		entry.Error = outerErr.Error()
+		entry.Error = auditErrorText(outerErr)
 	} else if resp != nil && resp.Err != nil {
-		entry.Error = resp.Err.Error()
+		entry.Error = auditErrorText(resp.Err)
 	}
 
 	return entry
+}
+
+// auditErrorText is err as an audit entry records it: one message per error
+// a multierror gathers, joined with "; ", never its bulleted text. A single
+// error reads as itself, as the client's response does.
+func auditErrorText(err error) string {
+	return strings.Join(logical.ErrorMessages(err), "; ")
 }

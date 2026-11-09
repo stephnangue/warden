@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,17 @@ import (
 const scalewayMaxResponseBodySize = 1 << 20 // 1MB
 const scalewayMaxRetryAttempts = 3
 
+// scalewayRotationDescriptionPrefix stamps a management key created by rotation.
+// The key it replaces is appended, so the stamp names one lineage rather than
+// "some Warden rotated this": two sources rotating keys for the same bearer would
+// otherwise be indistinguishable, and the orphan sweep below would delete a
+// sibling's live key. A key created by rotating from K is never itself stamped
+// with K, so the sweep can never reach the key currently in use.
+const scalewayRotationDescriptionPrefix = "warden-management-key-rotated-from-"
+
+// scalewayListPageSize bounds one page of the IAM key listing used by the sweep.
+const scalewayListPageSize = 100
+
 // DefaultScalewayIAMPath is the default IAM API path prefix.
 // Currently v1alpha1 — update this when Scaleway promotes the API to stable.
 const DefaultScalewayIAMPath = "/iam/v1alpha1"
@@ -26,10 +38,24 @@ const DefaultScalewayIAMPath = "/iam/v1alpha1"
 // delay guards against any internal propagation across regions.
 const DefaultScalewayActivationDelay = 30 * time.Second
 
+// defaultScalewayStaticChainTTL bounds how long a chained static pair is served
+// before the chain is walked again. The static mint makes no API call, so it never
+// sees a rejection and can never be told its pair went stale; without a lease TTL
+// the credential would be cached for the caller's whole session.
+const defaultScalewayStaticChainTTL = 30 * time.Minute
+
 // Compile-time interface assertions
 var _ credential.SourceDriver = (*ScalewayDriver)(nil)
 var _ credential.SpecVerifier = (*ScalewayDriver)(nil)
 var _ credential.Rotatable = (*ScalewayDriver)(nil)
+var _ credential.StagedRotationDiscarder = (*ScalewayDriver)(nil)
+var _ credential.ChainedSecretMinter = (*ScalewayDriver)(nil)
+
+// scalewayChainedAuth carries the management secret key fetched through credential
+// chaining, for a source that stores none of its own.
+type scalewayChainedAuth struct {
+	secretKey string
+}
 
 // ScalewayDriver mints credentials from Scaleway IAM.
 //
@@ -59,7 +85,10 @@ func (f *ScalewayDriverFactory) Type() string {
 }
 
 // ValidateConfig validates Scaleway source configuration.
-func (f *ScalewayDriverFactory) ValidateConfig(config map[string]string) error {
+func (f *ScalewayDriverFactory) ValidateConfig(config credential.Config) error {
+	if err := validateChainedConfig(config); err != nil {
+		return err
+	}
 	return credential.ValidateSchema(config,
 		credential.StringField("scaleway_url").
 			Custom(func(v string) error {
@@ -73,8 +102,12 @@ func (f *ScalewayDriverFactory) ValidateConfig(config map[string]string) error {
 
 		credential.StringField("management_access_key").
 			Custom(func(v string) error {
+				// The value is deliberately not echoed. When the fields are swapped —
+				// the case this check exists to catch — this one holds the secret key,
+				// and a validation error travels to API clients and logs where field
+				// masking cannot reach it.
 				if v != "" && !strings.HasPrefix(v, "SCW") {
-					return fmt.Errorf("management_access_key must start with SCW, got: %s (did you swap access_key and secret_key?)", v)
+					return fmt.Errorf("management_access_key must start with SCW (did you swap access_key and secret_key?)")
 				}
 				return nil
 			}).
@@ -103,7 +136,43 @@ func (f *ScalewayDriverFactory) ValidateConfig(config map[string]string) error {
 		credential.BoolField("tls_skip_verify").
 			Describe("Skip TLS certificate verification (development only)").
 			Example("false"),
+
+		credential.DurationField("activation_delay").
+			Describe("Overlap before a rotated management key becomes active (default: 30s)").
+			Example("30s"),
+
+		credential.StringField(credential.ConfigSecretSpec).
+			Describe("Cred spec yielding the management secret key, instead of storing one here").
+			Example("scw-mgmt-key"),
+
+		credential.StringField(credential.ConfigSecretField).
+			Describe("Field of the referenced credential holding the management secret key").
+			Example("management_secret_key"),
+
+		credential.DurationField(credential.ConfigSecretCacheTTL).
+			Describe("How long to reuse the fetched secret before re-fetching (default: no caching)").
+			Example("30m"),
 	)
+}
+
+// validateChainedConfig rejects source config that contradicts credential chaining.
+//
+// A source that keeps its management key while claiming to fetch one reads as
+// keyless but still stores the very secret chaining exists to remove. The rotation
+// keys go with it for a different reason: their only consumer is rotation, which a
+// chained source hands to whoever owns the referenced spec, so leaving them is dead
+// config that describes a job this source no longer does.
+func validateChainedConfig(config credential.Config) error {
+	if credential.GetString(config, credential.ConfigSecretSpec, "") == "" {
+		return nil
+	}
+	for _, key := range []string{"management_secret_key", "management_access_key", "activation_delay"} {
+		if credential.GetString(config, key, "") != "" {
+			return fmt.Errorf("%s must be omitted when %s is set; the key is supplied by the referenced spec, and rotation belongs to whoever owns it",
+				key, credential.ConfigSecretSpec)
+		}
+	}
+	return nil
 }
 
 // SensitiveConfigFields returns source config keys that should be masked.
@@ -111,13 +180,18 @@ func (f *ScalewayDriverFactory) SensitiveConfigFields() []string {
 	return []string{"management_secret_key", "ca_data"}
 }
 
+// StoredSecrets reports the secret config keys this source holds.
+func (f *ScalewayDriverFactory) StoredSecrets(config credential.Config) []string {
+	return config.Present("management_secret_key")
+}
+
 // InferCredentialType always returns scaleway_keys for Scaleway sources.
-func (f *ScalewayDriverFactory) InferCredentialType(_ map[string]string) (string, error) {
+func (f *ScalewayDriverFactory) InferCredentialType(_ credential.Config) (string, error) {
 	return credential.TypeScalewayKeys, nil
 }
 
 // Create instantiates a new ScalewayDriver.
-func (f *ScalewayDriverFactory) Create(config map[string]string, log *logger.GatedLogger) (credential.SourceDriver, error) {
+func (f *ScalewayDriverFactory) Create(config credential.Config, log *logger.GatedLogger) (credential.SourceDriver, error) {
 	driver := &ScalewayDriver{
 		credSource: &credential.CredSource{
 			Type:   credential.SourceTypeScaleway,
@@ -140,9 +214,50 @@ func (d *ScalewayDriver) Type() string {
 	return credential.SourceTypeScaleway
 }
 
-// getScalewayURL returns the Scaleway API base URL from source config.
-// Thread-safe: scaleway_url is never modified by rotation.
-func (d *ScalewayDriver) getScalewayURL() string {
+// scalewayRetryConfig retries rate limiting and transient server errors. Safe for
+// reads and deletes, which are idempotent.
+func scalewayRetryConfig() httputil.HTTPRetryConfig {
+	return httputil.HTTPRetryConfig{
+		MaxAttempts:       scalewayMaxRetryAttempts,
+		MaxBodySize:       scalewayMaxResponseBodySize,
+		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
+		BaseBackoff:       1 * time.Second,
+		JitterPercent:     20,
+	}
+}
+
+// scalewayCreateRetryConfig retries only what cannot have created a key: a 429,
+// and a request that never left.
+//
+// Creating an API key is not idempotent. A proxy answering 502 after Scaleway
+// already committed the key, or a connection dropped after the request was
+// written, turns one request into two live keys, and only one of them is ever
+// returned to us: for a mint the orphan self-expires, but a rotation key carries
+// no expiry and would outlive everything.
+func scalewayCreateRetryConfig() httputil.HTTPRetryConfig {
+	cfg := scalewayRetryConfig()
+	cfg.Policy = httputil.RetryCreate
+	return cfg
+}
+
+// isScalewayNotFound reports whether a failed delete means the key is already
+// gone, as opposed to the request never having reached a key endpoint at all.
+//
+// Both answer 404. Accepting the status alone — as this driver used to — makes a
+// mistyped iam_api_path indistinguishable from a successful cleanup, so a live
+// key gets reported as deleted. Scaleway names the resource error in the body;
+// a bare routing 404 carries no such marker.
+func isScalewayNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), `"type":"not_found"`) ||
+		strings.Contains(err.Error(), `"type": "not_found"`)
+}
+
+// getScalewayURLLocked returns the Scaleway API base URL from source config.
+// Caller must hold configMu (read or write).
+func (d *ScalewayDriver) getScalewayURLLocked() string {
 	return strings.TrimRight(credential.GetString(d.credSource.Config, "scaleway_url", "https://api.scaleway.com"), "/")
 }
 
@@ -152,28 +267,165 @@ func (d *ScalewayDriver) getManagementSecretKeyLocked() string {
 	return credential.GetString(d.credSource.Config, "management_secret_key", "")
 }
 
-// getIAMAPIPath returns the IAM API path prefix from source config.
+// isChainedLocked reports whether this source draws its management key from another
+// cred spec rather than holding one inline.
+// Caller must hold configMu (read or write).
+func (d *ScalewayDriver) isChainedLocked() bool {
+	return credential.GetString(d.credSource.Config, credential.ConfigSecretSpec, "") != ""
+}
+
+// isChained is isChainedLocked for callers holding no lock. Read locks are not
+// re-entrant — a writer queued between two acquisitions on one goroutine
+// deadlocks — so anything already inside a configMu block must call the Locked
+// form instead.
+func (d *ScalewayDriver) isChained() bool {
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	return d.isChainedLocked()
+}
+
+// getIAMAPIPathLocked returns the IAM API path prefix from source config.
 // Defaults to DefaultScalewayIAMPath (/iam/v1alpha1).
-func (d *ScalewayDriver) getIAMAPIPath() string {
+// Caller must hold configMu (read or write).
+func (d *ScalewayDriver) getIAMAPIPathLocked() string {
 	return credential.GetString(d.credSource.Config, "iam_api_path", DefaultScalewayIAMPath)
 }
 
 // iamURL builds a full IAM API URL for the given subpath (e.g., "/api-keys").
+//
+// It takes the read lock even though neither value it reads is rewritten by
+// rotation: what rotation replaces is the config map itself, so reading any key
+// from it without the lock races the swap. Callers must not already hold
+// configMu — read locks are not re-entrant, and a writer queued between two
+// acquisitions on one goroutine would deadlock.
 func (d *ScalewayDriver) iamURL(subpath string) string {
-	return d.getScalewayURL() + d.getIAMAPIPath() + subpath
+	d.configMu.RLock()
+	defer d.configMu.RUnlock()
+	return d.getScalewayURLLocked() + d.getIAMAPIPathLocked() + subpath
+}
+
+// iamKeyURL builds the URL for one API key, escaping the identifier. The id
+// reaches Revoke replayed from a stored lease, so a value carrying "/" or "?"
+// would otherwise retarget an authenticated DELETE at another IAM resource.
+func (d *ScalewayDriver) iamKeyURL(accessKey string) string {
+	return d.iamURL("/api-keys/" + url.PathEscape(accessKey))
 }
 
 // MintCredential returns Scaleway credentials for the given spec.
+//
+// mint_method is not defaulted: the credential type refuses to create a spec
+// without an explicit one, so a default here could only ever be reached by a
+// config that bypassed validation, and silently minting static keys for it would
+// be the wrong answer.
 func (d *ScalewayDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	mintMethod := credential.GetString(spec.Config, "mint_method", "static_keys")
+	// A chained spec mints through MintFromSecret, which the minting layer routes it
+	// to. Arriving here means that routing was bypassed, so fail rather than fall
+	// through to inline material this source or spec does not have.
+	if spec.Config.Get(credential.ConfigSecretSpec) != "" || d.isChained() {
+		return nil, nil, 0, "", fmt.Errorf("scaleway: %s is set (credential chaining); this spec mints from fetched secret material, not directly",
+			credential.ConfigSecretSpec)
+	}
+
+	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 	switch mintMethod {
 	case "static_keys":
 		return d.mintStaticCredential(spec)
 	case "dynamic_keys":
-		return d.mintDynamicCredential(ctx, spec)
+		return d.mintDynamicCredential(ctx, spec, nil)
 	default:
 		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method: %s (expected static_keys or dynamic_keys)", mintMethod)
 	}
+}
+
+// MintFromSecret mints from secret material fetched via credential chaining. What
+// the material means depends on the mint method, so each arm reads it differently:
+// dynamic_keys receives the management key that authorises creating a fresh pair,
+// static_keys receives the pair itself.
+func (d *ScalewayDriver) MintFromSecret(ctx context.Context, spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	mintMethod := credential.GetString(spec.Config, "mint_method", "")
+	switch mintMethod {
+	case "dynamic_keys":
+		key := material.Secret()
+		// Fall back to a conventional name ONLY when no field was resolved. A field
+		// that resolved to nothing is a misconfigured secret_field — say so, rather
+		// than silently authenticating with some other value from the payload.
+		if key == "" && material.Field == "" {
+			if key = material.Data["management_secret_key"]; key == "" {
+				key = material.Data["secret_key"]
+			}
+		}
+		if key == "" {
+			if material.Field != "" {
+				return nil, nil, 0, "", fmt.Errorf("scaleway: %s %q is empty or absent in the fetched secret material: %w",
+					credential.ConfigSecretField, material.Field, credential.ErrChainedSecretIncomplete)
+			}
+			return nil, nil, 0, "", fmt.Errorf("scaleway: no management secret key in fetched secret material (set %s, or store it under 'management_secret_key'): %w",
+				credential.ConfigSecretField, credential.ErrChainedSecretIncomplete)
+		}
+		return d.mintDynamicCredential(ctx, spec, &scalewayChainedAuth{secretKey: key})
+
+	case "static_keys":
+		return d.mintStaticFromSecret(spec, material)
+
+	default:
+		// mint_method is validated at spec create, so reaching here means config
+		// drifted. The material's meaning is defined by the method, so with an
+		// unknown one there is no safe way to spend it.
+		return nil, nil, 0, "", fmt.Errorf("scaleway: credential chaining supports mint_method=dynamic_keys or static_keys, got %q", mintMethod)
+	}
+}
+
+// mintStaticFromSecret returns the pair the referenced spec yielded.
+//
+// Both halves are read by name: secret_field selects a single secret and a pair is
+// not one, so the spec is refused it at create and a source-level value does not
+// reach a spec that named its own reference. There is nothing here for a resolved
+// field to mean.
+//
+// Unlike the inline static path this reports a lease TTL. Nothing about this mint
+// can discover that the pair was rotated upstream — it makes no request, so it never
+// sees a rejection — and a zero TTL would pin the credential in cache for the
+// caller's whole session. The TTL is advisory only: with no lease id the credential
+// is not revocable, so it just forces the chain to be walked again.
+func (d *ScalewayDriver) mintStaticFromSecret(spec *credential.CredSpec, material credential.SecretMaterial) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	// The spec must name the reference itself. Routed here by a SOURCE-level one,
+	// the material would be the management key — whose payload is also a Scaleway
+	// pair — and this would hand the caller a credential that can create and delete
+	// API keys, in place of the scoped one the spec describes.
+	//
+	// Spec create refuses that combination, but a source converted to chaining
+	// afterwards is not re-validated against the specs already bound to it, so this
+	// is the guard that actually holds.
+	if spec.Config.Get(credential.ConfigSecretSpec) == "" {
+		return nil, nil, 0, "", fmt.Errorf("scaleway: a static_keys spec must set its own %s naming a spec that yields its access_key and secret_key; this source's chained secret is a management key, not this credential",
+			credential.ConfigSecretSpec)
+	}
+
+	accessKey := material.Data["access_key"]
+	secretKey := material.Data["secret_key"]
+	if accessKey == "" || secretKey == "" {
+		return nil, nil, 0, "", fmt.Errorf("scaleway: fetched secret material must hold both 'access_key' and 'secret_key' for static_keys: %w",
+			credential.ErrChainedSecretIncomplete)
+	}
+
+	// Track the spec's own secret_cache_ttl where it has one, so an operator who
+	// tightened reuse of the fetched pair gets a matching bound here.
+	//
+	// This deliberately does not consult the source: the minting layer may still
+	// apply a source-level TTL to the fetch (when the source has no reference of its
+	// own, or names the same one), so the two can differ, and the effective staleness
+	// is the larger — plus, since a re-mint at expiry can be served cached material,
+	// the two compose rather than cancel.
+	ttl := credential.GetDuration(spec.Config, credential.ConfigSecretCacheTTL, 0)
+	if ttl <= 0 {
+		ttl = defaultScalewayStaticChainTTL
+	}
+
+	rawData := map[string]interface{}{
+		"access_key": accessKey,
+		"secret_key": secretKey,
+	}
+	return rawData, nil, ttl, "", nil
 }
 
 // mintStaticCredential reads access_key and secret_key from spec config.
@@ -196,10 +448,16 @@ func (d *ScalewayDriver) mintStaticCredential(spec *credential.CredSpec) (map[st
 }
 
 // mintDynamicCredential creates a new API key via the Scaleway IAM API.
-func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	d.configMu.RLock()
-	managementKey := d.getManagementSecretKeyLocked()
-	d.configMu.RUnlock()
+// chained is nil for an inline source and set for one fetching its key per mint.
+func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *credential.CredSpec, chained *scalewayChainedAuth) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	managementKey := ""
+	if chained != nil {
+		managementKey = chained.secretKey
+	} else {
+		d.configMu.RLock()
+		managementKey = d.getManagementSecretKeyLocked()
+		d.configMu.RUnlock()
+	}
 	if managementKey == "" {
 		return nil, nil, 0, "", fmt.Errorf("management_secret_key is required on source for dynamic_keys mint method")
 	}
@@ -210,6 +468,9 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 	}
 
 	ttl := credential.GetDuration(spec.Config, "ttl", 1*time.Hour)
+	if ttl <= 0 {
+		return nil, nil, 0, "", fmt.Errorf("ttl must be positive for dynamic_keys mint method, got %s", ttl)
+	}
 	description := credential.GetString(spec.Config, "description", fmt.Sprintf("warden-%s", spec.Name))
 	defaultProjectID := credential.GetString(spec.Config, "default_project_id", "")
 
@@ -230,14 +491,6 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 
 	apiURL := d.iamURL("/api-keys")
 
-	retryConfig := httputil.HTTPRetryConfig{
-		MaxAttempts:       scalewayMaxRetryAttempts,
-		MaxBodySize:       scalewayMaxResponseBodySize,
-		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
-		BaseBackoff:       1 * time.Second,
-		JitterPercent:     20,
-	}
-
 	httpReq := httputil.HTTPRequest{
 		Method: http.MethodPost,
 		URL:    apiURL,
@@ -249,8 +502,15 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 		},
 	}
 
-	respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	respBody, status, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, scalewayCreateRetryConfig())
 	if err != nil {
+		// On the chained path, mark an authentication rejection so the minting layer
+		// treats a cached secret as stale, evicts it and retries once with a fresh
+		// fetch. Without this a key rotated at its source would fail every request
+		// until the cache entry aged out on its own.
+		if chained != nil && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+			return nil, nil, 0, "", fmt.Errorf("scaleway: failed to create API key: %w (%w)", credential.ErrChainedSecretRejected, err)
+		}
 		return nil, nil, 0, "", fmt.Errorf("failed to create Scaleway API key: %w", err)
 	}
 
@@ -271,10 +531,16 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 		return nil, nil, 0, "", fmt.Errorf("Scaleway API returned empty access_key or secret_key")
 	}
 
+	leaseTTL, err := d.leaseTTLFromExpiry(resp.ExpiresAt, ttl)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+
 	d.logger.Info("created dynamic Scaleway API key",
 		logger.String("access_key", truncateID(resp.AccessKey, 8)),
 		logger.String("spec", spec.Name),
 		logger.String("expires_at", resp.ExpiresAt),
+		logger.String("lease_ttl", leaseTTL.String()),
 	)
 
 	rawData := map[string]interface{}{
@@ -282,8 +548,64 @@ func (d *ScalewayDriver) mintDynamicCredential(ctx context.Context, spec *creden
 		"secret_key": resp.SecretKey,
 	}
 
-	// LeaseID is the access_key — used by Revoke to delete the key
-	return rawData, nil, ttl, resp.AccessKey, nil
+	// LeaseID is the access_key — used by Revoke to delete the key.
+	//
+	// A chained mint hands out none. Revocation runs at lease expiry with only a
+	// lease id, no caller and no way to walk the chain again, so a source holding no
+	// key of its own cannot honour a lease it issued. The key still dies on its own
+	// expires_at, which the lease TTL above already tracks; what is given up is
+	// deleting it early — including at session end, which an inline source does do.
+	// Keep chained spec ttl short.
+	leaseID := resp.AccessKey
+	if chained != nil {
+		leaseID = ""
+	}
+	return rawData, nil, leaseTTL, leaseID, nil
+}
+
+// leaseTTLFromExpiry converts the expires_at Scaleway reports into a lease TTL.
+//
+// The requested duration alone is the wrong answer. It is measured before the
+// round trip, so the lease outlives the key by however long the call took —
+// including up to two backoff waits on a retry. It also ignores an expiry the
+// organization shortened for its own reasons: a credential-duration policy can
+// cap a key well below what was asked, and the credential is cached for its whole
+// lease, so an over-long lease means later hits hand out a key that is already
+// dead.
+//
+// The reported expiry is capped at the requested duration, because it is only as
+// trustworthy as the agreement between two clocks. A local clock running behind
+// Scaleway's would otherwise reintroduce the very over-long lease this exists to
+// prevent, bounded by skew rather than by round-trip time.
+//
+// An unparseable expiry falls back to the requested duration: a usable key should
+// not be thrown away over a timestamp format. An expiry already in the past is a
+// different matter — there is no usable key to return.
+func (d *ScalewayDriver) leaseTTLFromExpiry(expiresAt string, requested time.Duration) (time.Duration, error) {
+	if expiresAt == "" {
+		d.logger.Warn("Scaleway returned no expires_at; falling back to the requested duration",
+			logger.String("requested", requested.String()),
+		)
+		return requested, nil
+	}
+
+	expiry, err := time.Parse(time.RFC3339, expiresAt)
+	if err != nil {
+		d.logger.Warn("Scaleway returned an expires_at that is not RFC3339; falling back to the requested duration",
+			logger.String("expires_at", expiresAt),
+			logger.String("requested", requested.String()),
+		)
+		return requested, nil
+	}
+
+	ttl := time.Until(expiry)
+	if ttl <= 0 {
+		return 0, fmt.Errorf("Scaleway returned an API key that already expired at %s", expiresAt)
+	}
+	if ttl > requested {
+		return requested, nil
+	}
+	return ttl, nil
 }
 
 // Revoke deletes a dynamically created API key via DELETE /iam/v1alpha1/api-keys/{access_key}.
@@ -297,34 +619,52 @@ func (d *ScalewayDriver) Revoke(ctx context.Context, leaseID string) error {
 
 	d.configMu.RLock()
 	managementKey := d.getManagementSecretKeyLocked()
+	chained := d.isChainedLocked()
 	d.configMu.RUnlock()
+
+	// A lease on a chained source predates its conversion: chained mints hand out
+	// none. There is no key here to authorise the delete and no caller to walk the
+	// chain with, and that will never change — so returning an error would only
+	// send the expiration manager into backoff and then a daily retry, forever, for
+	// a request that cannot succeed. The key carries its own expires_at.
+	if chained {
+		d.logger.Warn("cannot revoke a lease issued before this source began chaining its management key; the key will live until it expires",
+			logger.String("access_key", truncateID(leaseID, 8)),
+		)
+		return nil
+	}
+
 	if managementKey == "" {
 		return fmt.Errorf("management_secret_key is required to revoke Scaleway API keys")
 	}
 
-	apiURL := d.iamURL("/api-keys/" + leaseID)
-
-	retryConfig := httputil.HTTPRetryConfig{
-		MaxAttempts:       scalewayMaxRetryAttempts,
-		MaxBodySize:       scalewayMaxResponseBodySize,
-		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
-		BaseBackoff:       1 * time.Second,
-		JitterPercent:     20,
-	}
-
 	httpReq := httputil.HTTPRequest{
 		Method: http.MethodDelete,
-		URL:    apiURL,
+		URL:    d.iamKeyURL(leaseID),
 		Headers: map[string]string{
 			"X-Auth-Token": managementKey,
 			"Accept":       "application/json",
 		},
-		OKStatuses: []int{http.StatusNoContent, http.StatusOK, http.StatusNotFound},
+		OKStatuses: []int{http.StatusNoContent, http.StatusOK},
 	}
 
-	_, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	_, status, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, scalewayRetryConfig())
 	if err != nil {
-		return fmt.Errorf("failed to revoke Scaleway API key %s: %w", leaseID, err)
+		if isScalewayNotFound(err) {
+			return fmt.Errorf("Scaleway API key %s: %w", truncateID(leaseID, 8), credential.ErrLeaseGone)
+		}
+		// A bare 404 is not a revocation. It is almost always a misconfigured
+		// iam_api_path, and returning an error would send the expiration manager
+		// into backoff and then a daily retry for a request that can never
+		// succeed. Say so loudly and let the key expire on its own.
+		if status == http.StatusNotFound {
+			d.logger.Warn("Scaleway returned 404 with no not_found marker; the key was NOT revoked and will live until it expires — check iam_api_path",
+				logger.String("access_key", truncateID(leaseID, 8)),
+				logger.String("url", d.iamKeyURL(leaseID)),
+			)
+			return nil
+		}
+		return fmt.Errorf("failed to revoke Scaleway API key %s: %w", truncateID(leaseID, 8), err)
 	}
 
 	d.logger.Info("revoked dynamic Scaleway API key",
@@ -347,6 +687,13 @@ func (d *ScalewayDriver) Cleanup(_ context.Context) error {
 func (d *ScalewayDriver) SupportsRotation() bool {
 	d.configMu.RLock()
 	defer d.configMu.RUnlock()
+	// isChainedLocked, not isChained: the read lock is already held for the whole
+	// body and read locks are not re-entrant.
+	if d.isChainedLocked() {
+		// The key lives at its source of truth, and whoever owns the referenced spec
+		// rotates it there.
+		return false
+	}
 	return d.getManagementSecretKeyLocked() != "" &&
 		credential.GetString(d.credSource.Config, "management_access_key", "") != ""
 }
@@ -357,8 +704,8 @@ func (d *ScalewayDriver) PrepareRotation(ctx context.Context) (map[string]string
 	d.configMu.RLock()
 	managementKey := d.getManagementSecretKeyLocked()
 	managementAccessKey := credential.GetString(d.credSource.Config, "management_access_key", "")
-	configSnapshot := make(map[string]string, len(d.credSource.Config))
-	for k, v := range d.credSource.Config {
+	configSnapshot := make(map[string]string, d.credSource.Config.Len())
+	for k, v := range d.credSource.Config.All() {
 		configSnapshot[k] = v
 	}
 	d.configMu.RUnlock()
@@ -370,19 +717,12 @@ func (d *ScalewayDriver) PrepareRotation(ctx context.Context) (map[string]string
 		return nil, nil, 0, fmt.Errorf("management_access_key is required for rotation")
 	}
 
-	retryConfig := httputil.HTTPRetryConfig{
-		MaxAttempts:       scalewayMaxRetryAttempts,
-		MaxBodySize:       scalewayMaxResponseBodySize,
-		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
-		BaseBackoff:       1 * time.Second,
-		JitterPercent:     20,
-	}
+	retryConfig := scalewayRetryConfig()
 
 	// Look up the current key to find its bearer (application_id or user_id)
-	getURL := d.iamURL("/api-keys/" + managementAccessKey)
 	getReq := httputil.HTTPRequest{
 		Method:  http.MethodGet,
-		URL:     getURL,
+		URL:     d.iamKeyURL(managementAccessKey),
 		Headers: map[string]string{"X-Auth-Token": managementKey, "Accept": "application/json"},
 	}
 
@@ -399,16 +739,26 @@ func (d *ScalewayDriver) PrepareRotation(ctx context.Context) (map[string]string
 		return nil, nil, 0, fmt.Errorf("failed to parse key info: %w", err)
 	}
 
+	if keyInfo.ApplicationID == "" && keyInfo.UserID == "" {
+		return nil, nil, 0, fmt.Errorf("current management key has no application_id or user_id")
+	}
+
+	// Every key this rotation creates is stamped with the key it replaces, so the
+	// stamp names one lineage. Sweeping it before creating anything reclaims keys
+	// left behind by an earlier attempt at this same rotation — a retried create,
+	// or a crash before the staged entry was persisted — which are invisible to
+	// Warden and, unlike a minted key, never expire.
+	stamp := scalewayRotationDescriptionPrefix + managementAccessKey
+	d.sweepOrphanedRotationKeys(ctx, managementKey, keyInfo.ApplicationID, keyInfo.UserID, stamp)
+
 	// Create a new management key for the same bearer
 	createBody := map[string]interface{}{
-		"description": "warden-management-key-rotated",
+		"description": stamp,
 	}
 	if keyInfo.ApplicationID != "" {
 		createBody["application_id"] = keyInfo.ApplicationID
-	} else if keyInfo.UserID != "" {
-		createBody["user_id"] = keyInfo.UserID
 	} else {
-		return nil, nil, 0, fmt.Errorf("current management key has no application_id or user_id")
+		createBody["user_id"] = keyInfo.UserID
 	}
 
 	bodyJSON, err := json.Marshal(createBody)
@@ -416,15 +766,14 @@ func (d *ScalewayDriver) PrepareRotation(ctx context.Context) (map[string]string
 		return nil, nil, 0, fmt.Errorf("failed to marshal create request: %w", err)
 	}
 
-	createURL := d.iamURL("/api-keys")
 	createReq := httputil.HTTPRequest{
 		Method:  http.MethodPost,
-		URL:     createURL,
+		URL:     d.iamURL("/api-keys"),
 		Body:    bodyJSON,
 		Headers: map[string]string{"X-Auth-Token": managementKey, "Content-Type": "application/json", "Accept": "application/json"},
 	}
 
-	respBody, _, err = httputil.ExecuteWithRetry(ctx, d.httpClient, createReq, retryConfig)
+	respBody, _, err = httputil.ExecuteWithRetry(ctx, d.httpClient, createReq, scalewayCreateRetryConfig())
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to create new management key: %w", err)
 	}
@@ -455,8 +804,89 @@ func (d *ScalewayDriver) PrepareRotation(ctx context.Context) (map[string]string
 		logger.String("new_access_key", truncateID(newKey.AccessKey, 8)),
 	)
 
-	activateAfter := credential.GetDuration(d.credSource.Config, "activation_delay", DefaultScalewayActivationDelay)
+	// Read from the snapshot taken under the lock above, not from the live map:
+	// two network round trips have happened since, and a concurrent CommitRotation
+	// may have replaced the map in the meantime.
+	activateAfter := credential.GetDuration(credential.NewConfig(configSnapshot), "activation_delay", DefaultScalewayActivationDelay)
 	return newConfig, cleanupConfig, activateAfter, nil
+}
+
+// sweepOrphanedRotationKeys deletes management keys left behind by an earlier
+// attempt at this same rotation.
+//
+// Scoped by exact description, which encodes the key being replaced. A key
+// created by rotating from K is stamped with K, so the key currently in use —
+// stamped with *its* predecessor — can never match, and neither can a sibling
+// source's key, whose lineage starts somewhere else. That scoping is the whole
+// safety argument: a sweep keyed on "some Warden rotated this" would delete
+// another source's live credential.
+//
+// Failures are logged and swallowed. A rotation that works must not be failed
+// because tidying up after a previous one did not.
+func (d *ScalewayDriver) sweepOrphanedRotationKeys(ctx context.Context, managementKey, applicationID, userID, stamp string) {
+	bearer := url.Values{}
+	if applicationID != "" {
+		bearer.Set("application_id", applicationID)
+	} else {
+		bearer.Set("user_id", userID)
+	}
+	bearer.Set("page_size", fmt.Sprintf("%d", scalewayListPageSize))
+
+	for page := 1; ; page++ {
+		bearer.Set("page", fmt.Sprintf("%d", page))
+		listReq := httputil.HTTPRequest{
+			Method:  http.MethodGet,
+			URL:     d.iamURL("/api-keys") + "?" + bearer.Encode(),
+			Headers: map[string]string{"X-Auth-Token": managementKey, "Accept": "application/json"},
+		}
+
+		respBody, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, listReq, scalewayRetryConfig())
+		if err != nil {
+			d.logger.Warn("could not list API keys to sweep orphaned rotation keys",
+				logger.Err(err),
+			)
+			return
+		}
+
+		var list struct {
+			APIKeys []struct {
+				AccessKey   string `json:"access_key"`
+				Description string `json:"description"`
+			} `json:"api_keys"`
+			TotalCount int `json:"total_count"`
+		}
+		if err := json.Unmarshal(respBody, &list); err != nil {
+			d.logger.Warn("could not parse API key listing while sweeping orphaned rotation keys",
+				logger.Err(err),
+			)
+			return
+		}
+
+		for _, key := range list.APIKeys {
+			if key.Description != stamp || key.AccessKey == "" {
+				continue
+			}
+			d.logger.Warn("deleting an orphaned management key from a previous rotation attempt",
+				logger.String("access_key", truncateID(key.AccessKey, 8)),
+			)
+			delReq := httputil.HTTPRequest{
+				Method:     http.MethodDelete,
+				URL:        d.iamKeyURL(key.AccessKey),
+				Headers:    map[string]string{"X-Auth-Token": managementKey, "Accept": "application/json"},
+				OKStatuses: []int{http.StatusNoContent, http.StatusOK},
+			}
+			if _, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, delReq, scalewayRetryConfig()); err != nil && !isScalewayNotFound(err) {
+				d.logger.Warn("could not delete an orphaned management key",
+					logger.Err(err),
+					logger.String("access_key", truncateID(key.AccessKey, 8)),
+				)
+			}
+		}
+
+		if len(list.APIKeys) < scalewayListPageSize || page*scalewayListPageSize >= list.TotalCount {
+			return
+		}
+	}
 }
 
 // CommitRotation activates the new management key in driver state.
@@ -464,13 +894,23 @@ func (d *ScalewayDriver) CommitRotation(ctx context.Context, newConfig map[strin
 	d.configMu.Lock()
 	defer d.configMu.Unlock()
 
-	d.credSource.Config = newConfig
+	d.credSource.Config = credential.NewConfig(newConfig)
 
 	d.logger.Info("committed rotated management key",
-		logger.String("new_access_key", truncateID(credential.GetString(newConfig, "management_access_key", ""), 8)),
+		logger.String("new_access_key", truncateID(newConfig["management_access_key"], 8)),
 	)
 
 	return nil
+}
+
+// StagedCleanupConfig names the management key a staged PrepareRotation created,
+// so CleanupRotation — still using the old management secret — deletes it.
+func (d *ScalewayDriver) StagedCleanupConfig(_ context.Context, newConfig map[string]string) (map[string]string, error) {
+	id := newConfig["management_access_key"]
+	if id == "" {
+		return nil, fmt.Errorf("staged config carries no management_access_key")
+	}
+	return map[string]string{"access_key": id}, nil
 }
 
 // CleanupRotation deletes the old management key via the IAM API.
@@ -488,24 +928,25 @@ func (d *ScalewayDriver) CleanupRotation(ctx context.Context, cleanupConfig map[
 		return fmt.Errorf("management_secret_key is required to clean up old key")
 	}
 
-	deleteURL := d.iamURL("/api-keys/" + oldAccessKey)
-	retryConfig := httputil.HTTPRetryConfig{
-		MaxAttempts:       scalewayMaxRetryAttempts,
-		MaxBodySize:       scalewayMaxResponseBodySize,
-		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
-		BaseBackoff:       1 * time.Second,
-		JitterPercent:     20,
-	}
-
 	deleteReq := httputil.HTTPRequest{
 		Method:     http.MethodDelete,
-		URL:        deleteURL,
+		URL:        d.iamKeyURL(oldAccessKey),
 		Headers:    map[string]string{"X-Auth-Token": managementKey, "Accept": "application/json"},
-		OKStatuses: []int{http.StatusNoContent, http.StatusOK, http.StatusNotFound},
+		OKStatuses: []int{http.StatusNoContent, http.StatusOK},
 	}
 
-	_, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, deleteReq, retryConfig)
+	_, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, deleteReq, scalewayRetryConfig())
 	if err != nil {
+		// Already gone is the outcome this wanted. Anything else — including a bare
+		// 404 from a mistyped iam_api_path — is returned rather than swallowed: the
+		// old management key carries no expiry, so reporting a failed delete as
+		// success would leave a fully privileged credential alive indefinitely.
+		if isScalewayNotFound(err) {
+			d.logger.Info("old management key was already gone",
+				logger.String("access_key", truncateID(oldAccessKey, 8)),
+			)
+			return nil
+		}
 		d.logger.Warn("failed to delete old management key during cleanup",
 			logger.Err(err),
 			logger.String("access_key", truncateID(oldAccessKey, 8)),
@@ -522,7 +963,7 @@ func (d *ScalewayDriver) CleanupRotation(ctx context.Context, cleanupConfig map[
 
 // VerifySpec validates that the spec's credentials are functional.
 func (d *ScalewayDriver) VerifySpec(ctx context.Context, spec *credential.CredSpec) error {
-	mintMethod := credential.GetString(spec.Config, "mint_method", "static_keys")
+	mintMethod := credential.GetString(spec.Config, "mint_method", "")
 
 	switch mintMethod {
 	case "static_keys":
@@ -536,6 +977,13 @@ func (d *ScalewayDriver) VerifySpec(ctx context.Context, spec *credential.CredSp
 
 // verifyStaticKeys verifies that the static access_key exists via the IAM API.
 func (d *ScalewayDriver) verifyStaticKeys(ctx context.Context, spec *credential.CredSpec) error {
+	// A chained spec holds no pair to verify — it is fetched per mint, as the
+	// caller, and there is no caller here. Reporting "no secret_key configured"
+	// would describe config that is absent on purpose.
+	if spec.Config.Get(credential.ConfigSecretSpec) != "" {
+		return nil
+	}
+
 	secretKey := credential.GetString(spec.Config, "secret_key", "")
 	if secretKey == "" {
 		return fmt.Errorf("no secret_key configured in spec")
@@ -547,26 +995,16 @@ func (d *ScalewayDriver) verifyStaticKeys(ctx context.Context, spec *credential.
 	}
 
 	// Verify the key works by calling a lightweight IAM endpoint
-	apiURL := d.iamURL("/api-keys/" + accessKey)
-
-	retryConfig := httputil.HTTPRetryConfig{
-		MaxAttempts:       scalewayMaxRetryAttempts,
-		MaxBodySize:       scalewayMaxResponseBodySize,
-		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
-		BaseBackoff:       1 * time.Second,
-		JitterPercent:     20,
-	}
-
 	httpReq := httputil.HTTPRequest{
 		Method: http.MethodGet,
-		URL:    apiURL,
+		URL:    d.iamKeyURL(accessKey),
 		Headers: map[string]string{
 			"X-Auth-Token": secretKey,
 			"Accept":       "application/json",
 		},
 	}
 
-	_, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, retryConfig)
+	_, _, err := httputil.ExecuteWithRetry(ctx, d.httpClient, httpReq, scalewayRetryConfig())
 	if err != nil {
 		return fmt.Errorf("Scaleway API key verification failed: %w", err)
 	}
@@ -578,8 +1016,12 @@ func (d *ScalewayDriver) verifyStaticKeys(ctx context.Context, spec *credential.
 func (d *ScalewayDriver) verifyDynamicConfig(spec *credential.CredSpec) error {
 	d.configMu.RLock()
 	hasKey := d.getManagementSecretKeyLocked() != ""
+	chained := d.isChainedLocked()
 	d.configMu.RUnlock()
-	if !hasKey {
+
+	// A chained source holds no management key on purpose; it is fetched per mint,
+	// as the caller. Demanding one here would report correct config as broken.
+	if !chained && !hasKey {
 		return fmt.Errorf("management_secret_key is required on source for dynamic_keys mint method")
 	}
 	if credential.GetString(spec.Config, "application_id", "") == "" {

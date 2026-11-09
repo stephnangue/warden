@@ -19,7 +19,7 @@
 # (which has its own unit + e2e coverage).
 #
 # Image build uses `docker buildx build --load` with the multi-stage
-# Dockerfile.smoke (golang:1.26 -> distroless). Comfortable inside
+# Dockerfile.smoke (golang:1.27 -> distroless). Comfortable inside
 # CI's 16 GB ubuntu-latest runners; Docker Desktop with the default
 # 8 GB cap may OOM on the AWS SDK compile — bump to 12 GB+ locally.
 #
@@ -96,6 +96,21 @@ helm upgrade --install "$RELEASE" "$CHART_DIR" \
 # --- 6. Wait for the warden pod to be Running. ---------------------
 # Readiness probe needs init+unseal so we can't wait for Ready here.
 # PodScheduled + phase=Running is enough to port-forward into.
+#
+# helm returns once the StatefulSet exists, which can be before its
+# controller creates the pod — and `kubectl wait` fails at once on a pod
+# that does not exist yet. Wait for it to appear first.
+log "waiting for ${RELEASE}-0 to be created"
+for i in $(seq 1 60); do
+  if kubectl -n "$NS" get pod "${RELEASE}-0" >/dev/null 2>&1; then
+    break
+  fi
+  if [ "$i" -eq 60 ]; then
+    fail "${RELEASE}-0 was not created within 120s"
+  fi
+  sleep 2
+done
+
 log "waiting for ${RELEASE}-0 to be schedulable"
 kubectl -n "$NS" wait --for=condition=PodScheduled "pod/${RELEASE}-0" --timeout=120s
 

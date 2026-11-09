@@ -18,13 +18,20 @@ dropped everywhere.
 
 ```diff
 - condition = "token.actors.all(a, a.verified)"
-+ condition = "size(token.actors) > 0"
++ condition = "size(agent.actors) > 0"
 ```
 
 Note the empty-chain semantics also flip: the old expression was vacuously *true* (allow)
 for a token with no actors; the rewrite is *false* (deny). If you did **not** mean to
 require an actor — the old expression allowed every request, since it also passed when the
 chain was empty — simply **drop the condition**.
+
+:::note[Namespace updated for v0.20.0]
+The replacement above is written in the **`agent`** namespace. If you are migrating
+directly from v0.18.0 to v0.19.x, the field was `token.actors` in that release; the
+`token` namespace was renamed in v0.20.0. See
+[Upgrading from v0.19.0](/upgrade/from-v0-19/) for the full rename table.
+:::
 
 **Audit shape.** Audit `actors[]` objects lose the `"verified"` key (`{subject, verified}`
 → `{subject}`).

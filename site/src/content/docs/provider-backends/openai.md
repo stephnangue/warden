@@ -2,32 +2,136 @@
 title: "OpenAI"
 ---
 
-The OpenAI provider enables proxied access to the OpenAI API through Warden. It streams requests to OpenAI endpoints (chat completions, responses, embeddings, images, models) with automatic API key injection and policy evaluation on AI request fields.
+The OpenAI provider enables proxied access to the OpenAI API through Warden. It streams requests to OpenAI endpoints (chat completions, responses, embeddings, images, models) with credential injection and policy evaluation on AI request fields. Credentials are injected via the `Authorization: Bearer` header. The recommended credential needs no API key at all: an `openai` source exchanges a Warden identity assertion for a short-lived OpenAI token through workload identity federation. Where an API key is needed, chain it from your secret store, or store it in Warden as the quick start.
+
+## How a request flows
+
+This mount can carry **two principals** — the agent, and the user it is acting for — and
+both can be described to OpenAI in the same assertion.
+
+The recommended setup holds **no OpenAI key anywhere**. Warden mints a short-lived identity
+assertion and exchanges it at OpenAI's auth host for an access token that acts as one
+OpenAI **service account**.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user claims and agent claims, has an external KMS sign it, exchanges it at OpenAI's token endpoint for an access token, and injects that token to the OpenAI API" src="/images/warden-prov-openai-oidc-federation.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting **both** credentials and asserting a role. Warden
+   authenticates each against its own auth mount.
+3. The asserted role selects the credential spec — an `oauth_bearer_token` spec on an
+   `openai` source. Warden builds the assertion that spec calls for — the agent's claims
+   or, when the spec discloses the user, a delegation token with the user as `sub` and the
+   agent in `act` — and sends it to an **external KMS** unsigned.
+4. The KMS returns it signed. No signing key lives in Warden.
+5. Warden exchanges it at `auth.openai.com` as an RFC 8693 token exchange, with no client
+   secret.
+6. OpenAI verifies it and returns an access token bound to the spec's
+   `service_account_id`.
+7. Warden injects that token as `Authorization: Bearer <token>` and forwards to the
+   OpenAI API.
+
+Because the user's claims reach OpenAI inside the assertion, the identity provider's
+mapping can be written against them. A disclosed user's `sub` is their raw id, so bind
+`warden_namespace` beside it — see
+[Assertion claims](/federation/assertion-claims/#an-agent-acting-for-a-user).
+
+A federated token is issued for one service account, which already belongs to one
+organization and one project, so the mount sends **no** `OpenAI-Organization` or
+`OpenAI-Project` header with it — and strips any the client sent. See the
+[OpenAI credential driver](/credential-drivers/openai/).
+
+:::note[Steps 3–6 run only on a cache miss]
+Warden caches the token until shortly before it expires (an hour at most), so most requests
+skip from step 2 to step 7. The entry is keyed by namespace, the agent's token id and the
+spec name — plus the user's token id when the mount carries a user, so one user's token is
+never served to another.
+:::
+
+The KMS leg is optional, and **recommended in production**: with a
+[`signer` stanza](/configuration/signer/) configured, Warden holds no key material at all.
+Omit the stanza and the issuer signs with a locally held key instead. The exchange is
+identical either way.
+
+### Chained: an API key from your store
+
+Where an API key is required, keep it in the vault that manages it and read it per request.
+The mount injects an **`api_key`** credential as a bearer token, plus `OpenAI-Organization`
+and `OpenAI-Project` when that credential carries an `organization_id` or a `project_id`.
+
+<p align="center"><img alt="An agent presents the user's ID token and its own identity to Warden, which builds an assertion carrying user and agent claims, has an external KMS sign it, reads the OpenAI API key from an external vault at a path templated by the user's team and the agent's environment, and injects it to the OpenAI API" src="/images/warden-prov-openai-vault-apikey.png" width="860"></p>
+
+1. The user authenticates and the agent holds their ID token.
+2. The agent calls Warden presenting both credentials and asserting a role.
+3. Warden builds the assertion the referenced spec calls for and sends it to a KMS-backed
+   issuer unsigned, where one is configured.
+4. The issuer returns it signed.
+5. Warden authenticates to the **external vault** and reads
+   `secret/openai/{{user.team}}/{{agent.env}}`.
+6. The vault returns the API key for that team and environment.
+7. Warden injects it and forwards.
+
+The credential is served **verbatim** — nothing is minted. What chaining buys is custody:
+it stays in the store that manages it, and the read path decides who reaches which one.
+
+### The simpler variant
+
+<p align="center"><img alt="Warden reads a static OpenAI API key from its encrypted storage and injects it to the OpenAI API for every caller" src="/images/warden-prov-openai-inline-apikey.png" width="860"></p>
+
+**Inline.** The API key sits in Warden's storage. Shortest to set up, weakest custody:
+one long-lived credential for every caller — the quick start, not the production setup.
+
+## Credential modes
+
+| Mode | What OpenAI sees | Where the credential lives |
+|---|---|---|
+| **Keyless federation** ✅ *recommended* | A short-lived token for one service account | Nowhere — minted per cache miss |
+| **Chained** | One long-lived API key, scoped by path | The vault; nothing in Warden |
+| **Inline** ⚠️ | One long-lived API key, shared | Warden's storage |
+
+Federation removes the API key entirely. Where you still need one — a feature the federated
+token does not cover, or no OpenAI identity provider yet — chaining keeps it out of Warden.
+
+:::note[An organization or project id changes the chained shape]
+`OpenAI-Organization` and `OpenAI-Project` are sent **only when the credential carries an
+`organization_id` or a `project_id`**, declared on the source with
+`credential_fields=organization_id,project_id`. Those are adjunct fields, and they are
+dropped for any non-`apikey` driver — so a chained spec cannot read them straight from the
+vault with `mint_method=static_apikey`. It needs a producer spec instead; see
+[Carrying an organization or project id](#carrying-an-organization-or-project-id).
+:::
+
+See the [OpenAI credential driver](/credential-drivers/openai/) for the keyless source, and
+the [apikey credential driver](/credential-drivers/apikey/) for every API-key source and
+spec key.
 
 ## Prerequisites
 
 - Docker and Docker Compose installed and running
-- An **OpenAI API key** from [platform.openai.com](https://platform.openai.com)
+- Keyless: an OpenAI **workload identity provider** that trusts Warden's issuer, and a
+  **service account** it may act as. With an API key instead: an **OpenAI API key** from
+  [platform.openai.com](https://platform.openai.com)
 
 :::note[New to Warden?]
 Follow [Local dev setup](/provider-backends/local-dev-setup/) to start a local dev environment (Ory Hydra + a Warden dev server) before Step 1.
 :::
 
-## Step 1: Configure JWT Auth and Create a Role
+## Step 1: Configure JWT Auth
 
-Enable the JWT auth method and point it at your identity provider's JWKS endpoint, then create a role that binds the credential spec and policy. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source) — for the local dev setup.
+Enable the JWT auth method and point it at your identity provider's JWKS endpoint. Enabling the mount and configuring the key source is covered once in [JWT auth](/auth-methods/jwt/#step-1-configure-the-key-source); the commands below are for the local dev setup.
 
-> **This step must come before configuring the provider.** Warden validates at configuration time that the auth backend referenced by `auto_auth_path` is already mounted.
+> **Set this up before configuring the provider.** The provider resolves
+> `auto_auth_path` per request — writing the config only checks that it is
+> non-empty, not that the mount exists — so a gateway call fails with `no auth
+> mount registered ... for implicit auth` if the referenced auth mount isn't
+> there yet.
 
 ```bash
 warden auth enable jwt
-warden write auth/jwt/config jwks_url=http://localhost:4444/.well-known/jwks.json
-
-# Create a role that binds the credential spec and policy
-warden write auth/jwt/role/openai-user \
-    token_policies="openai-access" \
-    user_claim=sub \
-    cred_spec_name=openai-ops
+warden write auth/jwt/config '{
+  "jwks_url": "http://localhost:4444/.well-known/jwks.json",
+  "bound_issuer": "http://localhost:4444",
+  "bound_audiences": ["warden"]
+}'
 ```
 
 ## Step 2: Mount and Configure the Provider
@@ -71,83 +175,213 @@ Verify the configuration:
 warden read openai/config
 ```
 
-## Step 3: Create a Credential Source and Spec
+## Step 3: Create a Role and Grant It
 
-The credential source holds only connection info (`api_url`). The API key is stored on the credential spec below, allowing multiple specs with different keys to share one source.
+Create the role that names the policy and the credential spec, then a virtual group that grants it to callers admitted through the JWT mount. The spec and the policy come in Steps 4 and 5; until they exist, the role write warns.
 
 ```bash
-warden cred source create openai-src \
-  -type=apikey \
-  -rotation-period=0 \
-  -config=api_url=https://api.openai.com \
-  -config=verify_endpoint=/v1/models \
-  -config=optional_metadata=organization_id,project_id \
-  -config=display_name=OpenAI
+warden role create openai-user -json '{
+  "policies": ["openai-access"],
+  "cred_spec_name": "openai-ops",
+  "provider_path": "openai/"
+}'
+
+warden identity group create openai-user-agents -json '{
+  "type": "virtual",
+  "roles": ["openai-user"],
+  "rules": [
+    { "mount": ["auth/jwt/"] }
+  ]
+}'
 ```
 
-Verify the source was created:
+:::caution[In production, register the agent]
+The group above grants the role to every agent the mount admits: fine for trying the provider, not for production. In production, register each agent: create an [entity](/identity/entities/) for it, have its team [sponsor](/identity/sponsors/) it, and grant the role through a [static group](/identity/groups/) that lists the entity. Mark the role `governed_only` so no virtual group can grant it. Claim the agent's native identity last ([Rolling out](/identity/entities/#rolling-out)); [Governing an agent](/tutorials/identity/govern-an-agent/) walks through it.
+:::
+
+A rule with only `mount` grants the role to every token the mount admits. Narrow it with the token's facts, as shown in [JWT auth](/auth-methods/jwt/#step-4-grant-the-role-with-a-group). See [Roles](/identity/roles/) and [Groups](/identity/groups/) for every field.
+
+## Step 4: Create a Credential Source and Spec
+
+### Option A: Keyless federation (recommended)
+
+The source names the identity provider that trusts Warden's issuer, and stores nothing —
+no `rotation_period`, no key. Each spec names the service account its token acts as.
+
+```bash
+warden cred source create openai-wif -json '{
+  "type": "openai",
+  "config": {
+    "auth_method": "oidc_federation",
+    "identity_provider_id": "<identity-provider-id>",
+    "audience": "https://warden.example.com/openai"
+  }
+}'
+
+warden cred spec create openai-ops -json '{
+  "source": "openai-wif",
+  "config": {
+    "subject_token_source": "warden_identity",
+    "service_account_id": "<service-account-id>"
+  }
+}'
+```
+
+`audience` is what the identity provider expects; leave it unset and every spec must set
+`assertion_audience` instead. The spec refuses `organization_id` and `project_id` — the
+service account already fixes both — and sets no `mint_method`: the type,
+`oauth_bearer_token`, is inferred.
+
+### Option B: Chained
+
+The flow in the first diagram. The vault holds the API key; Warden reads it per request and
+injects it.
+
+The key never enters Warden's storage. Warden reads it from a path built out of the agent's
+and user's claims, so a request made for the `platform-eng` team against `prod` reads
+`secret/openai/platform-eng/prod` and can reach nothing else.
+
+**Prerequisites:** a Vault/OpenBao instance with a KV v2 mount holding an `api_key` field,
+and a JWT auth role bound to Warden's issuer.
+
+```bash
+warden cred source create openai-vault-src -json '{
+  "type": "hvault",
+  "config": {
+    "vault_address": "https://vault.example.com",
+    "auth_method": "oidc_federation",
+    "jwt_role": "warden-openai",
+    "jwt_mount": "jwt",
+    "audience": "https://vault.example.com"
+  }
+}'
+```
+
+`auth_method=oidc_federation` is keyless — the source stores no `secret_id` and no token, and setting one is rejected on write. It also needs no rotation period, because there is nothing to rotate.
+
+```bash
+warden cred spec create openai-ops -json '{
+  "source": "openai-vault-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "static_apikey",
+    "subject_token_source": "warden_identity",
+    "assertion_user_claims": "team",
+    "assertion_metadata_claims": "env",
+    "kv2_mount": "secret",
+    "secret_path": "openai/{{user.team}}/{{agent.env}}"
+  }
+}'
+```
+
+:::note[Templated paths resolve at mint time, not at write time]
+`warden cred spec create` accepts `{{user.team}}` and `{{agent.env}}` without checking that either claim can ever be produced — the substitution happens on each credential request. A claim resolves only if the spec projects it: `{{user.*}}` requires the claim in `assertion_user_claims` **and** `subject_token_source=warden_identity`; `{{agent.*}}` requires it in `assertion_metadata_claims`, except `{{agent.sub}}`, which is always available. An unprojected claim fails the request closed rather than reading some other path.
+:::
+
+### Carrying an organization or project id
+
+The spec above mints the key and nothing else, which is all most accounts need. An account that must also send `OpenAI-Organization` or `OpenAI-Project` cannot simply add the field to that spec.
+
+:::caution[`static_apikey` against a vault carries the key alone]
+Adjunct fields are dropped for any non-`apikey` driver, so `mint_method=static_apikey` on an `hvault` source yields `api_key` by itself however the secret is written. Warden then injects only `Authorization`, and requests resolve against the account's default organization rather than the intended one — a mount that looks healthy while billing the wrong place. Route the read through a producer spec instead.
+:::
+
+Split it in two: an `hvault` producer that reads the whole secret, and an `apikey` consumer that declares the extra fields and chains it.
+
+```bash
+# Producer: the whole KV v2 secret, read keylessly
+warden cred spec create openai-secret -json '{
+  "source": "openai-vault-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "mint_method": "kv2_read",
+    "subject_token_source": "warden_identity",
+    "assertion_user_claims": "team",
+    "assertion_metadata_claims": "env",
+    "kv2_mount": "secret",
+    "secret_path": "openai/{{user.team}}/{{agent.env}}"
+  }
+}'
+
+# Consumer: an apikey source that declares the adjunct fields
+warden cred source create openai-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://api.openai.com",
+    "verify_endpoint": "/v1/models",
+    "credential_fields": "organization_id,project_id",
+    "display_name": "OpenAI"
+  }
+}'
+
+warden cred spec create openai-ops -json '{
+  "source": "openai-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "secret_spec": "openai-secret"
+  }
+}'
+```
+
+Each declared field resolves from the fetched secret first and from the spec's own config second. So an organization id — which is not a secret — can stay inline on the consumer spec while only the key comes from the vault:
+
+```bash
+warden cred spec create openai-ops -json '{
+  "source": "openai-src",
+  "min_ttl": 600,
+  "max_ttl": 3600,
+  "config": {
+    "secret_spec": "openai-secret",
+    "organization_id": "org-abc123"
+  }
+}'
+```
+
+A field that appears in neither place is simply omitted, and the provider sends no header for it.
+
+### Option C: Inline
+
+The second diagram. The key sits in Warden's encrypted storage rather than a vault — no
+assertion, no outbound hop to fetch it. Quickest to a working mount, and the reason it
+belongs in dev and test rather than production.
+
+Here the source *is* the `apikey` driver, so the key and its adjunct fields share one spec
+with no chaining.
+
+```bash
+warden cred source create openai-src -json '{
+  "type": "apikey",
+  "config": {
+    "api_url": "https://api.openai.com",
+    "verify_endpoint": "/v1/models",
+    "credential_fields": "organization_id,project_id",
+    "display_name": "OpenAI"
+  }
+}'
+
+warden cred spec create openai-ops -json '{
+  "source": "openai-src",
+  "config": {
+    "api_key": "<your-openai-api-key>",
+    "organization_id": "<your-org-id>",
+    "project_id": "<your-project-id>"
+  }
+}'
+```
+
+`organization_id` and `project_id` are optional; drop either and the provider omits its header. Because the key is checked against the live API at creation, an invalid key fails here rather than on the first gateway request.
+
+Verify either setup:
 
 ```bash
 warden cred source read openai-src
-```
-
-Create a credential spec that references the credential source. The spec carries the API key and gets associated with tokens at login time.
-
-```bash
-warden cred spec create openai-ops \
-  -source openai-src \
-  -config api_key=<your-openai-api-key>
-```
-
-Optionally include an organization ID and/or project ID:
-
-```bash
-warden cred spec create openai-ops \
-  -source openai-src \
-  -config api_key=<your-openai-api-key> \
-  -config organization_id=<your-org-id> \
-  -config project_id=<your-project-id>
-```
-
-The API key is validated at creation time via a `GET /v1/models` call to the OpenAI API (SpecVerifier). If the key is invalid, spec creation will fail.
-
-Verify:
-
-```bash
 warden cred spec read openai-ops
 ```
 
-### Alternative: Vault/OpenBao as Credential Source
-
-Instead of storing the API key directly in Warden, you can store it in a Vault/OpenBao KV v2 secret engine and have Warden fetch it at runtime. This centralizes secret management in Vault.
-
-**Prerequisites:** A Vault/OpenBao instance with:
-- A KV v2 mount containing your OpenAI API key (e.g., at `secret/openai/ops` with an `api_key` field)
-- An AppRole configured for Warden access
-
-```bash
-# Create a Vault credential source
-warden cred source create openai-vault-src \
-  -type=hvault \
-  -config=vault_address=https://vault.example.com \
-  -config=auth_method=approle \
-  -config=role_id=your-role-id \
-  -config=secret_id=your-secret-id \
-  -config=approle_mount=approle \
-  -config=role_name=warden-role \
-  -rotation-period=24h
-
-# Create a credential spec using the static_apikey mint method
-warden cred spec create openai-ops \
-  -source openai-vault-src \
-  -config mint_method=static_apikey \
-  -config kv2_mount=secret \
-  -config secret_path=openai/ops
-```
-
-The KV v2 secret at `secret/openai/ops` should contain at minimum an `api_key` field. Warden fetches the secret from Vault on each credential request.
-
-## Step 4: Create a Policy
+## Step 5: Create a Policy
 
 Create a policy that grants access to the OpenAI provider gateway:
 
@@ -194,7 +428,7 @@ path "openai/role/+/gateway/v1/models" {
 EOF
 ```
 
-The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/concepts/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
+The `condition` is a [CEL](https://cel.dev) expression (see [CEL conditions](/identity/cel-conditions/)): `cidrContains` restricts by network and `now.getHours`/`now.getDayOfWeek` by time of day and weekday. It must evaluate to `true` for the rule to apply, and fails closed.
 
 Verify:
 
@@ -202,7 +436,7 @@ Verify:
 warden policy read openai-access
 ```
 
-## Step 5: Get a JWT and Make Requests
+## Step 6: Get a JWT and Make Requests
 
 Get a JWT from your identity provider — see [Obtaining a JWT](/auth-methods/jwt/#obtaining-a-jwt) (the local dev setup issues one from Hydra). Export it as `$JWT_TOKEN`.
 
@@ -309,15 +543,48 @@ This allows operators to enforce policies such as:
 - Enforce maximum token limits
 - Require streaming mode for cost visibility
 
+## Errors from Warden
+
+When Warden itself fails a request — authentication, policy, credential issuance, the
+upstream not answering — it answers in **OpenAI's error shape**, so an OpenAI SDK surfaces
+Warden's reason instead of failing to parse a foreign body. The status is unchanged, and it
+is what the SDKs retry on:
+
+```json
+{
+  "error": {
+    "message": "Warden: permission denied",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "warden_permission_denied"
+  }
+}
+```
+
+The message always starts with `Warden: `, and the `code` with `warden_`, so a caller can
+tell Warden refusing a request from OpenAI refusing it — they call for different fixes. The
+request id is in the `x-request-id` header.
+
+| `code` | `type` | Status | When |
+|---|---|---|---|
+| `warden_unauthenticated` | `invalid_request_error` | `401` | The caller's identity was missing or invalid. |
+| `warden_permission_denied` | `invalid_request_error` | `403` | A Warden policy refused the request. |
+| `warden_invalid_request` | `invalid_request_error` | `400` or another `4xx` | The request was malformed for Warden. |
+| `warden_credential_refused` | `invalid_request_error` | `403` | OpenAI refused the credential Warden presented — fix the configuration. |
+| `warden_credential_unavailable` | `service_unavailable_error` | `503` | The credential could not be obtained right now; retry. |
+| `warden_upstream_timeout` | `service_unavailable_error` | `504` | OpenAI did not answer within the mount's `timeout`. |
+| `warden_upstream_unreachable` | `service_unavailable_error` | `502` | OpenAI could not be reached. |
+| `warden_internal_error` | `server_error` | `500` | Anything else on Warden's side. |
+
 ## TLS Certificate Authentication
 
-Steps 4-5 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
+Steps 1, 3 and 6 above use JWT authentication. Alternatively, you can authenticate with a TLS client certificate. This is useful for workloads that already have X.509 certificates — Kubernetes pods with cert-manager, VMs with machine certificates, or SPIFFE X.509-SVIDs from a service mesh.
 
 :::note[Prerequisite]
 Certificate auth requires mTLS on the Warden listener so the client certificate can be presented during the handshake. See [Enabling mTLS on the listener](/auth-methods/cert/#enabling-mtls-on-the-listener).
 :::
 
-Steps 1-3 (provider setup) are identical. Replace Steps 4-5 with the following.
+The role, the credential spec and the policy (Steps 3-5) are identical. Replace the JWT mount, the provider's `auto_auth_path`, the group and the requests with the following.
 
 ### Enable Cert Auth
 
@@ -330,23 +597,8 @@ warden auth enable cert
 Provide the PEM-encoded CA certificate that signs your client certificates:
 
 ```bash
-warden write auth/cert/config \
-    trusted_ca_pem=@/path/to/ca.pem \
-    default_role=openai-user
+warden write auth/cert/config trusted_ca_pem=@/path/to/ca.pem
 ```
-
-### Create a Cert Role
-
-Create a role that binds allowed certificate identities to a credential spec and policy:
-
-```bash
-warden write auth/cert/role/openai-user \
-    allowed_common_names="agent-*" \
-    token_policies="openai-access" \
-    cred_spec_name=openai-ops 
-```
-
-The `allowed_common_names` field supports glob patterns; you can also match on other certificate fields. See [Create a role](/auth-methods/cert/#step-3-create-a-role) for the full set of constraint fields.
 
 ### Configure Provider for Cert Auth
 
@@ -363,6 +615,22 @@ warden write openai/config <<EOF
 EOF
 ```
 
+### Grant the Role to Certificates
+
+Grant `openai-user` with a group whose rule trusts the cert mount and matches the certificate's common name:
+
+```bash
+warden identity group create openai-user-agents -json '{
+  "type": "virtual",
+  "roles": ["openai-user"],
+  "rules": [
+    { "mount": ["auth/cert/"], "cn": ["agent-*"] }
+  ]
+}'
+```
+
+Selectors take glob patterns. A rule can also match `serial`, `ou`, `org`, `dns_san`, `email_san`, `uri_san` or `ca`. See [Grant the role with a group](/auth-methods/cert/#step-4-grant-the-role-with-a-group).
+
 ### Make Requests with Certificates
 
 ```bash
@@ -377,6 +645,9 @@ curl --cert client.pem --key client-key.pem \
 ```
 
 ## Key Management
+
+Keyless, there is no key to manage: the token is minted per cache miss and expires within
+the hour. The rest of this section applies to an API key stored in Warden.
 
 | Aspect | Details |
 |--------|---------|

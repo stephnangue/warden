@@ -57,6 +57,25 @@ type Config struct {
 	// Defaults to "optional" if not specified.
 	IPBindingPolicy string `hcl:"ip_binding_policy,optional"`
 
+	// TokenCacheMegabytes is the memory budget of the in-memory token cache, in
+	// MiB. 0 means the built-in default (100). A token evicted from a full
+	// cache is read from storage, or its caller authenticates again, on its
+	// next use. Takes effect on restart.
+	TokenCacheMegabytes int `hcl:"token_cache_megabytes,optional"`
+
+	// CredentialCacheMegabytes is the memory budget of the in-memory credential
+	// cache, in MiB. 0 means the built-in default (64). A credential evicted
+	// from a full cache is minted again on its next use. Takes effect on
+	// restart.
+	CredentialCacheMegabytes int `hcl:"credential_cache_megabytes,optional"`
+
+	// KeylessEnforcementLevel controls operator writes to credential sources and
+	// specs that would leave a long-lived secret stored on the server.
+	// Valid values: "off" (accept), "warn" (accept with a warning), "enforce"
+	// (refuse). Defaults to "warn". Existing sources and specs keep serving at
+	// every level.
+	KeylessEnforcementLevel string `hcl:"keyless_enforcement_level,optional"`
+
 	// HA cluster tuning — all values are Go duration strings (e.g., "30s", "1h").
 	// Omitted values use built-in defaults from core.DefaultClusterConfig().
 
@@ -106,6 +125,17 @@ type KMS struct {
 	Purpose  []string `hcl:"purpose,optional"`
 	Disabled string   `hcl:"disabled,optional"`
 
+	// Keys read by more than one seal type. Each HCL key must be declared on
+	// exactly one field: the decoder maps a key to a single field, so a
+	// second declaration silently steals the value from the first.
+	KeyName   string `hcl:"key_name,optional"`   // transit, azurekeyvault
+	KeyID     string `hcl:"key_id,optional"`     // ocikms
+	KmsKeyID  string `hcl:"kms_key_id,optional"` // awskms, kmip, alicloudkms
+	Region    string `hcl:"region,optional"`     // awskms, gcpkms, alicloudkms
+	Endpoint  string `hcl:"endpoint,optional"`   // awskms, kmip
+	AccessKey string `hcl:"access_key,optional"` // awskms, alicloudkms
+	SecretKey string `hcl:"secret_key,optional"` // awskms, alicloudkms
+
 	// config for static seal
 	CurrentKeyID  string `hcl:"current_key_id,optional"`
 	CurrentKey    string `hcl:"current_key,optional"`
@@ -115,35 +145,23 @@ type KMS struct {
 	// config for transit seal
 	Address        string `hcl:"address,optional"`
 	Token          string `hcl:"token,optional"`
-	KeyName        string `hcl:"key_name,optional"`
 	MountPath      string `hcl:"mount_path,optional"`
 	Namespace      string `hcl:"namespace,optional"`
 	DisableRenewal string `hcl:"disable_renewal,optional"`
+	KeyIDPrefix    string `hcl:"key_id_prefix,optional"`
 	TlsCaCert      string `hcl:"tls_ca_cert,optional"`
+	TlsCaPath      string `hcl:"tls_ca_path,optional"`
 	TlsClientCert  string `hcl:"tls_client_cert,optional"`
 	TlsClientKey   string `hcl:"tls_client_key,optional"`
 	TlsServerName  string `hcl:"tls_server_name,optional"`
 	TlsSkipVerify  string `hcl:"tls_skip_verify,optional"`
 
-	// config for pkcs11 seal
-	Lib                       string `hcl:"lib,optional"`
-	Slot                      string `hcl:"slot,optional"`
-	TokenLabel                string `hcl:"token_label,optional"`
-	Pin                       string `hcl:"pin,optional"`
-	KeyLabel                  string `hcl:"key_label,optional"`
-	KeyID                     string `hcl:"key_id,optional"`
-	Mechanism                 string `hcl:"mechanism,optional"`
-	DisableSoftwareEncryption bool   `hcl:"disable_software_encryption,optional"`
-
 	// config for ocikms seal
 	CryptoEndpoint     string `hcl:"crypto_endpoint,optional"`
 	ManagementEndpoint string `hcl:"management_endpoint,optional"`
 	AuthTypeApiKey     bool   `hcl:"auth_type_api_key,optional"`
-	OciKeyID           string `hcl:"key_id,optional"`
 
 	// config for kmip seal
-	KmsKeyId    string `hcl:"kms_key_id,optional"`
-	Endpoint    string `hcl:"endpoint,optional"`
 	ClientCert  string `hcl:"client_cert,optional"`
 	ClientKey   string `hcl:"client_key,optional"`
 	CaCert      string `hcl:"ca_cert,optional"`
@@ -155,7 +173,6 @@ type KMS struct {
 	// config for gcpkms seal
 	Credentials string `hcl:"credentials,optional"`
 	Project     string `hcl:"project,optional"`
-	Region      string `hcl:"region,optional"`
 	KeyRing     string `hcl:"key_ring,optional"`
 	CryptoKey   string `hcl:"crypto_key,optional"`
 
@@ -165,16 +182,13 @@ type KMS struct {
 	ClientSecret string `hcl:"client_secret,optional"`
 	Env          string `hcl:"environment,optional"`
 	VaultName    string `hcl:"vault_name,optional"`
-	AzureKeyName string `hcl:"key_name,optional"`
-	Resource     int    `hcl:"resource,optional"`
+	Resource     string `hcl:"resource,optional"` // DNS suffix of the vault endpoint, e.g. vault.azure.net
 
 	// config for awskms seal
-	AwsRegion    string `hcl:"region,optional"`
-	AccessKey    string `hcl:"access_key,optional"`
 	SessionToken string `hcl:"session_token,optional"`
-	SecretKey    string `hcl:"secret_key,optional"`
-	KmsKeyID     string `hcl:"kms_key_id,optional"`
-	AWSEndpoint  string `hcl:"endpoint,optional"`
+
+	// config for alicloudkms seal
+	Domain string `hcl:"domain,optional"`
 }
 
 // Config returns the KMS configuration as a map
@@ -194,6 +208,29 @@ func (k *KMS) Config() map[string]string {
 	// Add disabled flag if present
 	if k.Disabled != "" {
 		config["disabled"] = k.Disabled
+	}
+
+	// Keys shared across seal types, under the names the wrappers read
+	if k.KeyName != "" {
+		config["key_name"] = k.KeyName
+	}
+	if k.KeyID != "" {
+		config["key_id"] = k.KeyID
+	}
+	if k.KmsKeyID != "" {
+		config["kms_key_id"] = k.KmsKeyID
+	}
+	if k.Region != "" {
+		config["region"] = k.Region
+	}
+	if k.Endpoint != "" {
+		config["endpoint"] = k.Endpoint
+	}
+	if k.AccessKey != "" {
+		config["access_key"] = k.AccessKey
+	}
+	if k.SecretKey != "" {
+		config["secret_key"] = k.SecretKey
 	}
 
 	// Static seal config
@@ -217,9 +254,6 @@ func (k *KMS) Config() map[string]string {
 	if k.Token != "" {
 		config["token"] = k.Token
 	}
-	if k.KeyName != "" {
-		config["key_name"] = k.KeyName
-	}
 	if k.MountPath != "" {
 		config["mount_path"] = k.MountPath
 	}
@@ -229,8 +263,14 @@ func (k *KMS) Config() map[string]string {
 	if k.DisableRenewal != "" {
 		config["disable_renewal"] = k.DisableRenewal
 	}
+	if k.KeyIDPrefix != "" {
+		config["key_id_prefix"] = k.KeyIDPrefix
+	}
 	if k.TlsCaCert != "" {
 		config["tls_ca_cert"] = k.TlsCaCert
+	}
+	if k.TlsCaPath != "" {
+		config["tls_ca_path"] = k.TlsCaPath
 	}
 	if k.TlsClientCert != "" {
 		config["tls_client_cert"] = k.TlsClientCert
@@ -245,32 +285,6 @@ func (k *KMS) Config() map[string]string {
 		config["tls_skip_verify"] = k.TlsSkipVerify
 	}
 
-	// PKCS11 seal config
-	if k.Lib != "" {
-		config["lib"] = k.Lib
-	}
-	if k.Slot != "" {
-		config["slot"] = k.Slot
-	}
-	if k.TokenLabel != "" {
-		config["token_label"] = k.TokenLabel
-	}
-	if k.Pin != "" {
-		config["pin"] = k.Pin
-	}
-	if k.KeyLabel != "" {
-		config["key_label"] = k.KeyLabel
-	}
-	if k.KeyID != "" {
-		config["key_id"] = k.KeyID
-	}
-	if k.Mechanism != "" {
-		config["mechanism"] = k.Mechanism
-	}
-	if k.DisableSoftwareEncryption {
-		config["disable_software_encryption"] = "true"
-	}
-
 	// OCI KMS seal config
 	if k.CryptoEndpoint != "" {
 		config["crypto_endpoint"] = k.CryptoEndpoint
@@ -281,17 +295,8 @@ func (k *KMS) Config() map[string]string {
 	if k.AuthTypeApiKey {
 		config["auth_type_api_key"] = "true"
 	}
-	if k.OciKeyID != "" {
-		config["oci_key_id"] = k.OciKeyID
-	}
 
 	// KMIP seal config
-	if k.KmsKeyId != "" {
-		config["kms_key_id"] = k.KmsKeyId
-	}
-	if k.Endpoint != "" {
-		config["endpoint"] = k.Endpoint
-	}
 	if k.ClientCert != "" {
 		config["client_cert"] = k.ClientCert
 	}
@@ -321,9 +326,6 @@ func (k *KMS) Config() map[string]string {
 	if k.Project != "" {
 		config["project"] = k.Project
 	}
-	if k.Region != "" {
-		config["region"] = k.Region
-	}
 	if k.KeyRing != "" {
 		config["key_ring"] = k.KeyRing
 	}
@@ -347,31 +349,18 @@ func (k *KMS) Config() map[string]string {
 	if k.VaultName != "" {
 		config["vault_name"] = k.VaultName
 	}
-	if k.AzureKeyName != "" {
-		config["azure_key_name"] = k.AzureKeyName
-	}
-	if k.Resource != 0 {
-		config["resource"] = fmt.Sprintf("%d", k.Resource)
+	if k.Resource != "" {
+		config["resource"] = k.Resource
 	}
 
 	// AWS KMS seal config
-	if k.AwsRegion != "" {
-		config["aws_region"] = k.AwsRegion
-	}
-	if k.AccessKey != "" {
-		config["access_key"] = k.AccessKey
-	}
 	if k.SessionToken != "" {
 		config["session_token"] = k.SessionToken
 	}
-	if k.SecretKey != "" {
-		config["secret_key"] = k.SecretKey
-	}
-	if k.KmsKeyID != "" {
-		config["kms_key_id"] = k.KmsKeyID
-	}
-	if k.AWSEndpoint != "" {
-		config["aws_endpoint"] = k.AWSEndpoint
+
+	// AliCloud KMS seal config
+	if k.Domain != "" {
+		config["domain"] = k.Domain
 	}
 
 	return config
@@ -475,6 +464,29 @@ type ListenerBlock struct {
 	TLSSPIFFE               bool   `hcl:"tls_spiffe,optional"`
 	TLSSPIFFESocket         string `hcl:"tls_spiffe_socket,optional"`          // Workload API endpoint; empty => SPIFFE_ENDPOINT_SOCKET
 	TLSSPIFFEStartupTimeout string `hcl:"tls_spiffe_startup_timeout,optional"` // max wait/retry for the first SVID at boot (duration; default 10s)
+
+	// HTTP server deadlines. Empty means the listener's built-in default,
+	// which is the value each carried before they became configurable.
+	//
+	// These govern the control plane only. The read and write deadlines are
+	// absolute from the moment request headers are read, so they bound a
+	// handler's whole execution rather than merely the write of its
+	// response; proxied gateway traffic therefore clears both per-connection
+	// and answers to the mount's own timeout instead.
+	HTTPReadTimeout  string `hcl:"http_read_timeout,optional"`  // duration; default 5s
+	HTTPWriteTimeout string `hcl:"http_write_timeout,optional"` // duration; default 10s
+	HTTPIdleTimeout  string `hcl:"http_idle_timeout,optional"`  // duration; default 1m
+}
+
+// HTTPTimeouts parses the listener's HTTP deadline fields. validateConfig
+// rejects an unparseable or non-positive value at load, so a zero returned
+// here means the field was left empty and the listener applies its
+// built-in default.
+func (l ListenerBlock) HTTPTimeouts() (read, write, idle time.Duration) {
+	read, _ = time.ParseDuration(l.HTTPReadTimeout)
+	write, _ = time.ParseDuration(l.HTTPWriteTimeout)
+	idle, _ = time.ParseDuration(l.HTTPIdleTimeout)
+	return read, write, idle
 }
 
 // LoadConfig reads a single HCL config file and returns a validated *Config.
@@ -592,6 +604,10 @@ func InterpolateEnv(src []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// maxCacheMegabytes bounds token_cache_megabytes and credential_cache_megabytes:
+// 1 TiB, far above any node, and far below what overflows a byte count.
+const maxCacheMegabytes = 1 << 20
+
 // validateConfig checks the cross-field invariants on a Config. Split out
 // of LoadConfig so LoadConfigDir can validate the merged result once,
 // rather than validating each partial file independently.
@@ -655,10 +671,54 @@ func validateConfig(config *Config) error {
 		}
 	}
 
+	// Validate the cache budgets if set
+	for _, budget := range []struct {
+		key string
+		mib int
+	}{
+		{"token_cache_megabytes", config.TokenCacheMegabytes},
+		{"credential_cache_megabytes", config.CredentialCacheMegabytes},
+	} {
+		if budget.mib < 0 || budget.mib > maxCacheMegabytes {
+			return fmt.Errorf("%s must be 0 (the default) or between 1 and %d, got %d", budget.key, maxCacheMegabytes, budget.mib)
+		}
+	}
+
+	// Validate keyless_enforcement_level if set
+	if config.KeylessEnforcementLevel != "" {
+		switch config.KeylessEnforcementLevel {
+		case "off", "warn", "enforce":
+			// valid
+		default:
+			return fmt.Errorf("invalid keyless_enforcement_level %q: must be one of: off, warn, enforce", config.KeylessEnforcementLevel)
+		}
+	}
+
 	// Validate listener TLS config. TLS is on by default; opt out with tls_disable.
 	// SPIFFE serving is an alternative TLS mode, mutually exclusive with the
 	// file-based cert/key fields.
 	for i, ln := range config.Listeners {
+		// HTTP deadlines apply in every TLS mode, so they are checked before
+		// the mode switch. Zero is not accepted: net/http reads it as "no
+		// deadline at all", which an operator setting an explicit value is
+		// never asking for — leave the key out to get the default.
+		for _, f := range []struct{ name, value string }{
+			{"http_read_timeout", ln.HTTPReadTimeout},
+			{"http_write_timeout", ln.HTTPWriteTimeout},
+			{"http_idle_timeout", ln.HTTPIdleTimeout},
+		} {
+			if f.value == "" {
+				continue
+			}
+			d, err := time.ParseDuration(f.value)
+			if err != nil {
+				return fmt.Errorf("listener[%d]: invalid %s %q: %w", i, f.name, f.value, err)
+			}
+			if d <= 0 {
+				return fmt.Errorf("listener[%d]: %s must be positive, got %s", i, f.name, d)
+			}
+		}
+
 		spiffeSubKeySet := ln.TLSSPIFFESocket != "" || ln.TLSSPIFFEStartupTimeout != ""
 		switch {
 		case ln.TLSDisable:

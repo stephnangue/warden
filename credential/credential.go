@@ -1,8 +1,6 @@
 package credential
 
 import (
-	"errors"
-	"sync"
 	"time"
 )
 
@@ -42,11 +40,12 @@ const (
 	SourceTypeKubernetes    = "kubernetes"
 	SourceTypeScaleway      = "scaleway"
 	SourceTypeOVH           = "ovh"
-	SourceTypeCloudflare    = "cloudflare"
 	SourceTypeGrafana       = "grafana"
-	SourceTypeHoneycomb     = "honeycomb"
 	SourceTypeAlicloud      = "alicloud"
 	SourceTypeTokenExchange = "token_exchange"
+	SourceTypeAnthropic     = "anthropic"
+	SourceTypeCloudflare    = "cloudflare"
+	SourceTypeOpenAI        = "openai"
 )
 
 // Category constants for credential categorization
@@ -69,8 +68,8 @@ const (
 // and Data["secret_access_key"] for AWS SigV4 re-signing).
 //
 // Each instance is bound to a session token (TokenID) and cached in the Manager.
-// Dynamic credentials (LeaseTTL > 0) are tracked by the expiration manager for
-// automatic revocation when the token expires.
+// Revocable credentials are tracked by the expiration manager for automatic
+// revocation when the token expires.
 type Credential struct {
 	// Identity
 	// CredentialID is the unique identifier for this credential instance.
@@ -88,6 +87,12 @@ type Credential struct {
 	TokenID  string        // Session token this credential is bound to
 	IssuedAt time.Time     // When the credential was issued
 
+	// MaxServe is the spec's max_ttl: the longest Warden serves this credential
+	// before minting or reading it again, zero for no bound. A dynamic lease is
+	// already capped at it; MaxServe is what bounds a static credential, whose
+	// LeaseTTL stays 0 so that everything reading it still sees a static one.
+	MaxServe time.Duration
+
 	// The secret part of the credential
 	Data map[string]string // Type-specific credential data
 
@@ -103,12 +108,37 @@ type Credential struct {
 	Metadata map[string]string
 }
 
-// IsExpired checks if the credential has expired
+// IsExpired reports whether the credential should no longer be served: its lease
+// is over, or close enough to over that it could lapse mid-request (see
+// ExpiresWithin).
 func (c *Credential) IsExpired() bool {
 	if c.LeaseTTL == 0 {
 		return false // Static credentials don't expire
 	}
-	return time.Since(c.IssuedAt) >= c.LeaseTTL
+	return ExpiresWithin(c.IssuedAt, c.LeaseTTL)
+}
+
+// smallestPositive returns the smallest of durations that is above zero, or zero
+// when none is: a zero bound is no bound.
+func smallestPositive(durations ...time.Duration) time.Duration {
+	var least time.Duration
+	for _, d := range durations {
+		if d > 0 && (least == 0 || d < least) {
+			least = d
+		}
+	}
+	return least
+}
+
+// expirySkewCap bounds the margin ExpiresWithin keeps before a lease ends.
+const expirySkewCap = 30 * time.Second
+
+// ExpiresWithin reports whether something issued at issuedAt and valid for ttl
+// should be treated as expired: from a margin before the end of ttl — a tenth of
+// it, at most 30s — so a credential is not handed out to lapse in flight, or to an
+// upstream whose clock runs a little ahead.
+func ExpiresWithin(issuedAt time.Time, ttl time.Duration) bool {
+	return time.Since(issuedAt) >= ttl-min(expirySkewCap, ttl/10)
 }
 
 // RemainingTTL returns the remaining time until expiration
@@ -136,93 +166,6 @@ func (c *Credential) ShouldRotate(threshold float64) bool {
 type CredSource struct {
 	Name           string
 	Type           string // local, hvault, aws, azure_key_vault, gcp_secret_manager
-	Config         map[string]string
+	Config         Config
 	RotationPeriod time.Duration // 0 means no rotation
-}
-
-type CredSourceRegistry struct {
-	sources map[string]*CredSource
-	mu      sync.RWMutex
-}
-
-func NewCredSourceRegistry() *CredSourceRegistry {
-	return &CredSourceRegistry{
-		sources: make(map[string]*CredSource),
-	}
-}
-
-// Register adds a credential source to the registry
-// Returns an error if the source is invalid or if a source with the same name already exists
-func (r *CredSourceRegistry) Register(source CredSource) error {
-	if source.Name == "" {
-		return errors.New("source name cannot be empty")
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, exists := r.sources[source.Name]; exists {
-		return ErrSourceAlreadyExists
-	}
-
-	r.sources[source.Name] = &source
-	return nil
-}
-
-// Get retrieves a credential source by name (alias for GetSource for consistency)
-func (r *CredSourceRegistry) Get(name string) (*CredSource, bool) {
-	return r.GetSource(name)
-}
-
-// GetSource retrieves a credential source by name
-func (r *CredSourceRegistry) GetSource(name string) (*CredSource, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	source := r.sources[name]
-	if source == nil {
-		return nil, false
-	}
-	return source, true
-}
-
-// List returns all registered sources
-func (r *CredSourceRegistry) List() []*CredSource {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	sources := make([]*CredSource, 0, len(r.sources))
-	for _, source := range r.sources {
-		sources = append(sources, source)
-	}
-	return sources
-}
-
-// Delete removes a source from the registry
-func (r *CredSourceRegistry) Delete(name string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, exists := r.sources[name]; !exists {
-		return false
-	}
-
-	delete(r.sources, name)
-	return true
-}
-
-// Exists checks if a source with the given name exists
-func (r *CredSourceRegistry) Exists(name string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	_, exists := r.sources[name]
-	return exists
-}
-
-// Count returns the number of registered sources
-func (r *CredSourceRegistry) Count() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	return len(r.sources)
 }

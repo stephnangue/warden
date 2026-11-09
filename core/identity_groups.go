@@ -1,0 +1,896 @@
+package core
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/hashicorp/go-uuid"
+	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/helper/selector"
+	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
+)
+
+var (
+	ErrGroupNotFound        = errors.New("group not found")
+	ErrGroupAlreadyExists   = errors.New("group already exists")
+	ErrTooManyVirtualGroups = errors.New("too many virtual groups in the namespace")
+	ErrTooManyStaticGroups  = errors.New("too many static groups in the namespace")
+	ErrTooManyStaticMembers = errors.New("too many static group memberships in the namespace")
+	ErrTooManySelectors     = errors.New("too many selectors in the namespace")
+
+	// ErrGroupChanged is returned by UpdateGroup and DeleteGroup when the
+	// caller passed an expected hash and the stored group no longer has it.
+	ErrGroupChanged = errors.New("group changed concurrently")
+)
+
+// GroupTypeMismatchError is returned when a request names a group type other
+// than the stored one. Every group write carries the type, so a policy
+// condition on it can tell who may write which type of group.
+type GroupTypeMismatchError struct {
+	Name   string
+	Stored logical.GroupType
+}
+
+func (e *GroupTypeMismatchError) Error() string {
+	return fmt.Sprintf("type mismatch: group %q is %s", e.Name, e.Stored)
+}
+
+// Storage layout, under the barrier view at identityStorePath:
+//
+//	{namespace-uuid}/group/{id} -> JSON-encoded StoredGroup
+//
+// A group is stored under its ID, not its name, so that what references a
+// group (a static group's members, in time) does so by a key that never
+// changes.
+const (
+	groupKeySegment    = "group/"
+	storedGroupVersion = 1
+)
+
+// StoredGroup is the versioned storage format for a group. Version lets a later
+// format be recognised on read; Hash is the group's content hash at the write.
+type StoredGroup struct {
+	Version int            `json:"version"`
+	Group   *logical.Group `json:"group"`
+	Hash    string         `json:"hash"`
+}
+
+func groupListPrefix(nsUUID string) string { return nsUUID + "/" + groupKeySegment }
+
+func groupStorageKey(nsUUID, id string) string { return groupListPrefix(nsUUID) + id }
+
+// GroupsListingRole returns the names of the groups of namespace nsID that
+// list role, sorted.
+func (s *IdentityStore) GroupsListingRole(nsID, role string) []string {
+	return s.namespaceIndex(nsID).listing(role)
+}
+
+// publishGroupsLocked makes byName the namespace's groups under the next
+// generation, keeping its entities as published. The write replaced group old
+// with next (a create has no old, a delete no next): the member index is
+// updated for those two alone, and shared as it is when neither is static.
+// Caller holds mu and hands over byName.
+func (s *IdentityStore) publishGroupsLocked(nsID string, byName map[string]*groupEntry, old, next *groupEntry) {
+	snap := s.snapshot.Load()
+	cur := snap.namespace(nsID)
+	members := cur.members.with(old, next)
+	s.snapshot.Store(snap.withNamespace(nsID, buildNSIndex(byName, members, cur.entities, cur.config, s.gen.Add(1))))
+}
+
+// GetGroup returns a copy of the group name in the namespace in ctx, and the
+// hash a conditional write passes back.
+func (s *IdentityStore) GetGroup(ctx context.Context, name string) (*logical.Group, string, error) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, "", ErrNamespaceNotInContext
+	}
+	cg := s.namespaceIndex(ns.ID).groupsByName[name]
+	if cg == nil {
+		return nil, "", ErrGroupNotFound
+	}
+	return cg.Group.Clone(), cg.hash, nil
+}
+
+// ListGroups returns copies of the groups of the namespace in ctx, sorted by
+// name, with their hashes. A non-empty role keeps only the groups listing it.
+func (s *IdentityStore) ListGroups(ctx context.Context, role string) ([]*logical.Group, []string, error) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, nil, ErrNamespaceNotInContext
+	}
+	gs := s.namespaceIndex(ns.ID)
+	names := make([]string, 0, len(gs.groupsByName))
+	for name, cg := range gs.groupsByName {
+		if role == "" || slices.Contains(cg.Roles, role) {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	groups := make([]*logical.Group, len(names))
+	hashes := make([]string, len(names))
+	for i, name := range names {
+		cg := gs.groupsByName[name]
+		groups[i], hashes[i] = cg.Group.Clone(), cg.hash
+	}
+	return groups, hashes, nil
+}
+
+// CreateGroup stores a new group in the namespace in ctx. g is normalized in
+// place and receives its ID and timestamps; the store keeps its own copy. The
+// returned warnings name roles that do not exist yet and selectors or mounts
+// nothing in the namespace answers.
+func (s *IdentityStore) CreateGroup(ctx context.Context, g *logical.Group) ([]string, error) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, ErrNamespaceNotInContext
+	}
+	cg, warnings, err := s.validateGroup(ctx, ns, g)
+	if err != nil {
+		return nil, err
+	}
+	id, err := uuid.GenerateUUID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate group id: %w", err)
+	}
+
+	err = func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		if err := s.writableLocked(); err != nil {
+			return err
+		}
+		cur := s.namespaceIndex(ns.ID)
+		if cur.groupsByName[g.Name] != nil {
+			return ErrGroupAlreadyExists
+		}
+		// The caps bound what recomputes evaluate: virtual groups only.
+		if max := int(s.maxVirtualGroups.Load()); g.Type == logical.GroupTypeVirtual && len(cur.virtualGroups) >= max {
+			return fmt.Errorf("%w: the namespace has %d/%d virtual groups", ErrTooManyVirtualGroups, len(cur.virtualGroups), max)
+		}
+		if max := logical.MaxStaticGroupsPerNamespace; g.Type == logical.GroupTypeStatic && cur.members.groups >= max {
+			return fmt.Errorf("%w: the namespace has %d/%d static groups", ErrTooManyStaticGroups, cur.members.groups, max)
+		}
+		if err := s.checkSelectorsLocked(cur, nil, cg); err != nil {
+			return err
+		}
+		if err := s.checkStaticMembersLocked(cur, nil, g); err != nil {
+			return err
+		}
+
+		now := time.Now().UTC()
+		g.ID, g.CreatedAt, g.UpdatedAt = id, now, now
+		if err := s.commitLocked(ctx, ns, cur, g, cg); err != nil {
+			return err
+		}
+		return nil
+	}()
+	if err != nil {
+		return nil, err
+	}
+	s.logger.Info("created group",
+		logger.String("namespace", ns.Path),
+		logger.String("name", g.Name))
+	return warnings, nil
+}
+
+// UpdateGroup replaces a group in the namespace in ctx with g, keeping its ID,
+// type and creation time. When expectedHash is set the write is refused with
+// ErrGroupChanged unless the stored group still has that hash. g is normalized
+// in place and receives its ID and timestamps. A g.Type that differs from the
+// stored type is refused: a group's membership source never changes.
+func (s *IdentityStore) UpdateGroup(ctx context.Context, g *logical.Group, expectedHash string) ([]string, error) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, ErrNamespaceNotInContext
+	}
+	cg, warnings, err := s.validateGroup(ctx, ns, g)
+	if err != nil {
+		return nil, err
+	}
+	if s.beforeGroupUpdate != nil {
+		s.beforeGroupUpdate()
+	}
+
+	err = func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		if err := s.writableLocked(); err != nil {
+			return err
+		}
+		cur := s.namespaceIndex(ns.ID)
+		old := cur.groupsByName[g.Name]
+		if old == nil {
+			return ErrGroupNotFound
+		}
+		if expectedHash != "" && old.hash != expectedHash {
+			return ErrGroupChanged
+		}
+		if g.Type != old.Type {
+			return &GroupTypeMismatchError{Name: g.Name, Stored: old.Type}
+		}
+		if err := s.checkSelectorsLocked(cur, old, cg); err != nil {
+			return err
+		}
+		if err := s.checkStaticMembersLocked(cur, old.Group, g); err != nil {
+			return err
+		}
+		g.ID, g.CreatedAt, g.UpdatedAt = old.ID, old.CreatedAt, time.Now().UTC()
+		return s.commitLocked(ctx, ns, cur, g, cg)
+	}()
+	if err != nil {
+		return nil, err
+	}
+	s.logger.Info("updated group",
+		logger.String("namespace", ns.Path),
+		logger.String("name", g.Name))
+	return warnings, nil
+}
+
+// checkSelectorsLocked refuses a write that would take the namespace past its
+// cap on the selectors of virtual groups' rules: cur's total, less old's
+// selectors (the group replaced, if any), plus next's. Caller holds mu.
+func (s *IdentityStore) checkSelectorsLocked(cur *nsIndex, old, next *groupEntry) error {
+	total := cur.selectors + next.selectors()
+	if old != nil {
+		total -= old.selectors()
+	}
+	if maxSelectors := int(s.maxSelectors.Load()); total > maxSelectors {
+		return fmt.Errorf("%w: this write would make %d/%d virtual selectors (currently %d; every key of every rule counts, \"mount\" included)",
+			ErrTooManySelectors, total, maxSelectors, cur.selectors)
+	}
+	return nil
+}
+
+// checkStaticMembersLocked refuses a write that would take the namespace past
+// its cap on static group memberships: cur's, less old's (the group replaced,
+// if any), plus next's. A write that adds none is never refused. Caller holds
+// mu.
+func (s *IdentityStore) checkStaticMembersLocked(cur *nsIndex, old, next *logical.Group) error {
+	total := cur.members.members + len(next.Members)
+	if old != nil {
+		total -= len(old.Members)
+	}
+	if max := int(s.maxStaticMembers.Load()); total > max && total > cur.members.members {
+		return fmt.Errorf("%w: this write would make %d/%d memberships across the namespace's static groups (currently %d)",
+			ErrTooManyStaticMembers, total, max, cur.members.members)
+	}
+	return nil
+}
+
+// commitLocked stores g and publishes it with its compiled form cg in place of
+// any group of the same name. Caller holds mu; cur is the namespace as
+// published.
+func (s *IdentityStore) commitLocked(ctx context.Context, ns *namespace.Namespace, cur *nsIndex, g *logical.Group, cg *groupEntry) error {
+	stored := g.Clone()
+	cg.Group, cg.hash = stored, stored.Hash()
+	if err := s.persistGroup(ctx, ns.UUID, cg); err != nil {
+		return err
+	}
+	byName := make(map[string]*groupEntry, len(cur.groupsByName)+1)
+	for k, v := range cur.groupsByName {
+		byName[k] = v
+	}
+	old := byName[g.Name]
+	byName[g.Name] = cg
+	s.publishGroupsLocked(ns.ID, byName, old, cg)
+	return nil
+}
+
+// GroupSponsorsError refuses the delete of a group that sponsors entities or
+// is a pending handover for some, in any namespace, without force.
+type GroupSponsorsError struct {
+	Name              string
+	Sponsors, Pending int
+}
+
+func (e *GroupSponsorsError) Error() string {
+	return fmt.Sprintf("group %q sponsors %d entities and is a pending handover for %d; hand them over first, or pass force=true",
+		e.Name, e.Sponsors, e.Pending)
+}
+
+// maxNamedInWarning bounds the entities a warning names; the rest are counted.
+const maxNamedInWarning = 10
+
+// DeleteGroup removes a group from the namespace in ctx. A non-empty t must be
+// the stored type, checked under the lock so that a group deleted and
+// recreated with another type between the caller's read and this write is
+// refused. expectedHash makes the delete conditional, as for UpdateGroup.
+//
+// A group that sponsors entities, or is a pending handover for some, in any
+// namespace, is refused (GroupSponsorsError) unless force: then, in the same
+// hold of the lock, every handover to it is cancelled and every entity it
+// sponsors loses its sponsor, and is ungoverned. The returned warnings name
+// those entities.
+func (s *IdentityStore) DeleteGroup(ctx context.Context, name string, t logical.GroupType, expectedHash string, force bool) ([]string, error) {
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return nil, ErrNamespaceNotInContext
+	}
+
+	var warnings []string
+	err = func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		if err := s.writableLocked(); err != nil {
+			return err
+		}
+		cur := s.namespaceIndex(ns.ID)
+		old := cur.groupsByName[name]
+		if old == nil {
+			return ErrGroupNotFound
+		}
+		if t != "" && old.Type != t {
+			return &GroupTypeMismatchError{Name: name, Stored: old.Type}
+		}
+		if expectedHash != "" && old.hash != expectedHash {
+			return ErrGroupChanged
+		}
+		w, err := s.releaseSponsorGroupLocked(ctx, ns.ID, old, force)
+		if err != nil {
+			return err
+		}
+		warnings = w
+		if err := s.storage.Delete(ctx, groupStorageKey(ns.UUID, old.ID)); err != nil {
+			return fmt.Errorf("failed to delete group %q: %w", name, err)
+		}
+		byName := make(map[string]*groupEntry, len(cur.groupsByName))
+		for k, v := range cur.groupsByName {
+			if k != name {
+				byName[k] = v
+			}
+		}
+		s.publishGroupsLocked(ns.ID, byName, old, nil)
+		return nil
+	}()
+	if err != nil {
+		return nil, err
+	}
+	s.logger.Info("deleted group",
+		logger.String("namespace", ns.Path),
+		logger.String("name", name))
+	return warnings, nil
+}
+
+// releaseSponsorGroupLocked finds the entities, in every namespace, whose
+// sponsor or pending handover is the group g of namespace nsID. Without force
+// any is a GroupSponsorsError. With force it cancels the handovers and removes
+// the sponsors, writing each entity and publishing each namespace once, and
+// returns the warnings naming them. Entries name the group by ID, so a scan
+// finds them without walking the namespace tree. Caller holds mu.
+//
+// A retired entity is rewritten too, read-only as it is: an entry never names
+// a group that is gone. Each change is logged as it is stored, so it is
+// recorded even when the group's own delete then fails.
+func (s *IdentityStore) releaseSponsorGroupLocked(ctx context.Context, nsID string, g *groupEntry, force bool) ([]string, error) {
+	names := func(sp *logical.EntitySponsor) bool {
+		return sp != nil && sp.Namespace == nsID && sp.GroupID == g.ID
+	}
+	changes := map[string][]entityChange{}
+	sponsors, pending := 0, 0
+	now := time.Now().UTC()
+	for id, idx := range s.snapshot.Load().byNS {
+		idx.entities.all(func(en *entityEntry) bool {
+			sp, pp := names(en.Sponsor), names(en.PendingSponsor)
+			if !sp && !pp {
+				return true
+			}
+			if sp {
+				sponsors++
+			}
+			if pp {
+				pending++
+			}
+			if force {
+				next := en.Clone()
+				if sp {
+					next.Sponsor = nil
+				}
+				if pp {
+					next.PendingSponsor = nil
+				}
+				next.UpdatedAt = now
+				changes[id] = append(changes[id], entityChange{old: en, next: newEntityEntry(next)})
+			}
+			return true
+		})
+	}
+	if sponsors+pending == 0 {
+		return nil, nil
+	}
+	if !force {
+		return nil, &GroupSponsorsError{Name: g.Name, Sponsors: sponsors, Pending: pending}
+	}
+
+	var ungoverned []string
+	for _, id := range slices.Sorted(maps.Keys(changes)) {
+		target, err := s.core.namespaceStore.GetNamespaceByAccessor(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if target == nil {
+			return nil, fmt.Errorf("namespace %q of a sponsored entity not found", id)
+		}
+		cs := changes[id]
+		cur := s.namespaceEntities(id)
+		ents, err := cur.with(cs...)
+		if err != nil {
+			return nil, err
+		}
+		for i, c := range cs {
+			if err := s.persistEntity(ctx, target.UUID, c.next); err != nil {
+				// Publish what storage holds: the entities written so far
+				// without the group, the others still naming it.
+				if i > 0 {
+					if stored, werr := cur.with(cs[:i]...); werr == nil {
+						s.publishEntitiesLocked(id, stored)
+					}
+				}
+				return nil, err
+			}
+		}
+		s.publishEntitiesLocked(id, ents)
+		for _, c := range cs {
+			if names(c.old.Sponsor) {
+				ungoverned = append(ungoverned, qualifiedName(target.Path, c.next.Name))
+			}
+			s.logger.Warn("forced group delete: removed the group from an entity's sponsor or pending handover",
+				logger.String("namespace", target.Path),
+				logger.String("entity", c.next.Name),
+				logger.String("group", g.Name),
+				logger.Bool("was_sponsor", names(c.old.Sponsor)))
+		}
+	}
+
+	var warnings []string
+	if len(ungoverned) > 0 {
+		slices.Sort(ungoverned)
+		listed := ungoverned[:min(len(ungoverned), maxNamedInWarning)]
+		msg := fmt.Sprintf("forced: group %q sponsored %d entities; their sponsor was removed and they are ungoverned: %s",
+			g.Name, len(ungoverned), strings.Join(listed, ", "))
+		if more := len(ungoverned) - len(listed); more > 0 {
+			msg += fmt.Sprintf(" and %d more", more)
+		}
+		warnings = append(warnings, msg)
+	}
+	if pending > 0 {
+		warnings = append(warnings, fmt.Sprintf("forced: %d pending sponsor handovers to group %q were cancelled", pending, g.Name))
+	}
+	return warnings, nil
+}
+
+// clearGroupsLocked deletes every stored group of the namespace and returns
+// how many it deleted. Caller holds mu.
+func (s *IdentityStore) clearGroupsLocked(ctx context.Context, nsUUID string) (int, error) {
+	ids, err := s.storage.List(ctx, groupListPrefix(nsUUID))
+	if err != nil {
+		return 0, fmt.Errorf("failed to list groups for namespace cleanup: %w", err)
+	}
+	for _, id := range ids {
+		if err := s.storage.Delete(ctx, groupStorageKey(nsUUID, id)); err != nil {
+			return 0, fmt.Errorf("failed to delete group %s during namespace cleanup: %w", id, err)
+		}
+	}
+	return len(ids), nil
+}
+
+// persistGroup writes cg's group to storage. Caller holds mu.
+func (s *IdentityStore) persistGroup(ctx context.Context, nsUUID string, cg *groupEntry) error {
+	data, err := json.Marshal(&StoredGroup{Version: storedGroupVersion, Group: cg.Group, Hash: cg.hash})
+	if err != nil {
+		return fmt.Errorf("failed to marshal group: %w", err)
+	}
+	if err := s.storage.Put(ctx, &sdklogical.StorageEntry{
+		Key:   groupStorageKey(nsUUID, cg.ID),
+		Value: data,
+	}); err != nil {
+		return fmt.Errorf("failed to write group %q: %w", cg.Name, err)
+	}
+	return nil
+}
+
+// loadGroupsLocked reads the stored groups of a namespace, by name. A listing
+// that fails fails the load; a record that does not decode or compile, or
+// whose name another record of the namespace already holds, is logged and
+// skipped. Caller holds mu.
+func (s *IdentityStore) loadGroupsLocked(ctx context.Context, ns *namespace.Namespace) (map[string]*groupEntry, error) {
+	ids, err := s.storage.List(ctx, groupListPrefix(ns.UUID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list groups of namespace %q: %w", ns.Path, err)
+	}
+	byName := make(map[string]*groupEntry, len(ids))
+	for _, id := range ids {
+		cg, err := s.readGroup(ctx, ns.UUID, id)
+		if err != nil {
+			s.logger.Warn("skipping a stored group that cannot be read",
+				logger.String("namespace", ns.Path),
+				logger.String("id", id),
+				logger.Err(err))
+			continue
+		}
+		if prev := byName[cg.Name]; prev != nil {
+			s.logger.Warn("skipping a stored group whose name another group holds",
+				logger.String("namespace", ns.Path),
+				logger.String("name", cg.Name),
+				logger.String("id", id),
+				logger.String("kept_id", prev.ID))
+			continue
+		}
+		byName[cg.Name] = cg
+	}
+	return byName, nil
+}
+
+// readGroup reads, decodes and compiles one stored group.
+func (s *IdentityStore) readGroup(ctx context.Context, nsUUID, id string) (*groupEntry, error) {
+	entry, err := s.storage.Get(ctx, groupStorageKey(nsUUID, id))
+	if err != nil {
+		return nil, err
+	}
+	if entry == nil {
+		return nil, ErrGroupNotFound
+	}
+	var stored StoredGroup
+	if err := json.Unmarshal(entry.Value, &stored); err != nil {
+		return nil, fmt.Errorf("failed to decode: %w", err)
+	}
+	if stored.Version != storedGroupVersion {
+		return nil, fmt.Errorf("unknown storage version %d", stored.Version)
+	}
+	if stored.Group == nil || stored.Group.ID != id || !validSysName(stored.Group.Name) {
+		return nil, fmt.Errorf("record does not hold group %q", id)
+	}
+	switch stored.Group.Type {
+	case logical.GroupTypeVirtual, logical.GroupTypeStatic:
+	default:
+		return nil, fmt.Errorf("group type %q is not supported", stored.Group.Type)
+	}
+	// Published like a written group: as a clone, with no spare capacity left
+	// behind by the decoder.
+	g := stored.Group.Clone()
+	cg, err := compileGroup(g)
+	if err != nil {
+		return nil, err
+	}
+	cg.Group, cg.hash = g, stored.Hash
+	if cg.hash == "" {
+		cg.hash = g.Hash()
+	}
+	return cg, nil
+}
+
+// validateGroup normalizes g in place, checks it and compiles it. It reads the
+// role store and the auth mounts, so it runs before mu is taken. A role that
+// does not exist, or a fact or mount nothing in the namespace answers, is a
+// warning, not an error: either may be created after the group.
+func (s *IdentityStore) validateGroup(ctx context.Context, ns *namespace.Namespace, g *logical.Group) (*groupEntry, []string, error) {
+	if g == nil {
+		return nil, nil, logical.ErrBadRequest("group is required")
+	}
+	if !validSysName(g.Name) {
+		return nil, nil, logical.ErrBadRequestf("invalid group name %q: %s", g.Name, sysNameRule)
+	}
+	switch g.Type {
+	case "":
+		return nil, nil, logical.ErrBadRequestf("type is required: %q or %q", logical.GroupTypeVirtual, logical.GroupTypeStatic)
+	case logical.GroupTypeVirtual, logical.GroupTypeStatic:
+	default:
+		if _, err := logical.ParseGroupType(string(g.Type)); err != nil {
+			return nil, nil, logical.ErrBadRequest(err.Error())
+		}
+		return nil, nil, logical.ErrBadRequestf("group type %q is not supported yet; only %q and %q groups can be created",
+			g.Type, logical.GroupTypeVirtual, logical.GroupTypeStatic)
+	}
+	if len(g.Description) > logical.MaxGroupDescriptionBytes {
+		return nil, nil, logical.ErrBadRequestf("description exceeds %d bytes", logical.MaxGroupDescriptionBytes)
+	}
+	if err := validateObjectMetadata(g.Metadata); err != nil {
+		return nil, nil, err
+	}
+	if len(g.Metadata) == 0 {
+		g.Metadata = nil
+	}
+	// Stored as an instant in UTC, as it renders.
+	if !g.ValidUntil.IsZero() {
+		g.ValidUntil = g.ValidUntil.Round(0).UTC()
+	}
+
+	roles, err := normalizeGroupRoles(g.Roles)
+	if err != nil {
+		return nil, nil, err
+	}
+	g.Roles = roles
+
+	var warnings []string
+	switch g.Type {
+	case logical.GroupTypeVirtual:
+		if len(g.Members) > 0 {
+			return nil, nil, logical.ErrBadRequest("a virtual group lists no members: its rules decide membership")
+		}
+		if len(g.Rules) == 0 {
+			return nil, nil, logical.ErrBadRequest("a virtual group needs at least one rule")
+		}
+		if len(g.Rules) > logical.MaxGroupRules {
+			return nil, nil, logical.ErrBadRequestf("a group has at most %d rules, got %d",
+				logical.MaxGroupRules, len(g.Rules))
+		}
+	case logical.GroupTypeStatic:
+		if len(g.Rules) > 0 {
+			return nil, nil, logical.ErrBadRequest("a static group has no rules: it lists its members")
+		}
+		w, err := s.normalizeMembers(ns, g)
+		if err != nil {
+			return nil, nil, err
+		}
+		warnings = append(warnings, w...)
+	}
+	cg, err := compileGroup(g)
+	if err != nil {
+		return nil, nil, logical.ErrBadRequest(err.Error())
+	}
+
+	if !g.ValidUntil.IsZero() && time.Now().After(g.ValidUntil) {
+		warnings = append(warnings, "valid_until is in the past; the group grants nothing")
+	}
+	var mounts []authMountFacts
+	if g.Type == logical.GroupTypeVirtual {
+		mounts = s.core.namespaceAuthMountFacts(ctx)
+	}
+	if s.core.roleStore != nil {
+		roleSnap := s.core.roleStore.snapshot.Load()
+		for _, r := range g.Roles {
+			// A built-in is resolved from code, never from a stored role.
+			if isReservedRoleName(r) {
+				warnings = append(warnings, builtinRoleGroupWarnings(ns, g, r, mounts)...)
+				continue
+			}
+			e := roleSnap.lookup(ns.ID, r)
+			switch {
+			case e == nil:
+				warnings = append(warnings, fmt.Sprintf("role %q does not exist yet; the group grants it once it does", r))
+			case e.role.GovernedOnly && g.Type == logical.GroupTypeVirtual:
+				// A role flagged after this check is still refused per
+				// request (resolveRoleGrant).
+				return nil, nil, logical.ErrBadRequestf("role %q is governed_only; a virtual group cannot grant it", r)
+			}
+		}
+	}
+	if g.Type == logical.GroupTypeVirtual {
+		warnings = append(warnings, ruleWarnings(g, mounts)...)
+	}
+	return cg, warnings, nil
+}
+
+// normalizeMembers sorts a static group's members by ID and checks them
+// against the namespace's entities as published. A member listed twice keeps
+// its latest until (none beats any). A member past its until is dropped with a
+// warning, so a read-modify-write of a group holding expired entries prunes
+// them; so is a member no entity holds any more, silently, since it can never
+// grant again. Members are resolved by name before this: an ID here comes
+// from a read or from the resolution of a name. At most MaxStaticGroupMembers
+// remain.
+func (s *IdentityStore) normalizeMembers(ns *namespace.Namespace, g *logical.Group) ([]string, error) {
+	ents := s.namespaceIndex(ns.ID).entities
+	now := time.Now()
+	byID := make(map[string]logical.GroupMember, len(g.Members))
+	var expired []string
+	for _, m := range g.Members {
+		en := ents.get(m.ID)
+		if en == nil {
+			continue
+		}
+		if !m.Until.IsZero() {
+			m.Until = m.Until.Round(0).UTC()
+			if m.Until.After(maxEnd) {
+				return nil, logical.ErrBadRequestf("member %q: until must be no later than %s",
+					en.Name, maxEnd.Format(time.RFC3339Nano))
+			}
+			if now.After(m.Until) {
+				expired = append(expired, en.Name)
+				continue
+			}
+		}
+		if prev, ok := byID[m.ID]; ok && (prev.Until.IsZero() || (!m.Until.IsZero() && prev.Until.After(m.Until))) {
+			continue
+		}
+		byID[m.ID] = m
+	}
+	if len(byID) > logical.MaxStaticGroupMembers {
+		return nil, logical.ErrBadRequestf("a static group lists at most %d members, got %d",
+			logical.MaxStaticGroupMembers, len(byID))
+	}
+	members := make([]logical.GroupMember, 0, len(byID))
+	for _, id := range slices.Sorted(maps.Keys(byID)) {
+		members = append(members, byID[id])
+	}
+	g.Members = slices.Clip(members)
+	if len(g.Members) == 0 {
+		g.Members = nil
+	}
+	var warnings []string
+	if len(expired) > 0 {
+		slices.Sort(expired)
+		warnings = append(warnings, fmt.Sprintf("dropped %d members past their until: %s",
+			len(expired), strings.Join(slices.Compact(expired), ", ")))
+	}
+	return warnings, nil
+}
+
+// normalizeGroupRoles returns roles sorted and deduplicated, refusing a name
+// that cannot name a role and more than MaxGroupRoles of them.
+func normalizeGroupRoles(roles []string) ([]string, error) {
+	out := make([]string, 0, len(roles))
+	for _, r := range roles {
+		if !validSysName(r) {
+			return nil, logical.ErrBadRequestf("invalid role name %q in roles: %s", r, sysNameRule)
+		}
+		out = append(out, r)
+	}
+	slices.Sort(out)
+	out = slices.Clip(slices.Compact(out))
+	if len(out) > logical.MaxGroupRoles {
+		return nil, logical.ErrBadRequestf("a group grants at most %d roles, got %d", logical.MaxGroupRoles, len(out))
+	}
+	return out, nil
+}
+
+// authMountFacts is what a group write needs to know about one auth mount of
+// its namespace.
+type authMountFacts struct {
+	path  string   // namespace-relative, "auth/<path>/": what "mount" answers
+	names []string // the fact names the mount answers; nil when it publishes none
+	kind  string   // the kind of entity the mount admits; "" when it publishes no facts
+}
+
+// namespaceAuthMountFacts lists the auth mounts of the namespace in ctx with
+// the fact names each answers (logical.FactsProvider, reached through the
+// router). Called at group write only, never on the request path.
+func (c *Core) namespaceAuthMountFacts(ctx context.Context) []authMountFacts {
+	var paths []string
+	c.authLock.RLock()
+	if c.auth != nil {
+		if entries, err := c.auth.findAllNamespaceMounts(ctx); err == nil {
+			for _, e := range entries {
+				if !e.Tainted {
+					paths = append(paths, authRoutePrefix+e.Path)
+				}
+			}
+		}
+	}
+	c.authLock.RUnlock()
+
+	out := make([]authMountFacts, 0, len(paths))
+	for _, path := range paths {
+		m := authMountFacts{path: path}
+		if c.router != nil {
+			if fp, ok := c.router.MatchingBackend(ctx, path).(logical.FactsProvider); ok {
+				m.names = fp.FactNames()
+				if m.kind = fp.EntityKind(); m.kind == "" {
+					m.kind = logical.EntityKindAgent
+				}
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// ruleTrustsMount reports whether rule's "mount" selector lists the auth mount
+// at path, exactly or by a pattern.
+func ruleTrustsMount(rule logical.GroupRule, path string) bool {
+	return selectorValuesMatch(rule[selector.NameMount], path)
+}
+
+// ruleAdmitsKind reports whether rule can match an admission of kind: it has
+// no "kind" selector, or one whose values match kind.
+func ruleAdmitsKind(rule logical.GroupRule, kind string) bool {
+	values, ok := rule[selector.NameKind]
+	return !ok || selectorValuesMatch(values, kind)
+}
+
+// selectorValuesMatch reports whether one of a selector's values matches v,
+// exactly or as a pattern.
+func selectorValuesMatch(values []string, v string) bool {
+	for _, val := range values {
+		if selector.IsPattern(val) {
+			if gl, err := selector.CompileGlob(val); err == nil && gl.Match(v) {
+				return true
+			}
+			continue
+		}
+		if lit, err := selector.Unescape(val); err == nil && lit == v {
+			return true
+		}
+	}
+	return false
+}
+
+// ruleWarnings checks each rule of g against the namespace's auth mounts: the
+// mounts its "mount" selector lists must exist, and the fact every other
+// selector names must be answered by at least one of them. Facts are checked
+// only against the mounts the rule lists, since only those can ever match it.
+func ruleWarnings(g *logical.Group, mounts []authMountFacts) []string {
+	var warnings []string
+	for i, rule := range g.Rules {
+		listed := map[int]bool{}
+		literalMiss := false
+		for _, v := range rule[selector.NameMount] {
+			if selector.IsPattern(v) {
+				if strings.Contains(v, "**") {
+					warnings = append(warnings, fmt.Sprintf(
+						`rules[%d]: mount %q uses "**", which matches across "/": it trusts every auth mount it reaches, including ones enabled later`, i, v))
+				}
+				gl, err := selector.CompileGlob(v)
+				if err != nil {
+					continue
+				}
+				for j, m := range mounts {
+					if gl.Match(m.path) {
+						listed[j] = true
+					}
+				}
+				continue
+			}
+			lit, err := selector.Unescape(v)
+			if err != nil {
+				continue
+			}
+			found := false
+			for j, m := range mounts {
+				if m.path == lit {
+					listed[j], found = true, true
+				}
+			}
+			if !found {
+				literalMiss = true
+				warnings = append(warnings, fmt.Sprintf(
+					"rules[%d]: mount %q names no auth mount in this namespace; the rule cannot match through it until one is enabled there", i, v))
+			}
+		}
+		if len(listed) == 0 {
+			if !literalMiss {
+				warnings = append(warnings, fmt.Sprintf(
+					`rules[%d]: no auth mount in this namespace matches the rule's "mount" selector`, i))
+			}
+			continue
+		}
+
+		for _, name := range slices.Sorted(maps.Keys(rule)) {
+			switch name {
+			case selector.NameMount:
+				continue
+			case selector.NameKind:
+				for _, v := range rule[name] {
+					if !selector.IsPattern(v) && v != logical.EntityKindAgent && v != logical.EntityKindHuman {
+						warnings = append(warnings, fmt.Sprintf(
+							`rules[%d]: the "kind" selector's value %q is neither %q nor %q and never matches`, i, v,
+							logical.EntityKindAgent, logical.EntityKindHuman))
+					}
+				}
+				continue
+			}
+			produced := false
+			for j := range listed {
+				if slices.Contains(mounts[j].names, name) {
+					produced = true
+					break
+				}
+			}
+			if !produced {
+				warnings = append(warnings, fmt.Sprintf(
+					"rules[%d]: no auth mount the rule lists produces fact %q; its selector cannot match until one maps it", i, name))
+			}
+		}
+	}
+	return warnings
+}

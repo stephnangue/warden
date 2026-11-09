@@ -7,7 +7,7 @@ The SPIFFE auth method authenticates workloads that present a **SPIFFE SVID** �
 - an **X.509-SVID** — a TLS client certificate, presented over direct mTLS or re-forwarded by a trusted proxy, and
 - a **JWT-SVID** — a bearer JWT carried in the `Authorization` header.
 
-A SPIFFE *trust domain* is a single bundle that carries both the X.509 authorities and the JWT signing keys for that domain. Warden anchors trust per trust domain via these bundles — registered statically or fetched through **SPIFFE Federation** — verifies each presented SVID against the right bundle, and flows the verified SPIFFE ID through Warden's transparent-auth layer like any other auth method in the family. Every login issues the single `spiffe_role` token type.
+A SPIFFE *trust domain* is a single bundle that carries both the X.509 authorities and the JWT signing keys for that domain. Warden anchors trust per trust domain via these bundles — registered statically or fetched through **SPIFFE Federation** — and verifies each presented SVID against the bundle of the SVID's own trust domain. The mount records what it verified as **facts** (the SPIFFE ID, its trust domain and path, the kind of SVID), and the SPIFFE ID is the caller's **native identity**. The mount grants nothing: a [role](/identity/roles/) is granted per request by a [group](/identity/groups/) whose rules match those facts.
 
 This is the auth method to reach for when:
 
@@ -15,14 +15,16 @@ This is the auth method to reach for when:
 - You federate identity **across trust domains** (multi-cluster, multi-cloud) and want Warden to trust a remote domain's workloads by fetching its bundle from a federation endpoint.
 - You want **one mount** to serve both SVID types rather than splitting SPIFFE X.509 and SPIFFE JWT identity across the `cert` and `jwt` methods.
 
-If your workload's identity is an ordinary OIDC JWT (not a SPIFFE JWT-SVID), use the `jwt` method. If it is a plain X.509 client certificate from a classic PKI (not issued under a SPIFFE trust domain), use the `cert` method. The `cert` method can still accept a SPIFFE X.509-SVID as an ordinary certificate bound on its URI SAN — but only the `spiffe` method verifies it against a trust-domain bundle and accepts the matching JWT-SVID on the same mount.
+If your workload's identity is an ordinary OIDC JWT (not a SPIFFE JWT-SVID), use the [`jwt`](/auth-methods/jwt/) method. If it is a plain X.509 client certificate from a classic PKI (not issued under a SPIFFE trust domain), use the [`cert`](/auth-methods/cert/) method. The `cert` method can still accept a SPIFFE X.509-SVID as an ordinary certificate matched on its URI SAN — but only the `spiffe` method verifies it against a trust-domain bundle and accepts the matching JWT-SVID on the same mount.
+
+Coming from v0.21.0? See [Upgrading from v0.21.0](/upgrade/from-v0-21/).
 
 ## Prerequisites
 
 - A **Warden server** unsealed and reachable from the workload's network.
 - A **SPIFFE trust domain** whose bundle you can supply to Warden — either the PEM/JSON bundle bytes directly, or the URL of a SPIFFE Federation bundle endpoint Warden can fetch from.
-- For X.509-SVID logins, a way to get the workload's certificate to Warden — direct mTLS termination at the Warden listener, or a trusted reverse proxy that terminates TLS and re-presents the certificate in a forwarding header.
-- A **role-mapping policy** in Warden that scopes what the resulting auth token can do (issuing a token doesn't grant access on its own).
+- For X.509-SVIDs, a way to get the workload's certificate to Warden — direct mTLS termination at the Warden listener, or a reverse proxy that terminates TLS and re-presents the certificate in a forwarding header, listed in the listener's [`trusted_proxies`](/configuration/listener/).
+- The **policies** the workload's role will carry. Admitting an SVID grants nothing on its own.
 
 ## Step 1: Enable the Method and Register a Trust Domain
 
@@ -36,20 +38,24 @@ This mounts at `auth/spiffe/`. Use `-path` to name additional mounts (e.g. one p
 
 A `spiffe` mount carries no trust on its own — you register the trust domains it should honour. The simplest case is a **static bundle**: the X.509 authorities (and, for JWT-SVIDs, the JWT signing keys) of the domain, supplied directly.
 
+A bundle's base64 can hold `=`, and `warden write` reads an argument with an `=` in it as `key=value` pairs, so fold the file into JSON with `jq` and pass it on stdin:
+
 ```bash
 # X.509 authorities as PEM (sufficient for X.509-SVIDs)
-warden write auth/spiffe/trust-domain/prod.example.org \
-  bundle_pem=@/path/to/prod-ca-bundle.pem
+jq -n --rawfile pem prod-ca-bundle.pem '{
+  "bundle_pem": $pem
+}' | warden write auth/spiffe/trust-domain/prod.example.org
 ```
 
 To accept **JWT-SVIDs** as well, supply a SPIFFE trust-bundle (JWKS) document, which carries both authority types:
 
 ```bash
-warden write auth/spiffe/trust-domain/prod.example.org \
-  bundle_json=@/path/to/prod-bundle.json
+jq -n --rawfile bundle prod-bundle.json '{
+  "bundle_json": $bundle
+}' | warden write auth/spiffe/trust-domain/prod.example.org
 ```
 
-Read back a summary (authority counts and subjects, never the raw key bytes) and list the configured domains:
+A trust-domain write replaces the whole entry: fields you leave out are cleared. Read back a summary (authority counts and subjects, never the raw key bytes) and list the configured domains:
 
 ```bash
 warden read auth/spiffe/trust-domain/prod.example.org
@@ -58,60 +64,90 @@ warden list auth/spiffe/trust-domain
 
 A trust domain can be **federated** instead of static — Warden fetches and refreshes the bundle from an endpoint. See [Federation](#federation).
 
-## Step 2: Create a Role
+The mount admits an SVID from **any** trust domain it holds, so a mount with several domains admits workloads from all of them. Which of them get a role is the groups' decision (Step 3).
 
-A role binds one trust domain to a set of Warden policies and decides what the issued token can do. The same role serves both SVID types: an X.509-SVID or a JWT-SVID whose verified SPIFFE ID is in the role's `trust_domain`.
+## Step 2: Configure the Mount
+
+The mount configuration says what the mount admits:
 
 ```bash
-warden write auth/spiffe/role/inventory-agent \
-  trust_domain="prod.example.org" \
-  bound_audiences="warden" \
-  token_policies="inventory-read,inventory-write" \
-  token_ttl="1h"
+warden write auth/spiffe/config '{
+  "bound_audiences": ["warden"],
+  "max_age": "10m",
+  "token_ttl": "1h",
+  "entity_kind": "agent"
+}'
+
+warden read auth/spiffe/config
 ```
 
-Fields:
+- `bound_audiences` — the audiences a **JWT-SVID** must carry, any one of them. On an agent mount it is required: a write that would leave it empty is refused. X.509-SVIDs carry no audience and ignore it. See [The Audience Requirement](#the-audience-requirement-jwt-svid).
+- `max_age` — the maximum age of a **JWT-SVID** at admission, from its `iat`. A JWT-SVID older than that, or without an `iat`, is refused. X.509-SVIDs carry no issue time and are not checked.
+- `token_ttl` — how long an admission is reused before the SVID is verified again (default `1h`). Always capped by the SVID's own expiry.
+- `entity_kind` — `agent` (the default) or `human`.
 
-- `trust_domain` (**required**) — the SPIFFE trust domain this role accepts. An SVID validates only against this domain's bundle; an SVID from any other domain is rejected.
-- `allowed_spiffe_ids` — optional segment-aware SPIFFE-ID patterns the verified SVID must match. Omit to accept any SVID in the trust domain. See [Restricting Allowed SPIFFE IDs](#restricting-allowed-spiffe-ids).
-- `bound_audiences` — audiences accepted for **JWT-SVID** logins. Required for JWT-SVIDs (an audience-less JWT-SVID login fails closed); ignored for X.509-SVIDs. See [The Audience Requirement](#the-audience-requirement-jwt-svid).
-- `token_policies` — Warden policies stamped on the issued token.
-- `token_ttl` — TTL for issued tokens (default `1h`). Always capped by the SVID's own expiry.
-- `cred_spec_name` — credential spec to use for implicit-auth flows.
-- `groups_claim` / `group_policy_prefix` — dynamic policy mapping from a JWT-SVID claim (JWT-SVID only). See [Group-Based Policies](#group-based-policies-jwt-svid).
+A config write merges onto the stored configuration: keys you leave out are kept, so a later write need not repeat `bound_audiences`. Until the mount is configured, it admits X.509-SVIDs and refuses every JWT-SVID.
 
-A role's token type is always pinned to `spiffe_role`; operators can't override it. A role with no `bound_audiences` is accepted, but the write returns a warning: it can authenticate X.509-SVIDs but will reject every JWT-SVID login.
+## Step 3: Create a Role and Grant It
 
-## Step 3: Wire Up Transparent Auth
+A role names the policies a request runs under. It lives in the namespace, not on the mount:
 
-The SPIFFE auth method is **transparent-only**. There is no "log in once, get a Warden bearer token" handshake the workload performs explicitly — `POST /auth/<mount>/login` for a `spiffe_role` token is rejected at the request handler with `explicit login is not supported for roles with token_type=transparent`. The workload re-presents its SVID on every call, and Warden's transparent middleware does the validation in-line (with a per-(SVID, role) cache so the verification isn't repeated on every request).
+```bash
+warden role create inventory-agent -json '{
+  "description": "Read and update the inventory",
+  "policies": ["inventory-read", "inventory-write"],
+  "provider_path": "vault/"
+}'
+```
 
-The shape:
+`description` and `provider_path` are what the [discovery server](/concepts/discovery-and-skills/#discovering-roles) shows an agent: what the role is for, and the URL to call it at.
 
-1. The workload presents its SVID on every request to a Warden gateway URL — an **X.509-SVID** via mTLS (direct, or through a trusted proxy that re-forwards the certificate in a header), or a **JWT-SVID** as `Authorization: Bearer`.
-2. Warden resolves the auth mount via the provider's (or namespace's) `auto_auth_path` configuration.
-3. Warden verifies the SVID against the role's trust-domain bundle — or, if a prior call with the same (SVID, role) tuple is cached, skips that work.
-4. The role's policies decide whether the upstream call goes through.
+Nobody holds the role yet. A virtual group grants it to callers whose facts match its rules. This one grants `inventory-agent` to every workload under `/ns/agents/sa/inventory-…` in the `prod.example.org` trust domain:
 
-So the workload-side setup is per-provider, not per-workload: on the provider you want the workload to reach, set `auto_auth_path` to the SPIFFE mount (`auth/spiffe/`) and optionally a `default_role`.
+```bash
+warden identity group create inventory-agents -json '{
+  "type": "virtual",
+  "description": "Inventory workloads in the prod trust domain",
+  "roles": ["inventory-agent"],
+  "rules": [
+    {
+      "mount": ["auth/spiffe/"],
+      "trust_domain": ["prod.example.org"],
+      "path": ["/ns/agents/sa/inventory-*"]
+    }
+  ]
+}'
+```
 
-A JWT-SVID call looks like:
+The same rule serves both SVID types. Every rule names the `mount` it trusts; selectors in one rule must all match, and a group with several rules matches when any one does. See [Selecting Workloads by SPIFFE ID](#selecting-workloads-by-spiffe-id) for the patterns.
+
+## Step 4: Point a Provider at the Mount
+
+A provider's gateway asks the mount named by its `auto_auth_path` to admit the credential. Set it on the provider the workload calls:
+
+```bash
+warden write vault/config '{
+  "auto_auth_path": "auth/spiffe/"
+}'
+```
+
+The workload then presents its SVID on every request; there is no login step. The role goes in the URL. A JWT-SVID call:
 
 ```bash
 curl -H "Authorization: Bearer $JWT_SVID" \
-     -H "X-Warden-Role: inventory-agent" \
-     "${WARDEN_ADDR}/v1/<provider>/gateway/<upstream-path>"
+     "${WARDEN_ADDR}/v1/vault/role/inventory-agent/gateway/<upstream-path>"
 ```
 
-An X.509-SVID call presents the certificate over mTLS (directly to Warden, or to a trusted proxy that re-forwards it as `X-SSL-Client-Cert` / `X-Forwarded-Client-Cert` — Warden honours that header only from configured upstreams):
+An X.509-SVID call presents the certificate over mTLS, directly to Warden or to a trusted proxy that re-forwards it as `X-SSL-Client-Cert` / `X-Forwarded-Client-Cert`:
 
 ```bash
 curl --cert workload.pem --key workload-key.pem \
-     -H "X-Warden-Role: inventory-agent" \
-     "${WARDEN_ADDR}/v1/<provider>/gateway/<upstream-path>"
+     "${WARDEN_ADDR}/v1/vault/role/inventory-agent/gateway/<upstream-path>"
 ```
 
-The role can be set via the `X-Warden-Role` header (as above), embedded in the URL path (`/role/<r>/gateway/...`), or fall back to the provider's `default_role` or the auth method's `default_role`. The issued token's TTL is `min(role.token_ttl, config.token_ttl, time-until-SVID-expiry)`, so a token never outlives the SVID that minted it.
+A request can also name its role with the `X-Warden-Role` header, or fall back to the provider's `default_role`. A request that names no role is refused with `400` before its SVID is checked (see [How a request selects a role](/identity/roles/#how-a-request-selects-a-role)).
+
+Warden keeps one cached admission per mount and SVID, so an SVID is verified once and reused until it expires or the mount's `token_ttl` runs out, whichever is first. The role is still checked against the groups on every request, so a group or role change applies from the next one. A login against `auth/<mount>/login` runs the same checks and reports what they verified, but returns nothing to present on later requests.
 
 ## Credential Precedence: JWT-SVID Wins
 
@@ -121,37 +157,47 @@ A single request can carry both credentials at once — common in a mesh, where 
 
 SPIFFE mandates that a JWT-SVID be minted for a specific **audience** and that the relying party validate it — without that check, a JWT-SVID issued for service A could be replayed against service B. Warden enforces this fail-closed:
 
-- A JWT-SVID is validated against the role's `bound_audiences`. A token whose `aud` doesn't include one of them is rejected.
-- A role with **no** `bound_audiences` rejects every JWT-SVID login (the role write warns about this). The same role still accepts X.509-SVIDs, which carry no audience.
+- A JWT-SVID is validated against the mount's `bound_audiences`. A token whose `aud` doesn't include one of them is refused.
+- A mount with **no** `bound_audiences` refuses every JWT-SVID. The same mount still admits X.509-SVIDs, which carry no audience.
+- A config write that would leave an agent mount without `bound_audiences` is refused.
 
-Set `bound_audiences` to the identifier your workloads request their JWT-SVIDs for (often the Warden instance or the upstream service name):
+Set `bound_audiences` to the identifier your workloads request their JWT-SVIDs for (often the Warden instance or the upstream service name). With SPIRE, that is the audience the workload asks the Workload API for, e.g. `spire-agent api fetch jwt -audience warden`.
+
+## Selecting Workloads by SPIFFE ID
+
+Group rules select on the SVID's verified facts. For `spiffe://prod.example.org/ns/web/sa/frontend`:
+
+| Fact | Value |
+|---|---|
+| `spiffe_id` | `spiffe://prod.example.org/ns/web/sa/frontend` |
+| `trust_domain` | `prod.example.org` |
+| `path` | `/ns/web/sa/frontend` |
+| `svid` | `x509` or `jwt` |
+
+Values are exact strings unless they hold a glob:
+
+- `*` matches any run of characters except `/`, so `/ns/web/sa/*` matches `/ns/web/sa/frontend` but not `/ns/web/sa/frontend/v2`.
+- `**` matches across `/`, so `/ns/web/**` matches every path under `/ns/web/`.
+- `?` matches exactly one character except `/`.
 
 ```bash
-warden write auth/spiffe/role/inventory-agent \
-  trust_domain="prod.example.org" \
-  bound_audiences="warden" \
-  token_policies="inventory-read"
+warden identity group create frontend -json '{
+  "type": "virtual",
+  "description": "Web and edge workloads in prod",
+  "roles": ["frontend"],
+  "rules": [
+    {
+      "mount": ["auth/spiffe/"],
+      "spiffe_id": [
+        "spiffe://prod.example.org/ns/web/sa/*",
+        "spiffe://prod.example.org/ns/edge/sa/*"
+      ]
+    }
+  ]
+}'
 ```
 
-## Restricting Allowed SPIFFE IDs
-
-By default a role accepts any SVID whose trust domain matches `trust_domain`. To narrow it to specific workloads, set `allowed_spiffe_ids` to one or more **segment-aware** patterns (split on `/`):
-
-```bash
-warden write auth/spiffe/role/frontend \
-  trust_domain="prod.example.org" \
-  bound_audiences="warden" \
-  allowed_spiffe_ids="spiffe://prod.example.org/ns/web/sa/*,spiffe://prod.example.org/ns/edge/sa/+" \
-  token_policies="frontend"
-```
-
-Pattern semantics:
-
-- `+` matches exactly one segment, at any position.
-- `*` as the **trailing** segment matches one or more remaining segments.
-- All other segments require an exact match.
-
-The patterns are matched against the SVID's verified SPIFFE ID, so a pattern can only ever narrow within the role's trust domain — it cannot widen acceptance to another domain.
+Because the mount admits every trust domain it holds, pin the domain in each rule: with `trust_domain`, or with a full `spiffe_id` pattern as above. A rule on `path` alone matches the same path in every trust domain of the mount. Add `"svid": ["jwt"]` to a rule to grant the role to JWT-SVIDs only. The full rule syntax is on [Groups](/identity/groups/#rules-and-selectors).
 
 ## Federation
 
@@ -162,67 +208,88 @@ SPIFFE defines two endpoint profiles, and Warden supports both:
 **`https_web`** — the bundle endpoint is served over ordinary Web PKI TLS. Warden validates the endpoint's TLS certificate against the system roots (or custom roots you supply via `web_pki_ca_pem`).
 
 ```bash
-warden write auth/spiffe/trust-domain/remote.example.org \
-  bundle_endpoint_url="https://spiffe.remote.example.org/bundle" \
-  bundle_endpoint_profile="https_web"
+warden write auth/spiffe/trust-domain/remote.example.org '{
+  "bundle_endpoint_url": "https://spiffe.remote.example.org/bundle",
+  "bundle_endpoint_profile": "https_web"
+}'
 ```
 
 **`https_spiffe`** — the endpoint authenticates itself with its *own* SPIFFE X.509-SVID. This needs the endpoint's expected SPIFFE ID and a **bootstrap bundle** (carrying X.509 authorities) to authenticate that first fetch:
 
 ```bash
-warden write auth/spiffe/trust-domain/remote.example.org \
-  bundle_endpoint_url="https://spiffe.remote.example.org/bundle" \
-  bundle_endpoint_profile="https_spiffe" \
-  endpoint_spiffe_id="spiffe://remote.example.org/spire/server" \
-  bundle_json=@/path/to/remote-bootstrap-bundle.json
+jq -n --rawfile bundle remote-bootstrap-bundle.json '{
+  "bundle_endpoint_url": "https://spiffe.remote.example.org/bundle",
+  "bundle_endpoint_profile": "https_spiffe",
+  "endpoint_spiffe_id": "spiffe://remote.example.org/spire/server",
+  "bundle_json": $bundle
+}' | warden write auth/spiffe/trust-domain/remote.example.org
 ```
 
 Warden refreshes federated bundles in the background on the active node. To force an immediate fetch — after rotating the remote domain's authorities, say:
 
 ```bash
-warden write -f auth/spiffe/trust-domain/remote.example.org/refresh
+warden write auth/spiffe/trust-domain/remote.example.org/refresh '{}'
 ```
 
-A refresh that can't reach the endpoint fails the call but keeps the last-good bundle in place, so a transient outage at the remote domain doesn't break logins for already-fetched authorities. Reading a federated trust domain surfaces its fetch status (sequence number, last refresh time, last error).
+A refresh that can't reach the endpoint fails the call with `502` but keeps the last-good bundle in place, so a transient outage at the remote domain doesn't break admissions for already-fetched authorities. Reading a federated trust domain shows its fetch status (`sequence`, `last_refresh`, `last_error`).
 
-## Group-Based Policies (JWT-SVID)
+## Facts and Native Identity
 
-If your JWT-SVIDs carry a claim listing the workload's groups, Warden can stamp one policy per group onto the issued token, in addition to the role's static `token_policies`. This applies to JWT-SVIDs only — X.509-SVIDs carry no claims.
+Every admission through a spiffe mount carries these facts:
+
+| Fact | Value |
+|---|---|
+| `mount` | The mount's path in its namespace, e.g. `auth/spiffe/`. |
+| `kind` | `agent` or `human`, from `entity_kind`. |
+| `spiffe_id` | The verified SPIFFE ID. |
+| `trust_domain` | Its trust domain. |
+| `path` | Its path. The ID of a trust domain itself has no path, so no `path` fact. |
+| `svid` | `x509` or `jwt`: the kind of SVID that carried it. |
+| `aud` | A JWT-SVID's audiences. An X.509-SVID has none. |
+
+`facts` can publish one of these fields again under a second name; no other source is accepted, so other JWT-SVID claims are never facts. A mount maps at most 32, and `mount` and `kind` are reserved. Mapped facts also reach [CEL conditions](/identity/cel-conditions/) as `agent.metadata.<name>`; map a field to its own name to expose it unchanged:
 
 ```bash
-warden write auth/spiffe/role/inventory-agent \
-  trust_domain="prod.example.org" \
-  bound_audiences="warden" \
-  groups_claim="groups" \
-  group_policy_prefix="spiffe-"
+warden write auth/spiffe/config '{
+  "facts": {
+    "path": "workload",
+    "trust_domain": "trust_domain"
+  }
+}'
 ```
 
-A JWT-SVID carrying `"groups": ["engineering", "billing"]` gets `spiffe-engineering` and `spiffe-billing` appended to its policy list. The default prefix is `group-`. Warden accepts the claim as a JSON array, a comma-separated string, or a single string.
+An SVID for `spiffe://prod.example.org/ns/prod/sa/ci` then carries `agent.metadata.workload == "/ns/prod/sa/ci"` and `agent.metadata.trust_domain == "prod.example.org"`, and a policy can gate a path with `condition = "agent.metadata.trust_domain == 'prod.example.org'"`. A write replaces the whole `facts` map; an empty map clears it.
 
-## Token Metadata
-
-A role can copy verified attributes from the SVID onto the issued token's metadata, where a CEL `condition` can match them via `token.metadata`. Two mappings are available, both written as `source = "destination-metadata-key"`:
-
-- `metadata_mappings` — from SPIFFE-ID components (`trust_domain`, `spiffe_id`, `path`). Applies to **both** SVID flows.
-- `metadata_claims` — from JWT-SVID claims. The source is a literal claim name, or a JSON Pointer (leading `/`) for a nested claim. **JWT-SVID logins only**; resolved values must be strings.
-
-```bash
-warden write auth/spiffe/role/inventory-agent \
-  trust_domain="prod.example.org" \
-  bound_audiences="warden" \
-  metadata_mappings="trust_domain=td,path=workload" \
-  metadata_claims="/deploy/env=env"
-```
-
-An X.509-SVID `spiffe://prod.example.org/ns/prod/sa/ci` yields metadata `td="prod.example.org"`, `workload="/ns/prod/sa/ci"`. A JWT-SVID additionally maps its `deploy.env` claim to `env`. A policy can then gate a path with `condition = "token.metadata.env == 'prod'"`. When both mappings produce the same key, the claim value wins.
+The **native identity** is always the `spiffe_id`, for both SVID types. A spiffe mount takes no `alias_name_source`: a write that sets it is refused.
 
 ## Delegation Chain (RFC 8693 `act` Claim)
 
-RFC 8693 §4.1 defines an `act` claim that attests a delegation chain — "this token represents X, acting on behalf of Y." When a JWT-SVID carries it, Warden extracts the chain (up to a fixed depth of 4) and persists it on the issued token so downstream audit entries carry the full chain. Because the trust domain signed the SVID, the chain is inherently attested. No configuration needed; extraction happens automatically when the claim is present.
+RFC 8693 §4.1 defines an `act` claim that attests a delegation chain — "this token represents X, acting on behalf of Y." When a JWT-SVID carries it, Warden extracts the chain (up to a fixed depth of 4) and records it with the admission, so audit entries carry the full chain. Because the trust domain signed the SVID, the chain is inherently attested. No configuration needed; extraction happens automatically when the claim is present.
 
-## Discovering Assumable Roles
+## Registering the Workload
 
-A workload that doesn't know which role to ask for can use Warden's namespace-wide introspection endpoint. The aggregator fans out to the auth mounts whose token type matches the presented credential — a `spiffe` mount is consulted for both X.509-SVIDs and JWT-SVIDs — and returns the roles the credential could assume.
+The steps above grant roles to any SVID that matches the group's rules. To give the workload a record in the identity store, with a description, a sponsor and a state you can suspend, create an [entity](/identity/entities/) and have it claim the SPIFFE ID.
+
+Once an entity claims it, virtual groups no longer apply to the workload: it holds only what static groups listing its entity grant, and only while the entity is governed. So create the entity without a claim, give it a [sponsor](/identity/sponsors/) and a static group, and claim last:
+
+```bash
+warden identity entity create inventory-agent -json '{
+  "description": "Reads and updates the inventory"
+}'
+
+# ... propose a sponsor and list the entity in a static group, then:
+warden identity alias add -json '{
+  "mount": "auth/spiffe/",
+  "name": "spiffe://prod.example.org/ns/agents/sa/inventory-agent",
+  "to": "inventory-agent"
+}'
+```
+
+One entity can claim the same agent's SPIFFE ID and, say, its Kubernetes service account, so it has one record wherever it runs. [Entities](/identity/entities/#rolling-out) walks through the rollout.
+
+## Discovering Roles
+
+An agent that doesn't know which role to ask for asks the MCP discovery server's `list_roles`, which returns each role the groups grant it with its description, skill and URL — see [Discovery and Skills](/concepts/discovery-and-skills/#discovering-roles). Over plain HTTP, the workload presents its SVID:
 
 ```bash
 # JWT-SVID
@@ -230,9 +297,7 @@ curl -H "Authorization: Bearer $JWT_SVID" \
   "${WARDEN_ADDR}/v1/sys/introspect/roles"
 ```
 
-The response lists `{auth_path, name, description}` for each role whose trust-domain and SPIFFE-ID constraints the presented SVID satisfies. Introspection is a discovery hint, not an authorization — the workload picks a role and uses it on subsequent gateway requests, where the transparent-auth layer does the real validation. A credential that doesn't match the mount produces no error and no warning, so the aggregator can tolerate non-matching mounts.
-
-Per-mount introspection (`auth/<mount>/introspect/roles`) exists too — the aggregator calls it internally — but workloads should prefer the aggregator since it handles dispatch.
+The response is `{roles: [{name, description, skill, provider_path}, ...], warnings: [...]}`. Warden admits the SVID at each mount a role of the namespace is reached through (its provider's `auto_auth_path`) and lists the roles a group grants it there. A mount that could not decide (no trust bundle loaded, or a JWT-SVID with no `bound_audiences` to check) adds a warning; one that does not admit the SVID is silent. Discovery is a hint, not a grant: each gateway request is admitted and checked against the groups again.
 
 ## Revocation and SVID Lifetime
 
@@ -240,21 +305,26 @@ The SPIFFE method does **not** perform X.509 CRL or OCSP revocation checks. This
 
 Two properties keep the blast radius small without revocation:
 
-- **Token TTL is capped by SVID expiry.** An issued Warden token never outlives the SVID that minted it, so a short-lived SVID yields a short-lived token automatically.
+- **An admission never outlives its SVID.** Warden reuses an admission only until the SVID expires, so a short-lived SVID is verified again soon after.
 - **Bundle rotation is the kill switch.** Removing or rotating a trust domain's authorities stops Warden from validating any SVID signed by the old keys — update the bundle (static write or federation refresh) to cut off a compromised authority.
 
-If you require per-certificate revocation semantics, use the `cert` method with its revocation modes against a classic PKI instead.
+To cut off one workload without touching the bundle, change the group rule that grants it, or register it as an entity and suspend the entity. If you require per-certificate revocation, use the `cert` method with its revocation modes against a classic PKI instead.
 
 ## Configuration Reference
 
-### Mount configuration (`auth/spiffe/config`)
+### Mount configuration (`auth/<mount>/config`)
 
 | Field | Required | Description |
 |---|---|---|
-| `token_ttl` | No (default `1h`) | Default TTL for issued tokens; the per-role `token_ttl` and the SVID expiry both further cap it. |
-| `default_role` | No | Role used by transparent flows when the caller doesn't specify one. |
+| `bound_audiences` | Yes, on an agent mount | Audiences a JWT-SVID must carry, any one of them. Without it no JWT-SVID is admitted. Ignored for X.509-SVIDs. No entry may be empty. |
+| `max_age` | No | Maximum age of a JWT-SVID at admission, from its `iat`, e.g. `10m`. A JWT-SVID older than that, or without an `iat`, is refused. X.509-SVIDs are not checked. Empty or `0` leaves it unset. |
+| `token_ttl` | No (default `1h`) | How long an admission is reused before the SVID is verified again; always capped by the SVID's expiry. |
+| `entity_kind` | No (default `agent`) | `agent` or `human`: the `kind` fact of every admission. |
+| `facts` | No | Map of a built-in field (`spiffe_id`, `trust_domain`, `path`, `svid`, `aud`) to the extra fact name it is published as. At most 32. A write replaces the whole map. |
 
-### Trust domain (`auth/spiffe/trust-domain/<name>`)
+The native identity is fixed to `spiffe_id`; a write that sets `alias_name_source` is refused. A config write merges onto the stored configuration. A write that carries a key the mount no longer accepts is refused with `400`, naming the key and what replaced it.
+
+### Trust domain (`auth/<mount>/trust-domain/<name>`)
 
 | Field | Required | Description |
 |---|---|---|
@@ -265,40 +335,32 @@ If you require per-certificate revocation semantics, use the `cert` method with 
 | `endpoint_spiffe_id` | For `https_spiffe` | Expected SPIFFE ID of the bundle endpoint; must be in this trust domain. |
 | `web_pki_ca_pem` | No (`https_web` only) | Custom PEM CA roots for the endpoint's TLS certificate (default: system roots). |
 
-A trust domain is either **static** (a `bundle_pem`/`bundle_json` with no `bundle_endpoint_profile`) or **federated** (a `bundle_endpoint_url` plus a `bundle_endpoint_profile`). The three federation fields — `bundle_endpoint_url`, `endpoint_spiffe_id`, and `web_pki_ca_pem` — require a `bundle_endpoint_profile`; setting any of them on a static domain is rejected. Conversely, `endpoint_spiffe_id` is valid only for `https_spiffe`, and `web_pki_ca_pem` only for `https_web`.
-
-### Role (`auth/spiffe/role/<name>`)
-
-| Field | Required | Description |
-|---|---|---|
-| `trust_domain` | **Yes** | SPIFFE trust domain the role accepts. |
-| `allowed_spiffe_ids` | No | Segment-aware SPIFFE-ID patterns the verified SVID must match. Empty accepts any SVID in the domain. |
-| `bound_audiences` | For JWT-SVID logins | Accepted JWT-SVID audiences. Required for JWT-SVIDs; ignored for X.509-SVIDs. |
-| `token_policies` | No | Warden policies attached to the issued token. |
-| `token_ttl` | No (default `1h`) | TTL for issued tokens; always capped by SVID expiry. |
-| `cred_spec_name` | No | Credential spec name for implicit-auth flows. |
-| `groups_claim` | No | JWT-SVID claim carrying group names for dynamic policy mapping (JWT-SVID only). |
-| `group_policy_prefix` | No (default `group-`) | Prefix prepended to each group name to form the policy name. |
-| `metadata_mappings` | No | Map of SPIFFE-ID component (`trust_domain`, `spiffe_id`, `path`) → token metadata key. Both SVID flows. |
-| `metadata_claims` | No | Map of JWT-SVID claim (literal or JSON Pointer) → token metadata key. JWT-SVID only; values must be strings. |
+A trust domain is either **static** (a `bundle_pem`/`bundle_json` with no `bundle_endpoint_profile`) or **federated** (a `bundle_endpoint_url` plus a `bundle_endpoint_profile`). The three federation fields — `bundle_endpoint_url`, `endpoint_spiffe_id`, and `web_pki_ca_pem` — require a `bundle_endpoint_profile`; setting any of them on a static domain is rejected. Conversely, `endpoint_spiffe_id` is valid only for `https_spiffe`, and `web_pki_ca_pem` only for `https_web`. A write replaces the whole entry and resets its fetch state.
 
 ## Troubleshooting
 
-**Gateway request returns "authentication failed" with no detail.** This is by design — all authentication failures collapse to the same generic error so the response can't be used to enumerate which check is failing. The Warden server logs carry the specific reason (no matching trust domain, SVID outside the role's trust domain, SPIFFE-ID pattern mismatch, audience mismatch, expired SVID, no bundle loaded, etc.). Check the server log at the timestamp of the failed call.
+**Gateway request returns `401` with no detail.** This is by design — every admission failure collapses to the same response, so it can't be used to learn which check failed. The Warden server log carries the reason (`implicit authentication failed`: no bundle for the SVID's trust domain, audience mismatch, `max_age`, expired SVID, no bundle loaded, etc.). Check it at the timestamp of the failed call.
 
-**Every JWT-SVID login for a role fails, but X.509-SVID logins work.** The role has no `bound_audiences`. A JWT-SVID requires an audience to validate, so a role without one rejects all JWT-SVID logins (the role write warns about this). Set `bound_audiences` to the audience your workloads mint their JWT-SVIDs for.
+**`400` "no role selected".** The request named no role and the provider has no `default_role`. Put the role in the URL (`/v1/<provider>/role/<role>/gateway/...`) or set `X-Warden-Role`.
 
-**Logins fail right after enabling the method.** A `spiffe` mount serves no logins until at least one trust domain bundle is registered and loaded. Register the trust domain (`auth/spiffe/trust-domain/<name>`) and confirm `warden read` shows a non-zero authority count. If the mount can't load any bundle at startup it fails closed — every login is rejected until a valid bundle is present.
+**Every JWT-SVID is refused, but X.509-SVIDs work.** The mount has no `bound_audiences`, or the JWT-SVIDs are minted for another audience. Set `bound_audiences` on the mount config to the audience your workloads mint their JWT-SVIDs for.
 
-**A workload's SVID is rejected even though the certificate looks valid.** Check the trust domain. The role's `trust_domain` must exactly equal the SVID's trust domain, and the SVID must verify against *that* domain's bundle — an SVID from a different (even federated) domain won't satisfy a role bound elsewhere. If `allowed_spiffe_ids` is set, confirm the SVID's full SPIFFE ID matches one of the segment patterns.
+**The config write fails with `bound_audiences is required on agent mounts`.** The write would leave an agent mount without audiences. Send `bound_audiences` in the same write.
 
-**A federated trust domain stopped updating.** Read the trust domain and inspect `last_error` and `last_refresh`. A failed refresh keeps the last-good bundle, so logins keep working against the old authorities while refreshes fail silently in the background. Force a fetch with `auth/spiffe/trust-domain/<name>/refresh`; a `502` there reports the endpoint fetch error directly.
+**Every request fails right after enabling the method.** A `spiffe` mount admits nothing until at least one trust domain bundle is registered and loaded. Register the trust domain (`auth/<mount>/trust-domain/<name>`) and confirm `warden read` shows a non-zero authority count. If the mount can't load any bundle at startup it fails closed — every SVID is refused until a valid bundle is present.
+
+**`403` `role "inventory-agent" is not assumable through auth/spiffe/: no group grants it to this caller`.** The SVID was admitted, but no group's rule matched its facts. Compare the rule with the SVID's SPIFFE ID: a `*` stops at `/` (use `**` to cross it), `path` starts with `/`, and `trust_domain` must equal the SVID's own domain. Check the rule's `mount` too: it is the path in the mount's namespace, with the trailing slash. The audit entry's `role_denied_reason` and `groups` say which groups matched.
+
+**An SVID is refused even though the certificate looks valid.** The SVID verifies only against the bundle of its own trust domain. Confirm that domain is registered on this mount (`warden list auth/<mount>/trust-domain`), and that its bundle holds the authority that signed the SVID.
+
+**A federated trust domain stopped updating.** Read the trust domain and inspect `last_error` and `last_refresh`. A failed refresh keeps the last-good bundle, so SVIDs keep verifying against the old authorities while refreshes fail in the background. Force a fetch with `auth/<mount>/trust-domain/<name>/refresh`; a `502` there reports the endpoint fetch error directly.
 
 **`https_spiffe` federation won't configure.** The `https_spiffe` profile requires both `endpoint_spiffe_id` (a valid SPIFFE ID inside the trust domain being federated) and a bootstrap bundle (`bundle_json` or `bundle_pem`) that carries X.509 authorities to authenticate the endpoint's SVID on the first fetch. `https_web`, by contrast, rejects `endpoint_spiffe_id` and authenticates the endpoint with ordinary Web PKI.
 
 ## See Also
 
-- [Authentication](/concepts/authentication/) — the credential forms and how transparent auth resolves an identity per request.
-- [Roles](/concepts/roles/) — how a validated credential maps to policies and token settings.
+- [Authentication](/identity/authentication/) — how auth mounts admit credentials, and the facts they record.
+- [Groups](/identity/groups/) and [Roles](/identity/roles/) — how an admitted workload is granted what it may do.
+- [Entities](/identity/entities/) — registering a workload in the identity store.
 - [Agent Identity](/agent-identity/) — how a workload or its sidecar presents this credential to Warden.
 - [Auth Methods](/auth-methods/) — the other auth methods Warden ships.

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/armon/go-radix"
 	sdklogical "github.com/openbao/openbao/sdk/v2/logical"
+	"github.com/stephnangue/warden/helper/copybuf"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
 )
@@ -64,9 +66,12 @@ type TransparentConfig struct {
 	// disables per-user auth for this provider. See logical.UserAuthConfigProvider.
 	UserAuthPath string
 
-	// UserAuthRole is the role used to authenticate the user credential. Empty
-	// falls back to the user auth mount's own default_role.
-	UserAuthRole string
+	// UserAuthRoleStored reports that the provider's stored configuration
+	// still names the removed user_auth_role (HasUserAuthRole,
+	// StoredUserAuthRole). While it does, every user credential is refused
+	// with ErrUserAuthRoleRemoved; a config write, which never stores the key,
+	// clears it.
+	UserAuthRoleStored bool
 }
 
 // unauthPathsEntry holds parsed unauthenticated paths for efficient matching
@@ -192,6 +197,17 @@ type StreamingBackend struct {
 	// Logger is the provider's scoped logger (set via conf.Logger.WithSubsystem).
 	Logger *logger.GatedLogger
 
+	// ProxyErrorWriter optionally writes the answer when the proxy fails — the
+	// upstream could not be reached (502), or did not answer before the
+	// request's deadline (504) — in place of the plain-text body. It returns
+	// false to fall back to that body. It is given the status only: the
+	// underlying error can name the upstream's address, so it goes to the log
+	// and never toward the client.
+	//
+	// Set it before InitProxy and never again: the proxy's error handler reads
+	// it on every failure without a lock.
+	ProxyErrorWriter func(w http.ResponseWriter, r *http.Request, status int) bool
+
 	// StorageView is the provider's storage backend for persisting configuration.
 	StorageView sdklogical.Storage
 
@@ -280,9 +296,11 @@ func (b *StreamingBackend) SetTransport(t http.RoundTripper) {
 	b.ensureTransport().store(t)
 }
 
-// Ensure StreamingBackend implements logical.Backend and logical.StreamBodyParser
+// Ensure StreamingBackend implements logical.Backend, logical.StreamBodyParser and
+// logical.StreamBodyLimiter
 var _ logical.Backend = (*StreamingBackend)(nil)
 var _ logical.StreamBodyParser = (*StreamingBackend)(nil)
+var _ logical.StreamBodyLimiter = (*StreamingBackend)(nil)
 
 // initStreaming initializes the streaming path regex patterns
 func (b *StreamingBackend) initStreaming() {
@@ -497,10 +515,54 @@ func (b *StreamingBackend) handleStreaming(ctx context.Context, req *logical.Req
 	// All providers rewrite req.HTTPRequest.URL to the upstream target before proxying,
 	// so we can reliably derive it here as a safety net.
 	if req.UpstreamURL == "" && req.HTTPRequest != nil && req.HTTPRequest.URL != nil {
-		req.UpstreamURL = req.HTTPRequest.URL.String()
+		req.UpstreamURL = auditURL(req.HTTPRequest.URL)
 	}
 
 	return err
+}
+
+// redactedQueryValue replaces each query value in an audited URL, already in
+// query encoding.
+const redactedQueryValue = "%5Bredacted%5D"
+
+// auditURL is u as the audit records it: no user-info, and every query value
+// replaced, keys kept. A query carries credentials as often as a header does
+// (?api_key=, a presigned URL's X-Amz-Signature and X-Amz-Security-Token),
+// and user-info is a username and password. A URL with neither is recorded
+// as it is.
+func auditURL(u *url.URL) string {
+	if u.RawQuery == "" && u.User == nil {
+		return u.String()
+	}
+	redacted := *u
+	redacted.User = nil
+	if u.RawQuery != "" {
+		redacted.RawQuery = redactQueryValues(u.RawQuery)
+	}
+	return redacted.String()
+}
+
+// redactQueryValues keeps each key of a raw query and replaces its value. A
+// segment with no "=", or one whose "=" is followed by another (a base64
+// token's padding, dGVzdA==), is a value with no key, and is replaced whole.
+func redactQueryValues(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	for rest := raw; ; {
+		segment, next, more := strings.Cut(rest, "&")
+		if segment != "" {
+			if key, value, ok := strings.Cut(segment, "="); ok && !strings.HasPrefix(value, "=") {
+				b.WriteString(key)
+				b.WriteByte('=')
+			}
+			b.WriteString(redactedQueryValue)
+		}
+		if !more {
+			return b.String()
+		}
+		b.WriteByte('&')
+		rest = next
+	}
 }
 
 // HandleExistenceCheck delegates to the embedded Backend
@@ -667,8 +729,9 @@ func (b *StreamingBackend) GetDefaultAuthRole() string {
 }
 
 // UserAuthConfigProvider interface implementation. A StreamingBackend always
-// satisfies logical.UserAuthConfigProvider; per-user auth is off (all getters
-// return "") until a provider's config sets the fields on TransparentConfig.
+// satisfies logical.UserAuthConfigProvider; per-user auth is off
+// (GetUserAuthPath returns "") until a provider's config sets the fields on
+// TransparentConfig.
 
 // GetUserAuthPath returns the auth mount that authenticates the secondary (user)
 // principal, or "" when per-user auth is not configured.
@@ -680,14 +743,13 @@ func (b *StreamingBackend) GetUserAuthPath() string {
 	return tc.UserAuthPath
 }
 
-// GetUserAuthRole returns the role used to authenticate the user credential,
-// or "" to fall back to the user auth mount's own default_role.
-func (b *StreamingBackend) GetUserAuthRole() string {
-	tc := b.transparentConfig.Load()
-	if tc == nil {
-		return ""
+// UserAuthRefusal returns ErrUserAuthRoleRemoved while the stored
+// configuration still names user_auth_role, and nil otherwise.
+func (b *StreamingBackend) UserAuthRefusal() error {
+	if tc := b.transparentConfig.Load(); tc != nil && tc.UserAuthRoleStored {
+		return ErrUserAuthRoleRemoved
 	}
-	return tc.UserAuthRole
+	return nil
 }
 
 // RewriteTransparentPath rewrites a transparent path to standard path
@@ -726,7 +788,8 @@ func (b *StreamingBackend) SetTransparentConfig(config *TransparentConfig) {
 //     installed atomically.
 //
 // The proxy uses an empty Director (providers prepare requests before ServeHTTP)
-// and a standard error handler that logs and returns 502.
+// and a standard error handler that logs and returns 502, or 504 when the
+// request's deadline passed first.
 // Logger must be set on the StreamingBackend before calling this method.
 func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
 	swap := b.ensureTransport()
@@ -734,7 +797,21 @@ func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
 	b.Proxy = &httputil.ReverseProxy{
 		Director:  func(req *http.Request) {},
 		Transport: swap,
+		// Every proxied response is copied through a buffer; pooled, it is
+		// not allocated per response.
+		BufferPool: copybuf.ProxyPool,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			// The request's own deadline — a mount's timeout — passed before
+			// the upstream answered. The client is still waiting: written
+			// nothing, it would read an empty 200.
+			if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+				b.Logger.Error("proxy timed out",
+					logger.Err(err),
+					logger.String("target_url", auditURL(r.URL)),
+				)
+				b.writeProxyError(w, r, http.StatusGatewayTimeout)
+				return
+			}
 			// Client-side cancellation isn't a Warden error. Common
 			// shapes: MCP Streamable HTTP's GET notification stream
 			// the client opens then disconnects, or a long tool-call
@@ -743,17 +820,26 @@ func (b *StreamingBackend) InitProxy(transport http.RoundTripper) {
 			if errors.Is(err, context.Canceled) || r.Context().Err() != nil {
 				b.Logger.Debug("proxy aborted: client closed connection",
 					logger.Err(err),
-					logger.String("target_url", r.URL.String()),
+					logger.String("target_url", auditURL(r.URL)),
 				)
 				return
 			}
 			b.Logger.Error("proxy error",
 				logger.Err(err),
-				logger.String("target_url", r.URL.String()),
+				logger.String("target_url", auditURL(r.URL)),
 			)
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+			b.writeProxyError(w, r, http.StatusBadGateway)
 		},
 	}
+}
+
+// writeProxyError answers a failed proxy with the provider's writer when it has
+// one and it accepts, and with the plain-text status otherwise.
+func (b *StreamingBackend) writeProxyError(w http.ResponseWriter, r *http.Request, status int) {
+	if b.ProxyErrorWriter != nil && b.ProxyErrorWriter(w, r, status) {
+		return
+	}
+	http.Error(w, http.StatusText(status), status)
 }
 
 // initUnauthPaths parses UnauthenticatedPaths into radix tree + wildcard slice
@@ -859,6 +945,13 @@ func (b *StreamingBackend) IsUnauthenticatedPath(_ *http.Request, path string) b
 // override to inspect the request.
 func (b *StreamingBackend) ShouldParseStreamBody(_ *http.Request) bool {
 	return b.ParseStreamBody
+}
+
+// StreamBodyLimit implements logical.StreamBodyLimiter with the mount's
+// max_body_size. It is 0 for a backend that never set one, which leaves core's own
+// cap in force. Subtypes with per-request caps may override.
+func (b *StreamingBackend) StreamBodyLimit(_ *http.Request) int64 {
+	return b.MaxBodySize()
 }
 
 // matchWildcardSegments checks if path segments match a wildcard pattern

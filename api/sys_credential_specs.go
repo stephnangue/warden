@@ -28,6 +28,9 @@ type CreateCredentialSpecOutput struct {
 	MaxTTL         time.Duration     `json:"max_ttl"`
 	RotationPeriod time.Duration     `json:"rotation_period,omitempty"`
 	Message        string            `json:"message"`
+	// Warnings are non-fatal notices about the stored spec — e.g. an assertion_ttl
+	// the issuer will cap at mint. Nil when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // CredentialSpecInfo represents credential spec metadata
@@ -43,6 +46,9 @@ type CredentialSpecInfo struct {
 	// authorization_code) has a sealed credential. Always false for spec types
 	// that don't use a connect flow.
 	Connected bool `json:"connected,omitempty"`
+	// StoredSecrets names the long-lived secrets the spec holds in its own
+	// config; nil when it holds none.
+	StoredSecrets []string `json:"stored_secrets,omitempty"`
 }
 
 // UpdateCredentialSpecInput represents the input for updating a credential spec
@@ -57,6 +63,9 @@ type UpdateCredentialSpecInput struct {
 type UpdateCredentialSpecOutput struct {
 	Name    string `json:"name"`
 	Message string `json:"message"`
+	// Warnings are non-fatal notices about the stored spec — e.g. an assertion_ttl
+	// the issuer will cap at mint. Nil when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // CreateCredentialSpec creates a new credential spec
@@ -132,6 +141,7 @@ func (c *Sys) CreateCredentialSpecWithContext(ctx context.Context, name string, 
 	if v, ok := resource.Data["rotation_period"]; ok {
 		output.RotationPeriod = parseDurationFromSeconds(v)
 	}
+	output.Warnings = parseWarnings(resource.Data["warnings"])
 
 	return output, nil
 }
@@ -187,6 +197,7 @@ func (c *Sys) GetCredentialSpecWithContext(ctx context.Context, name string) (*C
 	if v, ok := resource.Data["connected"].(bool); ok {
 		spec.Connected = v
 	}
+	spec.StoredSecrets = parseStringList(resource.Data["stored_secrets"])
 
 	return spec, nil
 }
@@ -253,6 +264,7 @@ func (c *Sys) ListCredentialSpecsWithContext(ctx context.Context) ([]*Credential
 		if v, ok := specMap["rotation_period"]; ok {
 			spec.RotationPeriod = parseDurationFromSeconds(v)
 		}
+		spec.StoredSecrets = parseStringList(specMap["stored_secrets"])
 
 		specs = append(specs, spec)
 	}
@@ -316,6 +328,7 @@ func (c *Sys) UpdateCredentialSpecWithContext(ctx context.Context, name string, 
 	if msg, ok := resource.Data["message"].(string); ok {
 		output.Message = msg
 	}
+	output.Warnings = parseWarnings(resource.Data["warnings"])
 
 	return output, nil
 }
@@ -352,6 +365,16 @@ type AuthorizeCredentialSpecInput struct {
 type AuthorizeCredentialSpecOutput struct {
 	Name         string `json:"name"`
 	AuthorizeURL string `json:"authorize_url"`
+
+	// Issuer is the identifier an RFC 9207 "iss" callback parameter must
+	// match, empty when the source records none. It rides the authorize
+	// response because the comparison happens at the callback, before the
+	// code is sent back to be redeemed.
+	Issuer string `json:"issuer,omitempty"`
+
+	// Warnings are non-fatal notices about the write, such as a secret it left
+	// stored under keyless_enforcement_level=warn. Nil when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ConnectCredentialSpecInput is the input for completing the connect flow.
@@ -367,6 +390,9 @@ type ConnectCredentialSpecOutput struct {
 	Connected   bool   `json:"connected"`
 	Reconnected bool   `json:"reconnected"`
 	Message     string `json:"message"`
+	// Warnings are non-fatal notices about the write, such as a secret it left
+	// stored under keyless_enforcement_level=warn. Nil when there are none.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // AuthorizeCredentialSpec builds the provider authorize URL for a spec's connect flow.
@@ -409,6 +435,10 @@ func (c *Sys) AuthorizeCredentialSpecWithContext(ctx context.Context, name strin
 	if v, ok := resource.Data["authorize_url"].(string); ok {
 		output.AuthorizeURL = v
 	}
+	if v, ok := resource.Data["issuer"].(string); ok {
+		output.Issuer = v
+	}
+	output.Warnings = parseWarnings(resource.Data["warnings"])
 	return output, nil
 }
 
@@ -458,5 +488,6 @@ func (c *Sys) ConnectCredentialSpecWithContext(ctx context.Context, name string,
 	if v, ok := resource.Data["message"].(string); ok {
 		output.Message = v
 	}
+	output.Warnings = parseWarnings(resource.Data["warnings"])
 	return output, nil
 }

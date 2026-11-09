@@ -8,16 +8,17 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	_ "crypto/sha512" // registers SHA-384/512 for crypto.Hash.New()
-	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/profiles"
+	"github.com/stephnangue/warden/internal/remotesign"
 	"github.com/stephnangue/warden/logical"
 )
 
@@ -88,22 +89,22 @@ const (
 	oidcAlgES384 = "ES384"
 )
 
-// algSpec describes how to generate and sign for one JWS algorithm. All of the
-// generate / sign / JWK / thumbprint code is driven by this table, so ADDING an
-// algorithm is a single entry here. Enabling it for the issuer additionally means
-// adding the name to oidcSupportedAlgs (below) and to the credential package's
-// assertion_algorithm OneOf validation.
+// algSpec describes how to generate a key for one JWS algorithm. The generate /
+// JWK / thumbprint code is driven by this table; how to sign with each algorithm
+// lives in remotesign, which signs for local and remote keys alike. ADDING an
+// algorithm is an entry here and one in remotesign's alg table. Enabling it for
+// the issuer additionally means adding the name to oidcSupportedAlgs (below) and
+// to the credential package's assertion_algorithm OneOf validation.
 type algSpec struct {
-	hash    crypto.Hash    // signing digest (SHA-256/384/512)
 	curve   elliptic.Curve // the EC curve for ES*, or nil for RSA
 	rsaBits int            // RSA modulus size for RS*, 0 for EC
 }
 
 var oidcAlgSpecs = map[string]algSpec{
-	oidcAlgRS256: {hash: crypto.SHA256, rsaBits: 2048},
-	oidcAlgRS384: {hash: crypto.SHA384, rsaBits: 3072},
-	oidcAlgES256: {hash: crypto.SHA256, curve: elliptic.P256()},
-	oidcAlgES384: {hash: crypto.SHA384, curve: elliptic.P384()},
+	oidcAlgRS256: {rsaBits: 2048},
+	oidcAlgRS384: {rsaBits: 3072},
+	oidcAlgES256: {curve: elliptic.P256()},
+	oidcAlgES384: {curve: elliptic.P384()},
 }
 
 // oidcSupportedAlgs is the subset of oidcAlgSpecs the issuer actually maintains a
@@ -354,27 +355,46 @@ func generateSigningKey(alg string) (*signingKey, error) {
 type AssertionClaims struct {
 	// Audience is the `aud` — the upstream the assertion is minted for. Required.
 	Audience string
-	// TTL is the assertion lifetime (`exp` = iat + TTL). Must be positive.
+	// TTL is the REQUESTED assertion lifetime. Must be positive. The issuer mints
+	// with min(TTL, its own AssertionTTL()), so `exp` = iat + that minimum: a caller
+	// can shorten an assertion but never lengthen it past the issuer's lifetime at
+	// mint time.
 	TTL time.Duration
 	// Alg selects the signing key/algorithm (e.g. RS256, ES256).
 	Alg string
-	// Metadata, when non-empty, is embedded under a single nested
-	// "warden_metadata" claim (never splatted at the top level, so it cannot
-	// clobber a registered or warden_* claim). The caller chooses and bounds what
-	// it contains: the assertion crosses a trust boundary, so only
-	// operator-allowlisted, size-capped attributes should reach this point.
+	// Metadata is the agent's projected login metadata offered to the profile. Under
+	// the DEFAULT profile it is embedded under a single nested "warden_metadata"
+	// claim at the agent's level (never splatted, so it cannot clobber a registered
+	// or warden_* claim); another profile may render it elsewhere or drop it. The
+	// caller chooses and bounds what it contains: the assertion crosses a trust
+	// boundary, so only operator-allowlisted, size-capped attributes should reach
+	// this point.
 	Metadata map[string]string
 	// Resource, when non-empty, is emitted as the top-level "warden_resource"
 	// claim naming the single downstream resource the assertion targets, so a
 	// verifier evaluating bound claims can pin it to one resource. Opaque string.
 	Resource string
-	// UserClaims, when non-empty, is embedded under a single nested "warden_user"
-	// claim identifying the secondary (user) principal the agent acts on behalf of
-	// — its identity "sub" plus operator-allowlisted, size-capped user attributes.
-	// Nested (never splatted at the top level) so it cannot clobber a registered or
-	// warden_* claim. The assertion `sub` stays the AGENT; a verifier's templated
-	// policy scopes the authorized path on warden_user, keeping the agent binding.
+	// UserClaims are the secondary (user) principal's projected claims — its
+	// identity "sub" plus operator-allowlisted, size-capped attributes. They are set
+	// whenever the spec lists assertion_user_claims, including when the user is NOT
+	// disclosed (User nil), so a profile must decide what to render from User, never
+	// from UserClaims. Under the DEFAULT profile, with User set, they become the
+	// user level's warden_metadata (minus sub); with User nil they are not rendered.
 	UserClaims map[string]string
+	// User is the user principal's identity (namespace, mount, principal, role and
+	// its own verified act chain), DISCLOSED to the profile only for the subject
+	// slot of a spec that lists assertion_user_claims on a source whose verifier
+	// can bind claims beyond iss, sub and aud; nil otherwise. A profile that renders
+	// the user as a principal reads it from here: the DEFAULT profile then names the
+	// user as sub and moves the agent to an RFC 8693 act claim. Projected once per
+	// request, off the signing path.
+	User *credential.AssertionIdentity
+	// Profile selects the claim SHAPE. A nil Profile selects the default profile.
+	//
+	// The nil fallback is compatibility, not fail-open: a spec naming a profile this
+	// build does not have fails closed in buildAssertionSetup, before any cache
+	// interaction, so nil here only ever means "no caller opinion".
+	Profile credential.AssertionProfile
 }
 
 // MintIdentityAssertion signs a short-lived JWT with the alg-selected signing key,
@@ -382,6 +402,11 @@ type AssertionClaims struct {
 // fails closed when the issuer has no active key for c.Alg or when c.Audience is
 // empty (an assertion without an audience is replayable at any upstream whose trust
 // policy does not pin `aud`).
+//
+// c.Profile chooses the CLAIM SHAPE; nil selects the default profile. The issuer
+// computes iss/aud/iat/nbf/exp/jti and then re-checks them against what the profile
+// rendered (validateProfileClaims), so a buggy profile cannot mint an assertion
+// with no exp, a foreign iss or a stretched lifetime.
 func (i *OIDCIssuer) MintIdentityAssertion(ctx context.Context, te *logical.TokenEntry, c AssertionClaims) (string, error) {
 	if te == nil {
 		return "", fmt.Errorf("oidc issuer: nil token entry")
@@ -403,6 +428,24 @@ func (i *OIDCIssuer) MintIdentityAssertion(ctx context.Context, te *logical.Toke
 	}
 	issuerURL := i.issuerURL
 	leeway := i.clockSkewLeeway
+	// Cap the requested lifetime at the issuer's own. Retired signing keys are
+	// pruned once they have been retired for assertionTTL + grace, on the premise
+	// that no assertion they signed can still be live — so an assertion allowed to
+	// outlive assertionTTL could outlive its key and fail verification upstream,
+	// intermittently, gated on rotation timing. With the cap, no mint can exceed the
+	// issuer's lifetime as it stands AT MINT, whatever the caller passes.
+	//
+	// What the cap does NOT cover: pruning reads assertionTTL as it stands AT PRUNE
+	// time. Lower the issuer TTL by more than the retired-key grace, and assertions
+	// minted under the old, longer value can still outlive their key. Closing that
+	// needs pruning to track the longest lifetime a key actually signed — a
+	// rotation-side change, out of scope here.
+	//
+	// Capped rather than rejected, and read under this same lock: assertionTTL can
+	// change at runtime, so a caller that read the old value just before an
+	// operator lowered it would otherwise fail a legitimate request. A shorter
+	// lifetime is always safe.
+	ttl := min(c.TTL, i.assertionTTL)
 	i.mu.RUnlock()
 
 	if active == nil {
@@ -414,45 +457,180 @@ func (i *OIDCIssuer) MintIdentityAssertion(ctx context.Context, te *logical.Toke
 		return "", fmt.Errorf("oidc issuer: %w", err)
 	}
 
+	profile := c.Profile
+	if profile == nil {
+		profile = profiles.Default()
+	}
+	// The registry refuses a blank typ at registration, but Profile is an exported
+	// field a core caller can populate with an unregistered profile, so re-check
+	// here. Whitespace counts as blank: a typ of " " is functionally no typ.
+	typ := profile.Typ()
+	if strings.TrimSpace(typ) == "" {
+		return "", fmt.Errorf("oidc issuer: assertion profile %q has a blank typ header", profile.Name())
+	}
+
+	// The time fields and jti are the ISSUER's to compute; the profile only formats
+	// them. That is what lets validateProfileClaims below compare them exactly.
 	now := time.Now()
-	claims := map[string]interface{}{
-		"iss": issuerURL,
-		// sub is the composite Warden subject "wid:{ns_id}:{mount_accessor}:{principal_id}"; warden_sub below
-		// carries the raw principal id on its own, so a verifier can bind the principal
-		// directly without having to parse the composite sub.
-		"sub":               wardenSubject(te),
-		"aud":               c.Audience,
-		"iat":               now.Unix(),
-		"nbf":               now.Add(-leeway).Unix(),
-		"exp":               now.Add(c.TTL).Unix(),
-		"jti":               jti,
-		"warden_sub":        te.PrincipalID,
-		"warden_role":       te.RoleName,
-		"warden_namespace":  te.NamespacePath,
-		"warden_auth_mount": te.MountAccessor,
+	req := credential.AssertionRequest{
+		Issuer:     issuerURL,
+		Identity:   identityFromTokenEntry(te),
+		Audience:   c.Audience,
+		IssuedAt:   now,
+		NotBefore:  now.Add(-leeway),
+		ExpiresAt:  now.Add(ttl),
+		JTI:        jti,
+		Metadata:   c.Metadata,
+		Resource:   c.Resource,
+		UserClaims: c.UserClaims,
+		User:       c.User,
 	}
-	if len(c.Metadata) > 0 {
-		claims["warden_metadata"] = c.Metadata
+
+	claims, err := profile.Claims(req)
+	if err != nil {
+		return "", fmt.Errorf("oidc issuer: assertion profile %q: %w", profile.Name(), err)
 	}
-	if len(c.UserClaims) > 0 {
-		claims["warden_user"] = c.UserClaims
+	if err := validateProfileClaims(claims, req); err != nil {
+		return "", fmt.Errorf("oidc issuer: assertion profile %q: %w", profile.Name(), err)
 	}
-	if c.Resource != "" {
-		claims["warden_resource"] = c.Resource
-	}
-	header := map[string]string{"alg": active.alg, "typ": "JWT", "kid": active.kid}
+
+	// No alg here: signJWT sets it from the key, so the header cannot name another.
+	header := map[string]string{"typ": typ, "kid": active.kid}
 
 	return signJWT(ctx, active, header, claims)
 }
 
-// wardenSubject builds the globally-unique subject of a minted assertion:
-// "wid:{namespaceID}:{mountAccessor}:{principalID}". namespaceID and the mount
-// accessor are Warden-generated and delimiter-free; the possibly-delimiter-bearing
-// principal (e.g. a SPIFFE ID) is the trailing segment, so the value is
-// unambiguous and an operator can bind a role to a mount with a `sub` StringLike
-// prefix "wid:{nsID}:{accessor}:*".
+// identityFromTokenEntry projects a token entry onto the plain identity struct a
+// profile renders. It exists because package credential cannot import logical
+// (logical imports credential), so the profile interface must not name TokenEntry.
+//
+// The act chain is COPIED, so a profile can never alias the token entry's slice,
+// which the token cache shares across requests. The copy is made only when a chain
+// exists, so the common path allocates nothing.
+func identityFromTokenEntry(te *logical.TokenEntry) credential.AssertionIdentity {
+	var actors []credential.AssertionActor
+	if len(te.Actors) > 0 {
+		actors = make([]credential.AssertionActor, len(te.Actors))
+		for i, a := range te.Actors {
+			actors[i] = credential.AssertionActor{Subject: a.Subject, Issuer: a.Issuer}
+		}
+	}
+	return credential.AssertionIdentity{
+		PrincipalID:   te.PrincipalID,
+		RoleName:      te.RoleName,
+		NamespaceID:   te.NamespaceID,
+		NamespacePath: te.NamespacePath,
+		MountAccessor: te.MountAccessor,
+		Actors:        actors,
+	}
+}
+
+// validateProfileClaims is the fail-closed guard between a profile and the signer,
+// so a buggy profile can never mint an assertion with no `exp`, a foreign `iss`, or
+// a stretched lifetime. Every check is an EXACT match against the issuer-computed
+// value — the profile formats those values, it does not choose them.
+//
+// The checks are type switches rather than bare `==` against an `any` so a profile
+// that emits the right number in the wrong type gets told that, instead of the
+// misleading "exp mismatch" an interface comparison would report.
+//
+// `sub` is deliberately the exception: its format is the profile's whole point, so
+// only presence and non-emptiness are checked, never content. iat and nbf are
+// optional per RFC 7519, but must match when present.
+//
+// Scope: this guards against a BUGGY profile, not a hostile one. Profiles are
+// compiled in, so profile code is as trusted as the issuer itself; there is
+// deliberately no allowlist of emittable claim names, because inventing claims
+// (`act`, a packed `sub`) is the entire feature. What it does guarantee is that no
+// profile can widen a security property the issuer owns — the issuer's `iss`, the
+// caller's `aud`, the configured lifetime, or the replay id.
+func validateProfileClaims(claims map[string]any, req credential.AssertionRequest) error {
+	if claims == nil {
+		return fmt.Errorf("returned no claims")
+	}
+
+	if err := requireStringClaim(claims, "iss", req.Issuer); err != nil {
+		return err
+	}
+	if err := requireStringClaim(claims, "aud", req.Audience); err != nil {
+		return err
+	}
+	if err := requireStringClaim(claims, "jti", req.JTI); err != nil {
+		return err
+	}
+
+	// sub: present and a non-empty string; format is the profile's to choose.
+	rawSub, ok := claims["sub"]
+	if !ok {
+		return fmt.Errorf("claim %q is missing", "sub")
+	}
+	sub, ok := rawSub.(string)
+	if !ok {
+		return fmt.Errorf("claim %q must be string, got %T", "sub", rawSub)
+	}
+	if sub == "" {
+		return fmt.Errorf("claim %q must not be empty", "sub")
+	}
+
+	// exp is mandatory and exact: TTL is not profile scope, so a profile that
+	// stretches (or shortens) the lifetime is buggy by definition.
+	if err := requireTimeClaim(claims, "exp", req.ExpiresAt, true); err != nil {
+		return err
+	}
+	// iat and nbf are OPTIONAL (RFC 7519 marks both so), but exact when present.
+	if err := requireTimeClaim(claims, "iat", req.IssuedAt, false); err != nil {
+		return err
+	}
+	if err := requireTimeClaim(claims, "nbf", req.NotBefore, false); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// requireStringClaim asserts that claims[name] is present and exactly want.
+func requireStringClaim(claims map[string]any, name, want string) error {
+	raw, ok := claims[name]
+	if !ok {
+		return fmt.Errorf("claim %q is missing", name)
+	}
+	got, ok := raw.(string)
+	if !ok {
+		return fmt.Errorf("claim %q must be string, got %T", name, raw)
+	}
+	if got != want {
+		return fmt.Errorf("claim %q must be %q, got %q", name, want, got)
+	}
+	return nil
+}
+
+// requireTimeClaim asserts that claims[name], if required or present, is an int64
+// Unix-second encoding of want. A non-int64 numeric type is named as the type
+// defect it is rather than reported as a value mismatch.
+func requireTimeClaim(claims map[string]any, name string, want time.Time, required bool) error {
+	raw, ok := claims[name]
+	if !ok {
+		if required {
+			return fmt.Errorf("claim %q is missing", name)
+		}
+		return nil
+	}
+	got, ok := raw.(int64)
+	if !ok {
+		return fmt.Errorf("claim %q must be int64 Unix seconds, got %T", name, raw)
+	}
+	if got != want.Unix() {
+		return fmt.Errorf("claim %q must be %d, got %d", name, want.Unix(), got)
+	}
+	return nil
+}
+
+// wardenSubject builds the globally-unique subject of a minted assertion. The
+// implementation and its rationale now live on credential.AssertionIdentity, which
+// is where a profile reaches it; this stays as the core-side spelling used by
+// cacheIdentity.
 func wardenSubject(te *logical.TokenEntry) string {
-	return fmt.Sprintf("wid:%s:%s:%s", te.NamespaceID, te.MountAccessor, te.PrincipalID)
+	return identityFromTokenEntry(te).WardenSubject()
 }
 
 // JWKS returns the JSON Web Key Set (the active key, the pre-published next key,
@@ -609,18 +787,10 @@ func ecThumbprint(pub *ecdsa.PublicKey) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
 }
 
-// ecByteLen is the byte width of a coordinate or signature scalar on curve c
-// (e.g. 32 for P-256, 48 for P-384).
+// ecByteLen is the byte width of a coordinate on curve c (e.g. 32 for P-256, 48
+// for P-384).
 func ecByteLen(c elliptic.Curve) int {
 	return (c.Params().BitSize + 7) / 8
-}
-
-// ecCoord renders an EC coordinate (or ECDSA signature scalar) as a fixed
-// byteLen-wide big-endian slice — the width JWK/JWS require, left-padded with zeros.
-func ecCoord(n *big.Int, byteLen int) []byte {
-	b := make([]byte, byteLen)
-	n.FillBytes(b)
-	return b
 }
 
 // bigEndianExponent renders an RSA public exponent as a minimal big-endian byte
@@ -633,74 +803,17 @@ func bigEndianExponent(e int) []byte {
 	return b
 }
 
-// signJWT signs header+claims as a compact JWS using the key's algorithm. It
-// signs through the crypto.Signer interface (sk.key), so the same path serves a
-// local in-process key and a remote signer that holds no key material and reaches
-// an external KMS to sign. A signer that honors context binds ctx to that call so
-// the mint request's deadline/cancellation reaches the KMS round-trip. Kept
-// self-contained (the driver package has an equivalent private signer; core does
-// not reach into it).
+// signJWT signs header+claims as a compact JWS with the key's algorithm. The
+// encoding is remotesign's, the one path a local in-process key and a remote KMS
+// signer both go through, so the two cannot drift apart in header handling or
+// ECDSA width. The alg header always comes from sk.alg, and the mint request's
+// deadline/cancellation reaches the KMS round-trip of a signer that honors context.
 func signJWT(ctx context.Context, sk *signingKey, header map[string]string, claims map[string]interface{}) (string, error) {
-	headerJSON, err := json.Marshal(header)
+	jws, err := remotesign.SignCompactJWS(ctx, sk.key, sk.alg, header, claims)
 	if err != nil {
-		return "", fmt.Errorf("oidc issuer: marshal header: %w", err)
+		return "", fmt.Errorf("oidc issuer: %w", err)
 	}
-	claimsJSON, err := json.Marshal(claims)
-	if err != nil {
-		return "", fmt.Errorf("oidc issuer: marshal claims: %w", err)
-	}
-	spec, ok := oidcAlgSpecs[sk.alg]
-	if !ok {
-		return "", fmt.Errorf("oidc issuer: unsupported signing algorithm %q", sk.alg)
-	}
-	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
-	h := spec.hash.New()
-	h.Write([]byte(signingInput))
-	digest := h.Sum(nil)
-
-	// Bind the request context if the signer supports it (the remote KMS signer
-	// does; a local *rsa/*ecdsa key does not and ignores ctx).
-	signer := sk.key
-	if b, ok := signer.(interface {
-		WithContext(context.Context) crypto.Signer
-	}); ok && ctx != nil {
-		signer = b.WithContext(ctx)
-	}
-	// crypto.Signer.Sign expects the already-hashed digest and returns, for RSA,
-	// PKCS#1 v1.5 bytes (opts is a plain crypto.Hash, not *rsa.PSSOptions) and, for
-	// ECDSA, an ASN.1/DER SEQUENCE{r,s}.
-	sig, err := signer.Sign(rand.Reader, digest, spec.hash)
-	if err != nil {
-		return "", fmt.Errorf("oidc issuer: sign: %w", err)
-	}
-	if spec.curve != nil {
-		// JWS ES* signature is the fixed-width concatenation R‖S (each the curve's
-		// coordinate width), NOT the ASN.1/DER form crypto.Signer produces for ECDSA.
-		sig, err = ecSigASN1ToJWS(sig, spec.curve)
-		if err != nil {
-			return "", err
-		}
-	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
-}
-
-// ecSigASN1ToJWS converts an ECDSA signature from the ASN.1/DER SEQUENCE{r,s} form
-// that crypto.Signer produces into the fixed-width R‖S concatenation JWS requires
-// (each scalar the curve's coordinate width, left-padded with zeros).
-func ecSigASN1ToJWS(der []byte, curve elliptic.Curve) ([]byte, error) {
-	var parsed struct{ R, S *big.Int }
-	rest, err := asn1.Unmarshal(der, &parsed)
-	if err != nil {
-		return nil, fmt.Errorf("oidc issuer: parse ECDSA signature: %w", err)
-	}
-	if len(rest) != 0 {
-		return nil, fmt.Errorf("oidc issuer: trailing bytes after ECDSA signature")
-	}
-	if parsed.R == nil || parsed.S == nil || parsed.R.Sign() <= 0 || parsed.S.Sign() <= 0 {
-		return nil, fmt.Errorf("oidc issuer: invalid ECDSA signature scalars")
-	}
-	n := ecByteLen(curve)
-	return append(ecCoord(parsed.R, n), ecCoord(parsed.S, n)...), nil
+	return jws, nil
 }
 
 // randomJTI returns a random assertion identifier.

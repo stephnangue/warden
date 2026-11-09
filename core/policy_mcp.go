@@ -4,7 +4,9 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,7 +15,7 @@ import (
 )
 
 // MCP rule_type values produced by AllowOperation when evaluating an
-// mcp { } block. These strings appear in audit records under
+// MCP rule-set. These strings appear in audit records under
 // auth.policy_results.mcp_decision.rule_type and the response-body
 // renderer keys off them to pick the per-rule-type message template.
 //
@@ -44,12 +46,20 @@ const (
 	mcpRuleTypeConditionError   = "condition_error"
 	mcpRuleTypeMissingMethod    = "missing_method_header"
 
+	// mcpRuleTypeHeaderMismatch denies a request whose MCP transport headers
+	// contradict, or fail to describe, the body Warden parsed. Structural
+	// rather than a policy decision: no contract was consulted to reach it,
+	// and no contract can permit it.
+	mcpRuleTypeHeaderMismatch = "header_mismatch"
+
 	mcpRuleTypeMissingBody      = "missing_body"
 	mcpRuleTypeMalformedJSONRPC = "malformed_jsonrpc"
 	mcpRuleTypeDuplicateKey     = "duplicate_key"
 	mcpRuleTypeOversizedBody    = "oversized_body"
 	mcpRuleTypeBatchEmpty       = "batch_empty"
 	mcpRuleTypeMalformedParams  = "malformed_params"
+	mcpRuleTypeBatchUnsupported = "batch_unsupported"
+	mcpRuleTypeBatchTooLarge    = logical.MCPParseKindBatchTooLarge
 
 	// mcpRuleTypeBatchListUnfilterable denies an otherwise-allowed batch
 	// that contains a list method. A batched JSON-RPC list response can't
@@ -57,6 +67,17 @@ const (
 	// than stream an unfiltered list. (JSON-RPC batching was dropped from
 	// the MCP spec in 2025-06-18.)
 	mcpRuleTypeBatchListUnfilterable = "batch_list_unfilterable"
+
+	// mcpRuleTypeNoMCPPolicy denies an MCP-shaped request on a path with no
+	// MCP policy in scope, or only denied lists that don't name the call. No
+	// rule-set is chosen — none can allow anything — so unlike every other
+	// rule type it carries no matched rule and no policy name.
+	//
+	// This is the absence rule, distinct from the deny-by-default *inside* a
+	// rule-set: an empty allow-list refuses every call the set covers, while
+	// this refuses calls no set covers at all. Together they mean MCP traffic
+	// always answers to an explicit contract.
+	mcpRuleTypeNoMCPPolicy = "no_mcp_policy"
 )
 
 // MCP JSON-RPC method names that carry name-bearing semantics. For
@@ -67,6 +88,46 @@ const (
 	mcpMethodToolsCall     = "tools/call"
 	mcpMethodResourcesRead = "resources/read"
 	mcpMethodPromptsGet    = "prompts/get"
+)
+
+// mcpMethodServerDiscover is the 2026-07-28 revision's MUST-implement
+// discovery RPC, which a modern client sends as the first request of every
+// HTTP connection. It replaces initialize's role at the head of a session
+// without establishing one.
+const mcpMethodServerDiscover = "server/discover"
+
+// mcpMethodSubscriptionsListen opens a stream of server notifications. It is
+// name-bearing in a shape of its own: not one name, but a list of resource
+// URIs in params.notifications.resourceSubscriptions, each gated against the
+// resources family.
+const mcpMethodSubscriptionsListen = "subscriptions/listen"
+
+// mcpMethodResourcesSubscribe is the legacy-era way to obtain the same
+// notifications/resources/updated stream that subscriptions/listen carries in
+// 2026-07-28. It names one URI in params.uri and belongs to the resources
+// family for the same reason: subscribing to a resource's update stream leaks
+// its existence and the timing of every change, so it answers to the grant
+// that governs reading it. Warden fronts both eras, so gating only the modern
+// spelling would leave the leak reachable one method name over.
+const mcpMethodResourcesSubscribe = "resources/subscribe"
+
+// The Skills extension (SEP-2640) builds skills on the resources primitive:
+// every file of a skill is a resource, and a skill is addressed by the URI of
+// its SKILL.md. So both of its URI-bearing methods answer to the resources
+// family rather than to a family of their own. One grant covers listing a
+// skill, fetching its entry and reading its files, and a skill the caller may
+// not read cannot be described or enumerated one method name over (the
+// listing side is mcpListMethodToCall).
+//
+//   - skills/get names a skill by params.uri and returns its entry: the
+//     frontmatter plus the URI, digest and size of every file. It is gated
+//     exactly as a read of that SKILL.md URI would be.
+//   - resources/directory/read names a directory by params.uri and lists its
+//     direct children. Enumerating a subtree is what resources/list filtering
+//     hides, so the directory URI is gated as a read would be.
+const (
+	mcpMethodSkillsGet              = "skills/get"
+	mcpMethodResourcesDirectoryRead = "resources/directory/read"
 )
 
 // ErrMCPPolicyDenied carries the MCPDecision that produced a deny so
@@ -85,6 +146,48 @@ func (e *ErrMCPPolicyDenied) Error() string {
 func (e *ErrMCPPolicyDenied) Unwrap() error {
 	return sdklogical.ErrPermissionDenied
 }
+
+// MCPDenyDescription lets a provider's gateway error renderer, which cannot
+// import core, word the refusal as the HTTP layer would.
+func (e *ErrMCPPolicyDenied) MCPDenyDescription() string {
+	return BuildMCPDenyDescription(e.Decision)
+}
+
+var _ logical.MCPPolicyRefusal = (*ErrMCPPolicyDenied)(nil)
+
+// ErrMCPHeaderMismatch carries a transport-header refusal, which the HTTP
+// layer renders as a protocol-level JSON-RPC error rather than the
+// OAuth-shaped 403 a policy denial gets.
+//
+// It is a separate type from ErrMCPPolicyDenied precisely so it can be
+// branched on ahead of it: both denials arrive through the same MCPDecision
+// channel, and without the distinction a header mismatch would be reported
+// to the client as an authorization failure — which would send a dual-era
+// client downgrading to initialize instead of correcting its headers.
+//
+// RawID travels on the error rather than on MCPDecision, which has no id
+// field and should not grow one: the decision is a fingerprint-hygiene
+// surface, and an echoed id is adversary-controlled bytes.
+type ErrMCPHeaderMismatch struct {
+	Decision  *logical.MCPDecision
+	RawID     json.RawMessage
+	IDPresent bool
+}
+
+func (e *ErrMCPHeaderMismatch) Error() string {
+	return sdklogical.ErrPermissionDenied.Error()
+}
+
+func (e *ErrMCPHeaderMismatch) Unwrap() error {
+	return sdklogical.ErrPermissionDenied
+}
+
+// MCPHeaderMismatch marks the error for a provider's gateway error renderer,
+// which cannot import core. The renderer takes the id to echo from the
+// request's descriptor, the same place RawID came from.
+func (e *ErrMCPHeaderMismatch) MCPHeaderMismatch() {}
+
+var _ logical.MCPHeaderRefusal = (*ErrMCPHeaderMismatch)(nil)
 
 // matchMCPGlob matches a request value against a single canonicalised
 // pattern. Patterns use trailing-`*` only (validated at parse time); a
@@ -122,7 +225,7 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 	switch method {
 	case mcpMethodToolsCall:
 		return set.DeniedTools, set.AllowedTools
-	case mcpMethodResourcesRead:
+	case mcpMethodResourcesRead, mcpMethodResourcesSubscribe, mcpMethodResourcesDirectoryRead, mcpMethodSkillsGet:
 		return set.DeniedResources, set.AllowedResources
 	case mcpMethodPromptsGet:
 		return set.DeniedPrompts, set.AllowedPrompts
@@ -135,22 +238,121 @@ func nameListForMethod(set *CBPMCPRules, method string) (denyList, allowList []s
 // survives iff a tools/call for it would pass, and likewise resources/list →
 // resources/read and prompts/list → prompts/get. A method absent from this map
 // is not a filterable list method.
+//
+// resources/subscribe is name-bearing under the same family but deliberately
+// absent as a target: a listed resource survives filtering iff a read of it
+// would pass, and checking a subscribe instead would prune listings by the
+// wrong gate.
+//
+// The Skills extension adds two:
+//   - a skills/list entry survives iff a skills/get for its SKILL.md uri
+//     would pass;
+//   - a resources/directory/read child survives iff a read of it would pass.
+//     The method is also name-bearing, so the directory URI itself was
+//     already gated before the filter is attached. Children are kept by the
+//     read gate, so a contract allowing directory reads but not
+//     resources/read lists an empty directory, as tools/list without
+//     tools/call lists no tools.
 var mcpListMethodToCall = map[string]string{
-	"tools/list":     mcpMethodToolsCall,
-	"resources/list": mcpMethodResourcesRead,
-	"prompts/list":   mcpMethodPromptsGet,
+	"tools/list":               mcpMethodToolsCall,
+	"resources/list":           mcpMethodResourcesRead,
+	"prompts/list":             mcpMethodPromptsGet,
+	"skills/list":              mcpMethodSkillsGet,
+	"resources/directory/read": mcpMethodResourcesRead,
+}
+
+// hasDenied reports whether the rule-set has any denied list.
+func (r *CBPMCPRules) hasDenied() bool {
+	return len(r.DeniedMethods)+len(r.DeniedTools)+len(r.DeniedResources)+len(r.DeniedPrompts) > 0
+}
+
+// denyOnly reports whether the rule-set has denied lists and no allowed list,
+// so it can refuse calls and can allow none.
+func (r *CBPMCPRules) denyOnly() bool {
+	return r.hasDenied() && len(r.AllowedMethods)+len(r.AllowedTools)+len(r.AllowedResources)+len(r.AllowedPrompts) == 0
+}
+
+// mcpDeniedSets counts the rule-sets of policy that have a denied list.
+func mcpDeniedSets(policy *Policy) int {
+	n := 0
+	for _, pc := range policy.Paths {
+		if pc.Permissions == nil {
+			continue
+		}
+		for _, m := range pc.Permissions.MCP {
+			if m.hasDenied() {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// mcpDeniedMethod is the denied_methods check of one rule-set.
+func mcpDeniedMethod(set *CBPMCPRules, method, name string) *logical.MCPDecision {
+	if m := matchMCPAny(method, set.DeniedMethods); m != "" {
+		return &logical.MCPDecision{Method: method, Name: name, Decision: "deny", RuleType: mcpRuleTypeDeniedMethods, MatchedRule: m}
+	}
+	return nil
+}
+
+// mcpDeniedName is the check of a call's name against the denied list of its
+// family.
+func mcpDeniedName(set *CBPMCPRules, method, name string) *logical.MCPDecision {
+	if !isNameBearingMethod(method) {
+		return nil
+	}
+	denyList, _ := nameListForMethod(set, method)
+	if m := matchMCPAny(name, denyList); m != "" {
+		return &logical.MCPDecision{Method: method, Name: name, Decision: "deny", RuleType: mcpDenyRuleTypeForName(method), MatchedRule: m}
+	}
+	return nil
+}
+
+// mcpDeniedURI is the check of one subscribed URI against denied_resources. It
+// stamps the URI as sent, not the lowered form it compares.
+func mcpDeniedURI(set *CBPMCPRules, method, uri string) *logical.MCPDecision {
+	if m := matchMCPAny(strings.ToLower(uri), set.DeniedResources); m != "" {
+		return &logical.MCPDecision{Method: method, Name: uri, Decision: "deny", RuleType: mcpRuleTypeDeniedResources, MatchedRule: m}
+	}
+	return nil
+}
+
+// mcpDeniedDecision runs every denied list of one rule-set against a call: the
+// checks that are final across rule-sets. method and name are lowercased; call
+// is nil at list time, when no URIs exist.
+func mcpDeniedDecision(set *CBPMCPRules, method, name string, call *logical.MCPCall) *logical.MCPDecision {
+	if d := mcpDeniedMethod(set, method, name); d != nil {
+		return d
+	}
+	if d := mcpDeniedName(set, method, name); d != nil {
+		return d
+	}
+	if call != nil && method == mcpMethodSubscriptionsListen {
+		for _, uri := range call.URIs {
+			if d := mcpDeniedURI(set, method, uri); d != nil {
+				return d
+			}
+		}
+	}
+	return nil
 }
 
 // mcpListItemAllowed reports whether a name-bearing call (callMethod) for the
-// named item would pass the structural gates of at least one rule-set —
-// mirroring evaluateMCPCall's cross-set OR, but WITHOUT the CEL condition:
-// list responses carry no call arguments, so arg-level conditions are deferred
-// to call time (a condition-gated tool stays listed). This is the keep-
-// predicate behind Request.MCPListFilter. Inputs are lowercased here to match
-// the canonicalised rule-set patterns.
-func mcpListItemAllowed(sets []*CBPMCPRules, callMethod, name string) bool {
+// named item would pass the structural gates of at least one rule-set and no
+// denied list of any — mirroring evaluateMCPCall, but WITHOUT the CEL
+// condition: list responses carry no call arguments, so arg-level conditions
+// are deferred to call time (a condition-gated tool stays listed). This is the
+// keep-predicate behind Request.MCPListFilter. Inputs are lowercased here to
+// match the canonicalised rule-set patterns.
+func mcpListItemAllowed(sets, denies []*CBPMCPRules, callMethod, name string) bool {
 	method := strings.ToLower(callMethod)
 	lname := strings.ToLower(name)
+	for _, set := range denies {
+		if mcpDeniedDecision(set, method, lname, nil) != nil {
+			return false
+		}
+	}
 	for _, set := range sets {
 		if set == nil {
 			continue
@@ -173,9 +375,35 @@ func mcpListItemAllowed(sets []*CBPMCPRules, callMethod, name string) bool {
 //     JSON-RPC list response can't be pruned per element, and streaming it
 //     unfiltered would leak denied items.
 //   - Anything else (non-list call, no descriptor) → returns nil, no filter.
-func attachMCPListFilter(req *logical.Request, sets []*CBPMCPRules) *logical.MCPDecision {
+func attachMCPListFilter(req *logical.Request, sets, denies []*CBPMCPRules) *logical.MCPDecision {
 	desc := req.MCPDescriptor
 	if desc == nil || len(desc.Calls) == 0 {
+		return nil
+	}
+
+	// An in-process server sees each call's answer before the client does,
+	// so every list call is filtered, inside a batch as well, through one
+	// filter per list method.
+	if desc.InProcess {
+		for i := range desc.Calls {
+			method := strings.ToLower(desc.Calls[i].Method)
+			callMethod, ok := mcpListMethodToCall[method]
+			if !ok || mcpKeepsEveryItem(sets, denies, callMethod) {
+				continue
+			}
+			if _, done := req.MCPListFilters[method]; done {
+				continue
+			}
+			if req.MCPListFilters == nil {
+				req.MCPListFilters = make(map[string]*logical.MCPListFilter, 1)
+			}
+			req.MCPListFilters[method] = &logical.MCPListFilter{
+				ListMethod: method,
+				Keep: func(name string) bool {
+					return mcpListItemAllowed(sets, denies, callMethod, name)
+				},
+			}
+		}
 		return nil
 	}
 
@@ -193,34 +421,110 @@ func attachMCPListFilter(req *logical.Request, sets []*CBPMCPRules) *logical.MCP
 	if !ok {
 		return nil
 	}
+
+	// A filter that keeps everything is not free: the gateway has to buffer the
+	// whole upstream response to rewrite it, and fails closed above
+	// max_body_size. Attaching one to a deliberately unrestricted mount would
+	// make the sanctioned wildcard contract more brittle than the absence it
+	// replaces, so skip it and leave the response streaming.
+	if mcpKeepsEveryItem(sets, denies, callMethod) {
+		return nil
+	}
+
 	req.MCPListFilter = &logical.MCPListFilter{
 		ListMethod: method,
 		Keep: func(name string) bool {
-			return mcpListItemAllowed(sets, callMethod, name)
+			return mcpListItemAllowed(sets, denies, callMethod, name)
 		},
 	}
 	return nil
 }
 
+// mcpKeepsEveryItem reports whether the keep-predicate would admit every
+// possible name, making the filter a no-op worth skipping.
+//
+// It models mcpListItemAllowed exactly, and must keep doing so: that predicate
+// checks the denied lists and runs evaluateMCPGates, which for a fixed
+// callMethod can refuse a name in three ways — a denied_methods match, an allowed_methods miss, or the family
+// gate. One set clearing all three admits every name, since the predicate ORs
+// across sets, unless a denied list that applies to this method could exclude a
+// name: those are final, whichever rule-set holds them.
+//
+// Conditions are deliberately not considered, because the predicate does not
+// consider them either: list responses carry no call arguments, so a
+// condition-gated tool stays listed and is refused at call time instead.
+// Treating a condition as a reason to keep the filter would buffer the whole
+// response to prune nothing. If list filtering ever becomes condition-aware,
+// this has to change with it.
+func mcpKeepsEveryItem(sets, denies []*CBPMCPRules, callMethod string) bool {
+	for _, set := range denies {
+		denyList, _ := nameListForMethod(set, callMethod)
+		if len(denyList) > 0 || matchMCPAny(callMethod, set.DeniedMethods) != "" {
+			return false
+		}
+	}
+	for _, set := range sets {
+		// Only a deny entry that can actually match this method excludes a
+		// name; an unrelated one cannot.
+		if matchMCPAny(callMethod, set.DeniedMethods) != "" {
+			continue
+		}
+		if matchMCPAny(callMethod, set.AllowedMethods) == "" {
+			continue
+		}
+		denyList, allowList := nameListForMethod(set, callMethod)
+		if len(denyList) > 0 {
+			continue
+		}
+		if slices.Contains(allowList, "*") {
+			return true
+		}
+	}
+	return false
+}
+
+// mcpDescriptorPopulated reports whether the extractor produced a descriptor
+// carrying an actual JSON-RPC body — parsed calls, or a typed parse failure.
+//
+// This is the predicate that separates "MCP-shaped request" from everything
+// else, and it is deliberately narrow. A nil descriptor means the routed
+// backend does not implement MCPPolicyEnforced at all, which covers every
+// non-MCP mount. The empty sentinel means the backend declined this particular
+// request — the body-less verbs MCP Streamable HTTP puts on the same URL as the
+// POST (GET for the notification stream, DELETE to close the session), and
+// every httpproxy provider whose spec leaves the enforcement hook unset.
+// Neither can be judged against a tool contract, so neither is treated as one.
+func mcpDescriptorPopulated(req *logical.Request) bool {
+	if req == nil || req.MCPDescriptor == nil {
+		return false
+	}
+	return req.MCPDescriptor.Calls != nil || req.MCPDescriptor.ParseErr != nil
+}
+
 // decideMCP is the production entry point called from
-// AllowOperation when the matched permissions carry a non-empty
-// mcp { } rule-set slice. It bridges req.MCPDescriptor's four
+// AllowOperation when the MCP index returned a non-empty rule-set
+// slice for the request path, or a denied list reaches it. It bridges req.MCPDescriptor's four
 // terminal states to MCPDecision (see extractMCPDescriptor for how
 // each state is produced):
 //
 //   - Nil descriptor — no MCP-aware backend handled this request.
-//     If an operator bound mcp{} to a non-MCP path, that's a misconfig
-//     and we fail closed with missing_body. This is the safety net.
+//     If an operator bound a contract to a non-MCP path, that's a
+//     misconfig and we fail closed with missing_body. The safety net.
 //
 //   - Non-nil, empty descriptor (Calls nil, ParseErr nil) — the
 //     backend is MCP-aware but ShouldEnforceMCPPolicy declined for
-//     this request (typically a non-POST verb, or a non-JSON
-//     Content-Type). The mcp{} block is body-authoritative; a verb
-//     with no body cannot be governed by method/tool/param allow-
-//     lists, so we return nil to skip mcp{} evaluation and let the
-//     cap-level check decide. This is what makes MCP Streamable
-//     HTTP's GET (notification SSE stream) and DELETE (session
-//     terminate) work on the same URL that POST gates.
+//     this request (a non-POST verb; every POST is enforced). A
+//     contract is body-authoritative; a verb with no body cannot be
+//     governed by method/tool allow-lists, so we return nil to skip
+//     evaluation and let the cap-level check decide. This is what
+//     makes Streamable HTTP's GET (notification stream) and DELETE
+//     (session terminate) work on the same URL that POST gates.
+//
+//     Both verbs are legacy-era. 2026-07-28 removed the GET endpoint
+//     in favour of subscriptions/listen, which is a POST and is
+//     therefore gated like any other call, and left no session for
+//     DELETE to terminate; a modern server answers both 405. The
+//     branch remains for the upstreams that still serve them.
 //
 //   - descriptor.ParseErr non-nil — strict JSON-RPC parse failed.
 //     Deny with the typed rule_type (malformed_jsonrpc, duplicate_key,
@@ -236,8 +540,8 @@ func attachMCPListFilter(req *logical.Request, sets []*CBPMCPRules) *logical.MCP
 // Every returned decision passes through sanitizeMCPDecision so
 // adversary-controlled bytes don't leak into audit or response
 // rendering.
-func decideMCP(sets []*CBPMCPRules, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) *logical.MCPDecision {
-	if len(sets) == 0 {
+func decideMCP(sets, denies []*CBPMCPRules, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) *logical.MCPDecision {
+	if len(sets) == 0 && len(denies) == 0 {
 		return nil
 	}
 	var d *logical.MCPDecision
@@ -251,7 +555,7 @@ func decideMCP(sets []*CBPMCPRules, req *logical.Request, te *logical.TokenEntry
 	case desc.Calls == nil && desc.ParseErr == nil:
 		// Backend opted out of MCP enforcement for this specific
 		// request shape (e.g. non-POST verb on a multi-method MCP
-		// endpoint). The mcp{} block doesn't apply to body-less
+		// endpoint). MCP rules don't apply to body-less
 		// verbs; return nil so the cap-level check decides.
 		return nil
 	case desc.ParseErr != nil:
@@ -260,7 +564,19 @@ func decideMCP(sets []*CBPMCPRules, req *logical.Request, te *logical.TokenEntry
 			RuleType: desc.ParseErr.Kind,
 		}
 	default:
-		d = evaluateMCPDescriptor(sets, desc, req, te, now, nsPath)
+		// Transport headers before contract evaluation: a body whose headers
+		// contradict it is refused on its own terms, without asking any
+		// contract whether the call it claims to be would have been allowed.
+		//
+		// This sits inside decideMCP, which runs only when a contract or a
+		// denied list is in scope, so absence-deny still wins on a path with
+		// neither — the validation result is simply never computed there, and
+		// the request is refused either way.
+		if hd := validateMCPHeaders(req, desc); hd != nil {
+			d = hd
+			break
+		}
+		d = evaluateMCPDescriptor(sets, denies, desc, req, te, now, nsPath)
 		if d == nil {
 			// Defence in depth: evaluateMCPDescriptor returns nil
 			// only for empty sets (handled above) or for a non-nil
@@ -287,12 +603,12 @@ func decideMCP(sets []*CBPMCPRules, req *logical.Request, te *logical.TokenEntry
 // denying call (stamping BatchIndex on the returned decision); allow
 // only if every call allows — single-fail-all-fail per the policy plan.
 //
-// Returns nil when sets is empty (no enforcement) or when the
+// Returns nil when no rule-set applies (no enforcement) or when the
 // descriptor carries no calls. The caller in AllowOperation handles
 // structural failures (nil descriptor, ParseErr non-nil) before
 // invoking this function.
-func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescriptor, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) *logical.MCPDecision {
-	if len(sets) == 0 {
+func evaluateMCPDescriptor(sets, denies []*CBPMCPRules, desc *logical.MCPRequestDescriptor, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) *logical.MCPDecision {
+	if len(sets) == 0 && len(denies) == 0 {
 		return nil
 	}
 	if desc == nil || len(desc.Calls) == 0 {
@@ -303,8 +619,12 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 	// when at least one set carries a CEL condition; nil otherwise so the
 	// common no-condition path allocates nothing extra.
 	var act *celActivation
-	if reqF, tokF, callF, found := mcpConditionFields(sets); found {
-		act = newCELActivation(celRequestInputFromRequest(req, nsPath), reqF, celTokenInputFromEntry(te, now), tokF, now, nil)
+	if reqF, agtF, usrF, callF, found := mcpConditionFields(sets); found {
+		act = newCELActivation(
+			celRequestInputFromRequest(req, nsPath), reqF,
+			celAgentInput(req, te, now), agtF,
+			celUserInputFromRequest(req, now), usrF,
+			now, nil)
 		act.callFields = callF
 	}
 
@@ -315,7 +635,7 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 		if act != nil {
 			act.call = buildCallNS(call.Method, call.Name, call.MatchArgs, call.BatchIndex, act.callFields)
 		}
-		d := evaluateMCPCall(sets, call, act)
+		d := evaluateMCPCall(sets, denies, call, act)
 		if d.Decision == "deny" {
 			if batch {
 				idx := call.BatchIndex
@@ -332,36 +652,53 @@ func evaluateMCPDescriptor(sets []*CBPMCPRules, desc *logical.MCPRequestDescript
 // sets that carry a CEL condition, and whether any condition exists. The union
 // prunes the shared per-request activation to only the fields the conditions
 // read (reused across every call in a batch).
-func mcpConditionFields(sets []*CBPMCPRules) (reqF, tokF, callF fieldSet, found bool) {
+func mcpConditionFields(sets []*CBPMCPRules) (reqF, agtF, usrF, callF fieldSet, found bool) {
 	for _, s := range sets {
 		if s == nil || s.Condition == nil {
 			continue
 		}
 		if !found {
-			reqF, tokF, callF = s.Condition.ReqFields, s.Condition.TokFields, s.Condition.CallFields
+			reqF, agtF, usrF, callF = s.Condition.ReqFields, s.Condition.AgtFields, s.Condition.UsrFields, s.Condition.CallFields
 			found = true
 			continue
 		}
 		reqF = unionFieldSets(reqF, s.Condition.ReqFields)
-		tokF = unionFieldSets(tokF, s.Condition.TokFields)
+		agtF = unionFieldSets(agtF, s.Condition.AgtFields)
+		usrF = unionFieldSets(usrF, s.Condition.UsrFields)
 		callF = unionFieldSets(callF, s.Condition.CallFields)
 	}
 	return
 }
 
-// evaluateMCPCall runs all rule-sets against one MCPCall and applies
-// the cross-set OR / strongest-reason-deny semantics. Lowercases
-// method/name once at the boundary so per-set comparisons stay cheap.
-// act carries the per-call CEL activation (nil when no set has a condition).
-func evaluateMCPCall(sets []*CBPMCPRules, call *logical.MCPCall, act *celActivation) *logical.MCPDecision {
+// evaluateMCPCall checks one MCPCall against every denied list reaching its
+// path, which are final, then runs all rule-sets against it and applies the
+// cross-set OR / strongest-reason-deny semantics. Lowercases method/name once
+// at the boundary so per-set comparisons stay cheap. act carries the per-call
+// CEL activation (nil when no set has a condition).
+func evaluateMCPCall(sets, denies []*CBPMCPRules, call *logical.MCPCall, act *celActivation) *logical.MCPDecision {
 	method := strings.ToLower(call.Method)
 	name := strings.ToLower(call.Name)
+
+	for _, set := range denies {
+		if d := mcpDeniedDecision(set, method, name, call); d != nil {
+			d.PolicyName = set.SourcePolicy
+			return d
+		}
+	}
+	if len(sets) == 0 {
+		// Only denied lists reach this path, and none matched: nothing allows
+		// the call.
+		return &logical.MCPDecision{Decision: "deny", RuleType: mcpRuleTypeNoMCPPolicy}
+	}
 
 	var deny *logical.MCPDecision
 	var denyRank int
 
 	for _, set := range sets {
 		setDecision := evaluateMCPSetForCall(set, method, name, call, act)
+		// Stamp which contract decided, so an audit record can name the policy
+		// rather than only the rule that fired.
+		setDecision.PolicyName = set.SourcePolicy
 		if setDecision.Decision == "allow" {
 			return setDecision
 		}
@@ -382,20 +719,41 @@ func evaluateMCPCall(sets []*CBPMCPRules, call *logical.MCPCall, act *celActivat
 // improving the security posture. An explicit denied_methods entry still
 // blocks them, because the deny gate runs first. method is expected
 // lowercased.
+//
+// The set spans two protocol eras. initialize and ping open and maintain a
+// session in the legacy revisions; server/discover is what the 2026-07-28
+// revision sends instead, as the first request of every HTTP connection.
+// Without the exemption a modern client is forced into a legacy downgrade to
+// initialize on every mount, or fails outright against an upstream that
+// speaks only the modern revision. It discloses protocol versions, coarse
+// capabilities and serverInfo — never tool, resource or prompt names — so
+// exempting it leaks nothing the gate was protecting.
+//
+// subscriptions/listen is deliberately NOT here despite also being new in
+// 2026-07-28: it opens a stream of server notifications, which is data
+// access, and its resource URIs answer to the resources family.
+//
+// Neither is this an exemption from absence-deny. A path with no MCP
+// contract in scope refuses every MCP-shaped request, these included, before
+// any gate runs — otherwise a caller holding no contract could probe which
+// mounts exist. The fix there is attaching a contract, not widening this.
 func isLifecycleMethod(method string) bool {
 	return method == "initialize" ||
 		method == "ping" ||
+		method == mcpMethodServerDiscover ||
 		strings.HasPrefix(method, "notifications/")
 }
 
 // isNameBearingMethod reports whether method carries a name gated by an
-// allowed_/denied_ family list (tools/call → tool name, resources/read →
-// uri, prompts/get → name). Under deny-by-default the name gate runs for
-// these methods whether or not the operator configured a family list, so
-// this predicate — not "is a list present" — drives the gate.
+// allowed_/denied_ family list (tools/call → tool name; resources/read,
+// resources/subscribe, resources/directory/read and skills/get → uri;
+// prompts/get → name). Under deny-by-default the name gate runs for these
+// methods whether or not the operator configured a family list, so this
+// predicate — not "is a list present" — drives the gate.
 func isNameBearingMethod(method string) bool {
 	switch method {
-	case mcpMethodToolsCall, mcpMethodResourcesRead, mcpMethodPromptsGet:
+	case mcpMethodToolsCall, mcpMethodResourcesRead, mcpMethodResourcesSubscribe,
+		mcpMethodResourcesDirectoryRead, mcpMethodSkillsGet, mcpMethodPromptsGet:
 		return true
 	}
 	return false
@@ -411,7 +769,8 @@ func isNameBearingMethod(method string) bool {
 // Deny-by-default: an empty allowed_methods denies every non-lifecycle
 // method, and an empty allowed_<family> denies every tool/resource/prompt.
 // Operators open a mount with allowed_* = ["*"]. Session-lifecycle methods
-// (initialize, ping, notifications/*) are exempt from the method gate.
+// (initialize, ping, server/discover, notifications/*) are exempt from the
+// method gate.
 func evaluateMCPGates(set *CBPMCPRules, method, name string) *logical.MCPDecision {
 	// (a) Missing method → deny. The body-authoritative parser rejects an
 	// empty method as malformed_jsonrpc before we get here, so this branch
@@ -422,8 +781,8 @@ func evaluateMCPGates(set *CBPMCPRules, method, name string) *logical.MCPDecisio
 
 	// (b) Explicit denied_methods match → deny. Runs before the lifecycle
 	// exemption so an operator can still block a lifecycle method by name.
-	if m := matchMCPAny(method, set.DeniedMethods); m != "" {
-		return &logical.MCPDecision{Method: method, Name: name, Decision: "deny", RuleType: mcpRuleTypeDeniedMethods, MatchedRule: m}
+	if d := mcpDeniedMethod(set, method, name); d != nil {
+		return d
 	}
 
 	// (c) Session-lifecycle methods are exempt from the method allow-list
@@ -441,15 +800,44 @@ func evaluateMCPGates(set *CBPMCPRules, method, name string) *logical.MCPDecisio
 	// (e) Name gate for name-bearing methods, deny-by-default: a denied_*
 	// match denies; otherwise the name must match allowed_* (empty ⇒ deny).
 	if isNameBearingMethod(method) {
-		denyList, allowList := nameListForMethod(set, method)
-		if m := matchMCPAny(name, denyList); m != "" {
-			return &logical.MCPDecision{Method: method, Name: name, Decision: "deny", RuleType: mcpDenyRuleTypeForName(method), MatchedRule: m}
+		if d := mcpDeniedName(set, method, name); d != nil {
+			return d
 		}
+		_, allowList := nameListForMethod(set, method)
 		if m := matchMCPAny(name, allowList); m == "" {
 			return &logical.MCPDecision{Method: method, Name: name, Decision: "deny", RuleType: mcpAllowRuleTypeForName(method)}
 		}
 	}
 
+	return nil
+}
+
+// evaluateMCPResourceSubscriptions gates the resource URIs a
+// subscriptions/listen asks to watch, against the same deny- and allow-lists
+// that govern resources/read. Returns a deny decision for the first URI that
+// fails, or nil when every URI passes — including when the call names none,
+// which is a list-changed-only listen and is governed by the method gate
+// alone.
+//
+// The refusing URI is stamped as Name so audit can say which one it was.
+// Unlike the name gate, which stamps the value it compared, this stamps the
+// URI verbatim from the wire — matching is case-folded, and an audit record
+// should show what the caller actually sent.
+func evaluateMCPResourceSubscriptions(set *CBPMCPRules, method string, call *logical.MCPCall) *logical.MCPDecision {
+	if call == nil || len(call.URIs) == 0 || method != mcpMethodSubscriptionsListen {
+		return nil
+	}
+	for _, uri := range call.URIs {
+		if d := mcpDeniedURI(set, method, uri); d != nil {
+			return d
+		}
+		if m := matchMCPAny(strings.ToLower(uri), set.AllowedResources); m == "" {
+			return &logical.MCPDecision{
+				Method: method, Name: uri, Decision: "deny",
+				RuleType: mcpRuleTypeAllowedResources,
+			}
+		}
+	}
 	return nil
 }
 
@@ -463,6 +851,31 @@ func evaluateMCPSetForCall(set *CBPMCPRules, method, name string, call *logical.
 	// a binding deny; nil means the structured gates passed and the CEL
 	// gate + allow-stamp below decide.
 	if d := evaluateMCPGates(set, method, name); d != nil {
+		return d
+	}
+
+	// Resource-subscription gate. A subscriptions/listen names the resource
+	// URIs whose update notifications it wants pushed, and the server then
+	// sends notifications/resources/updated for each. Gating only
+	// resources/read would let a caller denied read on a URI still watch it:
+	// the content never arrives, but its existence and the timing of every
+	// change do. So each URI answers to the resources family exactly as a
+	// read would — deny-by-default included, which is what makes a contract
+	// with no resources{} block refuse a URI-bearing listen. The legacy-era
+	// resources/subscribe reaches the same stream naming one URI in
+	// params.uri, and is gated by the ordinary name gate instead.
+	//
+	// Note the OR is per call, not per URI: a listen naming [a, b] where one
+	// contract grants only a and another only b denies, though two separate
+	// listens would each succeed. Fail-closed, and the alternative — assembling
+	// a grant from fragments of different contracts — is not something a
+	// contract author can reason about.
+	//
+	// Runs after the structural gates and before CEL, so a listen the method
+	// gate already refused never reaches it. Living inside the per-set
+	// function preserves cross-set OR for free: another set that grants the
+	// URIs still allows the call.
+	if d := evaluateMCPResourceSubscriptions(set, method, call); d != nil {
 		return d
 	}
 
@@ -517,7 +930,7 @@ func mcpDenyRuleTypeForName(method string) string {
 	switch method {
 	case mcpMethodToolsCall:
 		return mcpRuleTypeDeniedTools
-	case mcpMethodResourcesRead:
+	case mcpMethodResourcesRead, mcpMethodResourcesSubscribe, mcpMethodResourcesDirectoryRead, mcpMethodSkillsGet:
 		return mcpRuleTypeDeniedResources
 	case mcpMethodPromptsGet:
 		return mcpRuleTypeDeniedPrompts
@@ -531,7 +944,7 @@ func mcpAllowRuleTypeForName(method string) string {
 	switch method {
 	case mcpMethodToolsCall:
 		return mcpRuleTypeAllowedTools
-	case mcpMethodResourcesRead:
+	case mcpMethodResourcesRead, mcpMethodResourcesSubscribe, mcpMethodResourcesDirectoryRead, mcpMethodSkillsGet:
 		return mcpRuleTypeAllowedResources
 	case mcpMethodPromptsGet:
 		return mcpRuleTypeAllowedPrompts
@@ -563,7 +976,14 @@ func mcpDenyRank(ruleType string) int {
 		mcpRuleTypeOversizedBody,
 		mcpRuleTypeBatchEmpty,
 		mcpRuleTypeMalformedParams,
-		mcpRuleTypeBatchListUnfilterable:
+		mcpRuleTypeBatchListUnfilterable,
+		mcpRuleTypeBatchUnsupported,
+		mcpRuleTypeBatchTooLarge,
+		mcpRuleTypeHeaderMismatch,
+		// Never actually competes — it is produced where there are no
+		// rule-sets to rank against. Listed so the ranking stays total over
+		// the rule-type domain.
+		mcpRuleTypeNoMCPPolicy:
 		return 4
 	case mcpRuleTypeDeniedMethods,
 		mcpRuleTypeDeniedTools,
@@ -645,8 +1065,26 @@ func BuildMCPDenyDescription(d *logical.MCPDecision) string {
 		return "Request params have unexpected shape."
 	case mcpRuleTypeBatchListUnfilterable:
 		return "Batched list requests are not supported."
+	case mcpRuleTypeBatchUnsupported:
+		return "Batched requests are not supported at the requested protocol version."
+	case mcpRuleTypeBatchTooLarge:
+		return "Request batch has too many messages."
 	case mcpRuleTypeMissingMethod:
 		return "Request method required."
+	case mcpRuleTypeHeaderMismatch:
+		// Names no header and no value: the client already knows what it
+		// sent, and saying which half disagreed would hand an attacker a
+		// probe for the shape of the check. The HTTP layer answers this one
+		// with a JSON-RPC error rather than this description; the text is
+		// here for audit and for any path that renders a decision generically.
+		return "MCP transport headers do not match the request body."
+	case mcpRuleTypeNoMCPPolicy:
+		// Names the misconfiguration rather than the call. Every other message
+		// answers "what did I ask for that was refused?"; this one answers
+		// "nothing here is permitted yet", which is the actionable difference
+		// between a too-narrow contract and no contract at all. It discloses
+		// only that none is attached, never any rule shape.
+		return "No MCP policy permits this request."
 	}
 	return "Request denied by policy."
 }
@@ -667,6 +1105,7 @@ func sanitizeMCPDecision(d *logical.MCPDecision) {
 	d.MatchedRule = stripCTL(d.MatchedRule)
 	d.ParamName = stripCTL(d.ParamName)
 	d.ParamValue = stripCTL(d.ParamValue)
+	d.PolicyName = stripCTL(d.PolicyName)
 	d.Condition.Sanitize()
 }
 

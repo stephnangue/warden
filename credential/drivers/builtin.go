@@ -79,11 +79,6 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 		return err
 	}
 
-	// Register Honeycomb driver factory
-	if err := registry.RegisterFactory(&HoneycombDriverFactory{}); err != nil {
-		return err
-	}
-
 	// Register Alicloud driver factory
 	if err := registry.RegisterFactory(&AlicloudDriverFactory{}); err != nil {
 		return err
@@ -91,6 +86,21 @@ func RegisterBuiltinDrivers(registry *credential.DriverRegistry) error {
 
 	// Register token-exchange driver factory (RFC 8693 / RFC 7523 / Entra OBO)
 	if err := registry.RegisterFactory(&TokenExchangeDriverFactory{}); err != nil {
+		return err
+	}
+
+	// Register Anthropic driver factory (workload identity federation)
+	if err := registry.RegisterFactory(&AnthropicDriverFactory{}); err != nil {
+		return err
+	}
+
+	// Register Cloudflare driver factory (credential served via secret_spec)
+	if err := registry.RegisterFactory(&CloudflareDriverFactory{}); err != nil {
+		return err
+	}
+
+	// Register OpenAI driver factory (workload identity federation)
+	if err := registry.RegisterFactory(&OpenAIDriverFactory{}); err != nil {
 		return err
 	}
 

@@ -135,8 +135,11 @@ V2 key management paths (requires management key credentials):
   /honeycomb/gateway/2/teams/{team}/api-keys
 
 Credential source types:
-- apikey: Static ingest or configuration key
-- honeycomb: Dynamic API keys minted via the Honeycomb V2 key management API
+- apikey: An ingest, configuration or management key. Held inline on the spec,
+  or — keyless — fetched per request from another cred spec via secret_spec,
+  so the key lives in your vault and Warden stores none of it. Management mode
+  additionally needs key_id in the source's credential_fields, since that
+  driver carries only api_key and the fields named there.
 
 Configuration:
 - honeycomb_url: Honeycomb API base URL (default: https://api.honeycomb.io)
