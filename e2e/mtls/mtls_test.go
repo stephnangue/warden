@@ -3,6 +3,7 @@
 package mtls
 
 import (
+	"strings"
 	"testing"
 
 	h "github.com/stephnangue/warden/e2e/helpers"
@@ -44,6 +45,43 @@ func TestMTLSCertTransparentGatewayViaStandby(t *testing.T) {
 	status, body := h.VaultCertTransparentRequestViaMTLS(t, "GET", "secret/data/e2e/app-config", "e2e-cert-reader", standbyPort, clientCertPEM, clientKeyPEM)
 	if status != 200 {
 		t.Fatalf("mTLS cert transparent gateway via standby failed (status %d): %s", status, string(body))
+	}
+}
+
+// TestMTLSKeyProofOnly verifies a key_proof_only role on every node: a client
+// certificate from a TLS handshake is granted it and finds it on its menu, a
+// standby passing on that a handshake happened; the same certificate in a
+// header proves nothing, is refused, and does not find it.
+func TestMTLSKeyProofOnly(t *testing.T) {
+	leaderPort := h.GetLeaderPort(t)
+	standbyPort := h.GetStandbyPort(t)
+
+	h.SetupCertVaultEnvWithMTLSCA(t, leaderPort)
+	defer h.TeardownCertVaultEnv(t, leaderPort)
+	h.MustNS(t, leaderPort, "", "PUT", "sys/roles/"+h.CertReaderRole, `{"key_proof_only":true,"provider_path":"vault-cert/"}`)
+
+	caCertPEM, caKey := h.LoadMTLSClientCA(t)
+	clientCertPEM, clientKeyPEM := h.GenerateClientCert(t, caCertPEM, caKey, "agent-key-proof")
+
+	for _, port := range []int{leaderPort, standbyPort} {
+		status, body := h.VaultCertTransparentRequestViaMTLS(t, "GET", "secret/data/e2e/app-config", h.CertReaderRole, port, clientCertPEM, clientKeyPEM)
+		if status != 200 {
+			t.Fatalf("node %d: handshake certificate refused (status %d): %s", port, status, string(body))
+		}
+		status, body = h.IntrospectRolesViaMTLS(t, port, clientCertPEM, clientKeyPEM)
+		if status != 200 || !strings.Contains(string(body), h.CertReaderRole) {
+			t.Fatalf("node %d: handshake certificate does not find the role (status %d): %s", port, status, string(body))
+		}
+
+		status, body = h.VaultCertTransparentRequest(t, "GET", "secret/data/e2e/app-config", h.CertReaderRole, port, clientCertPEM)
+		if status != 403 || !strings.Contains(h.ErrorText(body), "requires proof of key possession") {
+			t.Fatalf("node %d: certificate in a header not refused for its proof (status %d): %s", port, status, string(body))
+		}
+		status, body = h.DoRequest(t, "GET", h.NodeURL(port)+"/v1/sys/introspect/roles",
+			map[string]string{"X-SSL-Client-Cert": h.URLEncodePEM(clientCertPEM)}, "")
+		if status != 200 || strings.Contains(string(body), h.CertReaderRole) {
+			t.Fatalf("node %d: certificate in a header finds the role (status %d): %s", port, status, string(body))
+		}
 	}
 }
 
