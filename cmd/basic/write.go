@@ -26,7 +26,8 @@ Usage: warden write [PATH] [DATA]
   Write data to the given path. The PATH may be supplied either positionally
   or via -path (pick one — combining both is rejected). When -path is used,
   all remaining positional arguments are treated as DATA. The data can be
-  provided as JSON via stdin, as JSON arguments, or as key=value pairs. The
+  provided as JSON via stdin, as JSON arguments, or as key=value pairs; stdin
+  is read only when no data is given as arguments. The
   path should be in the format "provider_mount/resource" or
   "auth/auth_mount/resource" or "sys/path/to/resource" and will be converted
   to the appropriate API path.
@@ -86,21 +87,10 @@ func runWrite(cmd *cobra.Command, args []string) error {
 	// Read data from stdin or args
 	var data map[string]interface{}
 
-	// Check if data is being piped via stdin
-	stat, _ := os.Stdin.Stat()
-	if (stat.Mode() & os.ModeCharDevice) == 0 {
-		// Data is being piped
-		bytes, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("failed to read from stdin: %w", err)
-		}
-
-		if len(bytes) > 0 {
-			if err := json.Unmarshal(bytes, &data); err != nil {
-				return fmt.Errorf("failed to parse JSON: %w", err)
-			}
-		}
-	} else if len(dataArgs) > 0 {
+	// Arguments win over stdin. An agent, script or CI job often has a stdin
+	// that is not a terminal and that nobody writes to: reading it would block
+	// forever, or drop the arguments when it is empty.
+	if len(dataArgs) > 0 {
 		// Try to parse remaining args as key=value pairs or JSON
 		data = make(map[string]interface{})
 
@@ -133,6 +123,18 @@ func runWrite(cmd *cobra.Command, args []string) error {
 			jsonStr := strings.Join(dataArgs, " ")
 			if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
 				return fmt.Errorf("failed to parse JSON from arguments: %w", err)
+			}
+		}
+	} else if stat, err := os.Stdin.Stat(); err == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
+		// Data is being piped
+		bytes, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("failed to read from stdin: %w", err)
+		}
+
+		if len(bytes) > 0 {
+			if err := json.Unmarshal(bytes, &data); err != nil {
+				return fmt.Errorf("failed to parse JSON: %w", err)
 			}
 		}
 	}
