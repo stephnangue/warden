@@ -590,6 +590,7 @@ func createTestCore(t testing.TB) *Core {
 	// each runs goroutines that would keep it, and some hundred MB of cache
 	// bookkeeping, alive for the rest of the run.
 	t.Cleanup(func() {
+		core.cancelNamespaceDeletion()
 		_ = core.teardownCredentialManager()
 		core.closeStores()
 	})

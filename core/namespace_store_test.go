@@ -877,6 +877,56 @@ func TestNamespaceStore_TaintedNamespace(t *testing.T) {
 	assert.Contains(t, err.Error(), "tainted")
 }
 
+// namespaceTestJob runs a function on the namespace job dispatcher.
+type namespaceTestJob struct {
+	run func()
+}
+
+func (j *namespaceTestJob) Execute() error  { j.run(); return nil }
+func (j *namespaceTestJob) OnFailure(error) {}
+
+// TestPreSeal_WaitsForNamespaceJobs tests that a seal stops the namespace jobs
+// before tearing down what they read.
+func TestPreSeal_WaitsForNamespaceJobs(t *testing.T) {
+	core := createTestCore(t)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var managerPresent bool
+	core.namespaceStore.deletionDispatcher.AddJob(&namespaceTestJob{run: func() {
+		close(started)
+		<-release
+		managerPresent = core.credentialManager != nil
+	}}, "test-queue")
+
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("namespace job never started")
+	}
+
+	sealed := make(chan struct{})
+	go func() {
+		defer close(sealed)
+		_ = core.preSeal()
+	}()
+
+	select {
+	case <-sealed:
+		close(release)
+		t.Fatal("preSeal returned while a namespace job was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-sealed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("preSeal did not return after the namespace job finished")
+	}
+	assert.True(t, managerPresent, "credential manager was torn down under a running namespace job")
+}
+
 // TestNamespaceStore_ClearNamespaceResources tests that clearNamespaceResources
 // properly cleans up all namespace-scoped resources.
 func TestNamespaceStore_ClearNamespaceResources(t *testing.T) {
