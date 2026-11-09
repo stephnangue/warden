@@ -168,7 +168,7 @@ func (c *Core) admitTicketRoleless(ctx context.Context, req *logical.Request, te
 	}
 	// The sponsor handlers read the ticket's membership, never a role's
 	// provider, so there is nothing to resolve for them.
-	d, err := c.discoveryFromTicket(ctx, te, time.Now(), !isSponsorPath(req.Path))
+	d, err := c.discoveryFromTicket(ctx, te, time.Now(), !isSponsorPath(req.Path), req.ProofOfPossession)
 	if err != nil {
 		c.logger.Error("ticket discovery failed", logger.Err(err), logger.String("path", req.Path))
 		return logical.ErrorResponse(logical.ErrInternal("discovery failed"))
@@ -206,8 +206,8 @@ func (c *Core) admitTicketRoleless(ctx context.Context, req *logical.Request, te
 // (compute), as discoverFromAdmissions computes it, never cached onto the
 // shared admission. The mount is named with its namespace, since it may not be
 // the request's. withProviders resolves the granted roles' providers, which
-// only discovery renders.
-func (c *Core) discoveryFromTicket(ctx context.Context, te *logical.TokenEntry, now time.Time, withProviders bool) (*admissionDiscovery, error) {
+// only discovery renders. proven says the request proved the ticket's key.
+func (c *Core) discoveryFromTicket(ctx context.Context, te *logical.TokenEntry, now time.Time, withProviders, proven bool) (*admissionDiscovery, error) {
 	adm := te.Admission
 	if adm == nil {
 		return nil, errors.New("ticket entry carries no admission")
@@ -224,10 +224,11 @@ func (c *Core) discoveryFromTicket(ctx context.Context, te *logical.TokenEntry, 
 	m := compute(adm, n, c.grantIndex(issuing.ID), now)
 
 	// A human's grants are all virtual (humans are never claimed), so a
-	// governed_only role is never listed: the next request would refuse it.
+	// governed_only role is never listed, and a key_proof_only role is listed
+	// only once the key is proved: the next request would refuse either.
 	var granted []*logical.Role
 	for _, r := range c.namespaceRoles(issuing) {
-		if g, ok := m.Roles[r.Name]; ok && r.GrantedThrough(g.Type) {
+		if g, ok := m.Roles[r.Name]; ok && r.GrantedThrough(g.Type) && (!r.KeyProofOnly || proven) {
 			granted = append(granted, r)
 		}
 	}

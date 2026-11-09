@@ -734,8 +734,32 @@ func TestKeyProofOnly_Writes(t *testing.T) {
 	assert.Equal(t, true, resp.Data["key_proof_only"], "a create sets the flag")
 }
 
-// A bound ticket whose proof was checked is granted a key_proof_only role; a
-// bearer ticket proves nothing and is refused.
+// The menu lists a key_proof_only role only for a credential the next request
+// would grant it to: a certificate from a TLS handshake, not one a proxy passed
+// in a header, and not a bearer.
+func TestKeyProofOnly_Discovery(t *testing.T) {
+	e := newDiscEnv(t, "", "")
+	e.stub.nextFormat = logical.CredentialFormatCert
+	e.mountAuth("cert/").needCert = true
+	e.stub.nextFormat = logical.CredentialFormatJWT
+	e.mountAuth("jwt/")
+	e.provider("vault", "vault-cert/", "auth/cert/")
+	e.provider("vault", "vault-jwt/", "auth/jwt/")
+	e.role("via-cert", "vault-cert/", "")
+	e.role("via-jwt", "vault-jwt/", "")
+	e.group("all", []string{"via-cert", "via-jwt"}, time.Time{}, discRule([]string{"auth/cert/", "auth/jwt/"}))
+	assert.Equal(t, []string{"via-cert", "via-jwt"}, e.rolesAs(forwardedCertRequest("")))
+
+	setKeyProofOnly(t, e.c, e.ctx, "via-cert", true)
+	setKeyProofOnly(t, e.c, e.ctx, "via-jwt", true)
+	assert.Equal(t, []string{"via-cert"}, e.rolesAs(handshakeCertRequest("")))
+	assert.Empty(t, e.rolesAs(forwardedCertRequest("")), "a certificate in a header proves nothing")
+	assert.Empty(t, e.rolesAs(bearerRequest("eyJ.any.token")), "a bearer proves nothing")
+}
+
+// A bound ticket whose proof was checked is granted a key_proof_only role and
+// finds it on its menu; a bearer ticket proves nothing, is refused, and does
+// not.
 func TestKeyProofOnly_Tickets(t *testing.T) {
 	e := newTicketRequestEnv(t)
 	setKeyProofOnly(t, e.c, e.ctx, "operator", true)
@@ -745,8 +769,18 @@ func TestKeyProofOnly_Tickets(t *testing.T) {
 	require.Nil(t, resp.Err)
 	assert.Empty(t, req.RoleGrant().DeniedReason)
 
+	resp, _, err = e.doBound(http.MethodGet, "sys/introspect/roles", nil, "", true, nil)
+	require.NoError(t, err)
+	require.Nil(t, resp.Err)
+	assert.Equal(t, []string{"operator"}, roleNames(resp.Data["roles"].([]admittedRole)))
+
 	_, req, err = e.do("sys/providers?role=operator", wardenToken(e.value))
 	require.Error(t, err)
 	assert.False(t, req.ProofOfPossession)
 	assert.Equal(t, logical.RoleDeniedKeyProofRequired, req.RoleGrant().DeniedReason)
+
+	resp, _, err = e.do("sys/introspect/roles", wardenToken(e.value))
+	require.NoError(t, err)
+	require.Nil(t, resp.Err)
+	assert.Empty(t, resp.Data["roles"])
 }
