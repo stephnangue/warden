@@ -246,6 +246,30 @@ path "mcp/gateway/*" {
 	assert.False(t, keep("sudo_reset"))
 }
 
+// A tool another contract denies is hidden, even from a caller whose contract
+// is the wildcard, so the filter can't be skipped for it.
+func TestListFilter_DeniedByAnotherContract(t *testing.T) {
+	cbp := mustCBPWithMCPPolicies(t, mcpGatewayGrant, map[string]string{
+		"open":  mcpOpenContract,
+		"guard": "path \"mcp/gateway/*\" {\n  tools { denied = [\"delete_*\"] }\n}\n",
+	})
+	keep := filterKeeps(t, cbp, "mcp/gateway/", `{"jsonrpc":"2.0","method":"tools/list","id":1}`, "tools/list")
+
+	assert.True(t, keep("get_repo"))
+	assert.False(t, keep("delete_repo"))
+}
+
+// A denied list for another family leaves a wildcard contract unfiltered.
+func TestListFilter_DeniedForAnotherFamilyKeepsEveryItem(t *testing.T) {
+	cbp := mustCBPWithMCPPolicies(t, mcpGatewayGrant, map[string]string{
+		"open":  mcpOpenContract,
+		"guard": "path \"mcp/gateway/*\" {\n  resources { denied = [\"secret://*\"] }\n}\n",
+	})
+	req := newMCPRequest(t, "mcp/gateway/", `{"jsonrpc":"2.0","method":"tools/list","id":1}`)
+	require.True(t, cbp.AllowOperation(testContext(), req, nil, false).Allowed)
+	assert.Nil(t, req.MCPListFilter)
+}
+
 func TestListFilter_CrossSetOR(t *testing.T) {
 	// Two stanzas: one allows get_*, the other allows list_*. A tool is kept
 	// if either set would allow the call (cross-set OR).

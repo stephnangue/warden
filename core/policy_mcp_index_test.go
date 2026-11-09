@@ -90,6 +90,37 @@ path "mcp/gateway/*" {
 	assert.ElementsMatch(t, []string{"from-first", "from-second"}, toolsOf(sets))
 }
 
+// A deny-only stanza answers through the deny rules and is no entry in the
+// index; a stanza with an allowed list is both.
+func TestMCPIndex_DenyOnlyStanzaIsNotIndexed(t *testing.T) {
+	cbp := mustMCPIndex(t, `
+path "mcp/deny-only" {
+  tools { denied = ["delete_*"] }
+}
+path "mcp/mixed" {
+  methods { allowed = ["tools/call"] }
+  tools { denied = ["delete_*"] }
+}
+`)
+	assert.Nil(t, cbp.mcpRulesForPath("mcp/deny-only"))
+	assert.Len(t, cbp.mcpDeniesForPath("mcp/deny-only"), 1)
+
+	assert.Len(t, cbp.mcpRulesForPath("mcp/mixed"), 1)
+	assert.Len(t, cbp.mcpDeniesForPath("mcp/mixed"), 1)
+
+	assert.Nil(t, cbp.mcpDeniesForPath("mcp/other"), "no allocation for a path no rule reaches")
+}
+
+func TestMCPIndex_DenyRuleSegmentWildcard(t *testing.T) {
+	cbp := mustMCPIndex(t, `
+path "mcp/role/+/gateway*" {
+  tools { denied = ["delete_*"] }
+}
+`)
+	assert.Len(t, cbp.mcpDeniesForPath("mcp/role/analyst/gateway/call"), 1)
+	assert.Nil(t, cbp.mcpDeniesForPath("mcp/role/analyst/other/call"))
+}
+
 func TestMCPIndex_SegmentWildcard(t *testing.T) {
 	cbp := mustMCPIndex(t, `
 path "mcp/role/+/gateway/*" {
