@@ -20,10 +20,6 @@ npm run dev      # http://localhost:4321
 | `npm run build`   | Build the static site to `dist/`                   |
 | `npm run preview` | Preview the built site locally                     |
 
-> The first `npm install` may need the native `sharp`/`esbuild` install scripts approved. They
-> are pre-approved in `package.json` under `allowScripts`, so CI and fresh clones run them
-> automatically.
-
 ## Structure
 
 - `src/content/docs/` — Starlight content root. `index.mdx` is the landing (splash) home; other

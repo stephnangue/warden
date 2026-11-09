@@ -64,8 +64,8 @@ export default defineConfig({
             { slug: 'architecture' },
           ],
         },
-        { label: 'Install', autogenerate: { directory: 'install' } },
-        { label: 'Use cases', autogenerate: { directory: 'use-cases' } },
+        { label: 'Install', items: [{ autogenerate: { directory: 'install' } }] },
+        { label: 'Use cases', items: [{ autogenerate: { directory: 'use-cases' } }] },
         {
           // The identity model, in the order a request meets it. Authenticate: a
           // mount admits a credential and names the facts it verified. Resolve:
@@ -266,9 +266,9 @@ export default defineConfig({
             { slug: 'credential-drivers/token-exchange' },
           ],
         },
-        { label: 'Auth methods', autogenerate: { directory: 'auth-methods' } },
-        { label: 'Agent identity', autogenerate: { directory: 'agent-identity' } },
-        { label: 'CLI', autogenerate: { directory: 'cli' } },
+        { label: 'Auth methods', items: [{ autogenerate: { directory: 'auth-methods' } }] },
+        { label: 'Agent identity', items: [{ autogenerate: { directory: 'agent-identity' } }] },
+        { label: 'CLI', items: [{ autogenerate: { directory: 'cli' } }] },
         {
           // Server HCL config reference, in reading order. The seal subgroup
           // has one page per seal type and collapses by default.
@@ -304,10 +304,10 @@ export default defineConfig({
             },
           ],
         },
-        { label: 'Audit devices', autogenerate: { directory: 'audit-devices' } },
-        { label: 'Quickstarts', autogenerate: { directory: 'quickstarts' } },
-        { label: 'Tutorials', autogenerate: { directory: 'tutorials' } },
-        { label: 'Upgrade', autogenerate: { directory: 'upgrade' } },
+        { label: 'Audit devices', items: [{ autogenerate: { directory: 'audit-devices' } }] },
+        { label: 'Quickstarts', items: [{ autogenerate: { directory: 'quickstarts' } }] },
+        { label: 'Tutorials', items: [{ autogenerate: { directory: 'tutorials' } }] },
+        { label: 'Upgrade', items: [{ autogenerate: { directory: 'upgrade' } }] },
       ],
     }),
   ],
