@@ -433,6 +433,75 @@ func TestAccessPath_ImplicitAuth_Cert(t *testing.T) {
 	})
 }
 
+// Only a certificate from a TLS handshake proves possession of its key. The
+// fact belongs to the request: one certificate shares a cached token whether
+// it arrives by handshake or by header, and each request answers for itself.
+func TestAccessPath_ImplicitAuth_CertProofOfPossession(t *testing.T) {
+	env := newAccessEnv(t, "auth/cert/")
+	stub := mountLoginStub(t, env.c, "cert", "reader")
+	cert, _ := spiffeFakeCert("access-agent-cert-der")
+	handshake := func(ctx context.Context) context.Context { return listener.WithHandshakeClientCert(ctx, cert) }
+	forwarded := func(ctx context.Context) context.Context { return listener.WithForwardedClientCert(ctx, cert) }
+
+	for _, step := range []struct {
+		name string
+		wrap func(context.Context) context.Context
+		want bool
+	}{
+		{"handshake, logging in", handshake, true},
+		{"header, from the cached token", forwarded, false},
+		{"handshake, from the cached token", handshake, true},
+	} {
+		resp, req, err := env.getWithContext(t, "db/access/ro?role=reader", nil, step.wrap)
+		require.NoError(t, err, step.name)
+		require.Nil(t, resp.Err, step.name)
+		assert.Equal(t, step.want, req.ProofOfPossession, step.name)
+	}
+	assert.EqualValues(t, 1, stub.logins.Load())
+}
+
+// A key_proof_only role is granted to a certificate from a handshake and
+// refused to the same certificate from a header, whichever came first.
+func TestAccessPath_KeyProofOnly_Cert(t *testing.T) {
+	env := newAccessEnv(t, "auth/cert/")
+	mountLoginStub(t, env.c, "cert", "reader")
+	setKeyProofOnly(t, env.c, rootCtx(), "reader", true)
+	cert, _ := spiffeFakeCert("access-agent-cert-der")
+
+	resp, req, err := env.getWithContext(t, "db/access/ro?role=reader", nil, func(ctx context.Context) context.Context {
+		return listener.WithForwardedClientCert(ctx, cert)
+	})
+	require.Error(t, err)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Equal(t, logical.RoleDeniedKeyProofRequired, req.RoleGrant().DeniedReason)
+
+	resp, req, err = env.getWithContext(t, "db/access/ro?role=reader", nil, func(ctx context.Context) context.Context {
+		return listener.WithHandshakeClientCert(ctx, cert)
+	})
+	require.NoError(t, err)
+	require.Nil(t, resp.Err)
+	assert.Equal(t, "secret-for-ro", resp.Data["secret"])
+	assert.Empty(t, req.RoleGrant().DeniedReason)
+}
+
+// A handshake certificate that did not authenticate the request proves
+// nothing about the credential that did.
+func TestAccessPath_KeyProofOnly_BearerBesideCert(t *testing.T) {
+	env := newAccessEnv(t, "auth/jwt/")
+	mountLoginStub(t, env.c, "jwt", "reader")
+	setKeyProofOnly(t, env.c, rootCtx(), "reader", true)
+	cert, _ := spiffeFakeCert("access-agent-cert-der")
+
+	resp, req, err := env.getWithContext(t, "db/access/ro?role=reader", bearer(accessTestJWT), func(ctx context.Context) context.Context {
+		return listener.WithHandshakeClientCert(ctx, cert)
+	})
+	require.Error(t, err)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.True(t, req.Transparent)
+	assert.False(t, req.ProofOfPossession)
+	assert.Equal(t, logical.RoleDeniedKeyProofRequired, req.RoleGrant().DeniedReason)
+}
+
 // Without auto_auth_path the provider does not authenticate implicitly: the
 // bearer is read as a Warden token, as before.
 func TestAccessPath_NoAutoAuthPath_Unchanged(t *testing.T) {

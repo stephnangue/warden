@@ -234,6 +234,24 @@ func TestCreateUpdate_GovernedOnly(t *testing.T) {
 	assert.NotContains(t, f.last(t).body, "governed_only", "left out unless set")
 }
 
+func TestCreateUpdate_KeyProofOnly(t *testing.T) {
+	f, _, _ := setupFake(t, http.StatusOK, cannedRole)
+	cmd := freshCreateCmd()
+	require.NoError(t, cmd.Flags().Set("key-proof-only", "true"))
+	require.NoError(t, runCreate(cmd, []string{"prod-deploy"}))
+	assert.Equal(t, map[string]any{"key_proof_only": true}, f.last(t).body)
+
+	cmd = freshUpdateCmd()
+	require.NoError(t, cmd.Flags().Set("key-proof-only", "false"))
+	require.NoError(t, runUpdate(cmd, []string{"prod-deploy"}))
+	assert.Equal(t, map[string]any{"key_proof_only": false}, f.last(t).body)
+
+	cmd = freshUpdateCmd()
+	require.NoError(t, cmd.Flags().Set("description", "x"))
+	require.NoError(t, runUpdate(cmd, []string{"prod-deploy"}))
+	assert.NotContains(t, f.last(t).body, "key_proof_only", "left out unless set")
+}
+
 func TestCreate_JSONAndFlagsRejected(t *testing.T) {
 	f, _, _ := setupFake(t, http.StatusCreated, cannedRole)
 	cmd := freshCreateCmd()

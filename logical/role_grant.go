@@ -56,6 +56,10 @@ const (
 	// RoleDeniedGovernedOnly: the role is governed_only and the caller's grant
 	// of it comes from a virtual group.
 	RoleDeniedGovernedOnly = "requires governed membership"
+
+	// RoleDeniedKeyProofRequired: the role is key_proof_only and the request's
+	// credential did not prove possession of its key.
+	RoleDeniedKeyProofRequired = "requires proof of key possession"
 )
 
 // RoleGrant is the role a request runs under, resolved once per request from

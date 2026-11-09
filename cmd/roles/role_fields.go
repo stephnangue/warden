@@ -20,6 +20,7 @@ type roleFlags struct {
 	providerPath string
 	metadata     map[string]string
 	governedOnly bool
+	keyProofOnly bool
 }
 
 // roleFlagNames maps each typed flag to the payload key it sets.
@@ -31,6 +32,7 @@ var roleFlagNames = []struct{ flag, key string }{
 	{"provider-path", "provider_path"},
 	{"metadata", "metadata"},
 	{"governed-only", "governed_only"},
+	{"key-proof-only", "key_proof_only"},
 }
 
 func (f *roleFlags) bind(cmd *cobra.Command) {
@@ -43,6 +45,8 @@ func (f *roleFlags) bind(cmd *cobra.Command) {
 	fs.StringToStringVar(&f.metadata, "metadata", nil, "Free-form label (key=value, repeatable)")
 	fs.BoolVar(&f.governedOnly, "governed-only", false,
 		"Grant the role through static groups of governed entities only, never a virtual group (-governed-only=false clears it)")
+	fs.BoolVar(&f.keyProofOnly, "key-proof-only", false,
+		"Grant the role only to a credential that proved possession of its key (-key-proof-only=false clears it)")
 }
 
 // reset restores the zero values. Intended for tests, which reuse the
@@ -68,6 +72,7 @@ func (f *roleFlags) payload(cmd *cobra.Command) map[string]any {
 		"provider_path":  f.providerPath,
 		"metadata":       stringMapToAny(f.metadata),
 		"governed_only":  f.governedOnly,
+		"key_proof_only": f.keyProofOnly,
 	}
 	out := map[string]any{}
 	for _, n := range roleFlagNames {
@@ -126,6 +131,11 @@ func printRoleTable(data map[string]any) {
 		// Always shown on a read, false included: whether virtual groups
 		// can grant the role is what an operator reads it for.
 		rows = append(rows, []any{"Governed Only", cell(data["governed_only"])})
+	}
+	if _, ok := data["key_proof_only"]; ok {
+		// Always shown on a read too: whether a bearer credential can be
+		// granted the role is what an operator reads it for.
+		rows = append(rows, []any{"Key Proof Only", cell(data["key_proof_only"])})
 	}
 	add("Hash", data["hash"])
 	add("Created At", data["created_at"])

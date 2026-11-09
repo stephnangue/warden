@@ -39,6 +39,12 @@ type Role struct {
 	// group grants it, so neither an unclaimed agent nor a human holds it.
 	GovernedOnly bool `json:"governed_only,omitempty"`
 
+	// KeyProofOnly grants the role only to a request whose credential proved
+	// possession of its key on that request: a DPoP-bound ticket, or a client
+	// certificate from a TLS handshake. A bearer credential, or a certificate
+	// a proxy passed in a header, is refused.
+	KeyProofOnly bool `json:"key_proof_only,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -90,6 +96,9 @@ func (r *Role) Hash() string {
 	// existed; the marker cannot be taken for a length-prefixed field.
 	if r.GovernedOnly {
 		fmt.Fprint(h, "governed_only")
+	}
+	if r.KeyProofOnly {
+		fmt.Fprint(h, "key_proof_only")
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

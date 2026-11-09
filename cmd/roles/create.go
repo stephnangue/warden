@@ -35,6 +35,11 @@ Usage: warden role create <name> [options]
   lists it stops granting it on its callers' next request (the write warns,
   naming them).
 
+  "key_proof_only" (false by default) grants the role only to a request whose
+  credential proved possession of its key: a DPoP-bound ticket, or a client
+  certificate from a direct TLS handshake. Bearer credentials and certificates
+  a proxy passed in a header are refused.
+
   Two input modes (mutually exclusive):
 
     Full JSON payload (agent-friendly):

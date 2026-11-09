@@ -3074,10 +3074,12 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 		}
 	}
 
-	// The X.509-SVID case authenticates via a forwarded/TLS cert; drop any stray
-	// non-SVID bearer so the cert-minted token ID becomes ClientToken below.
+	// A certificate (cert or X.509-SVID) is the credential: drop any stray
+	// bearer so the cert-minted token ID becomes ClientToken below, and record
+	// whether a handshake proved its key.
 	if clearClientToken {
 		req.ClientToken = ""
+		req.ProofOfPossession = certFromHandshake(req)
 	}
 	req.SetTokenEntry(te)
 	// The role this request asks for, for CheckToken to grant: the token is
@@ -3115,9 +3117,10 @@ func (c *Core) performImplicitAuth(ctx context.Context, req *logical.Request, au
 // empty, the credential is taken from the request the way the primary path expects
 // (req.ClientToken for JWT/JWT-SVID, the forwarded/TLS cert for cert/X.509-SVID).
 //
-// clearClientToken is true only for the X.509-SVID (spiffe-cert) case; it signals
-// the primary caller to drop a stray bearer so the cert-minted token ID becomes
-// req.ClientToken. It is meaningless for (and ignored by) the secondary path.
+// clearClientToken is true when a certificate is the credential (cert or
+// spiffe-cert); it signals the primary caller to drop a stray bearer so the
+// cert-minted token ID becomes req.ClientToken. It is meaningless for (and
+// ignored by) the secondary path.
 //
 // Transparent mode precedence rules:
 //
@@ -3313,4 +3316,11 @@ func extractTransparentClientCert(req *logical.Request) *x509.Certificate {
 	}
 
 	return listener.ForwardedClientCert(req.HTTPRequest.Context())
+}
+
+// certFromHandshake reports whether the request's client certificate came from
+// a TLS handshake with the client, which proves the client holds its key; one
+// a proxy passed in a header proves nothing of the kind.
+func certFromHandshake(req *logical.Request) bool {
+	return req.HTTPRequest != nil && listener.ClientCertFromHandshake(req.HTTPRequest.Context())
 }

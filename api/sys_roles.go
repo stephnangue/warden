@@ -22,6 +22,7 @@ type Role struct {
 	ProviderPath string            `json:"provider_path"`
 	Metadata     map[string]string `json:"metadata"`
 	GovernedOnly bool              `json:"governed_only"`
+	KeyProofOnly bool              `json:"key_proof_only"`
 	// Builtin marks a built-in operator role: defined by Warden, read only.
 	// A read of one carries the body it grants in PolicyDocument.
 	Builtin        bool      `json:"builtin,omitempty"`
@@ -46,6 +47,10 @@ type RoleInput struct {
 	// GovernedOnly makes the role grantable through governed membership only
 	// (a static group listing a governed, active entity); nil keeps it.
 	GovernedOnly *bool
+
+	// KeyProofOnly grants the role only to a request whose credential proved
+	// possession of its key; nil keeps it.
+	KeyProofOnly *bool
 
 	// ExpectedHash, on update, applies the write only if the role still has
 	// this hash (Role.Hash from an earlier read).
@@ -78,6 +83,9 @@ func (in *RoleInput) body() map[string]any {
 	}
 	if in.GovernedOnly != nil {
 		out["governed_only"] = *in.GovernedOnly
+	}
+	if in.KeyProofOnly != nil {
+		out["key_proof_only"] = *in.KeyProofOnly
 	}
 	if in.ExpectedHash != "" {
 		out["expected_hash"] = in.ExpectedHash

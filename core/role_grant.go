@@ -94,8 +94,9 @@ func takesRoleGrant(te *logical.TokenEntry) bool {
 // refused caller is refused with its reason before any role is looked up.
 //
 // The grant is computed from the namespace's published groups and roles, read
-// once each, and the admission's cached membership under them at now. On a
-// grant it sets the grant's GrantedBy; on a refusal, DeniedReason, and te
+// once each, the admission's cached membership under them at now, and for a
+// key_proof_only role whether the request's credential proved possession of
+// its key. On a grant it sets the grant's GrantedBy; on a refusal, DeniedReason, and te
 // keeps no policies and no spec, and buildCBP attaches no built-in policy to
 // it, so the request is refused by the CBP even if nothing else refused it. A role edit, a group edit or a mapping edit is seen
 // by the next request of a cached admission: nothing here is cached on the
@@ -181,6 +182,10 @@ func (c *Core) resolveRoleGrant(req *logical.Request, te *logical.TokenEntry, to
 	// the next request of every cached admission.
 	if !role.GrantedThrough(g.Type) {
 		rg.DeniedReason = logical.RoleDeniedGovernedOnly
+		return
+	}
+	if role.KeyProofOnly && !req.ProofOfPossession {
+		rg.DeniedReason = logical.RoleDeniedKeyProofRequired
 		return
 	}
 
@@ -284,6 +289,8 @@ func roleRefusal(rg *logical.RoleGrant, te *logical.TokenEntry) *ErrRoleNotGrant
 		}
 	case logical.RoleDeniedGovernedOnly:
 		msg = fmt.Sprintf("role %q requires governed membership: only a static group listing a governed entity grants it", rg.RoleName)
+	case logical.RoleDeniedKeyProofRequired:
+		msg = fmt.Sprintf("role %q requires proof of key possession: present a DPoP-bound ticket, or a client certificate over direct mTLS", rg.RoleName)
 	case logical.RoleDeniedExplicitAdmission:
 		msg = "admission token presented explicitly; present the credential instead"
 	case logical.RoleDeniedNoAdmission:
