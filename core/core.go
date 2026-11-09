@@ -2029,6 +2029,10 @@ func (c *Core) preSeal() error {
 
 	var result error
 
+	// Before anything else: a namespace job reads the managers and stores
+	// torn down below, so none may still be running when they go.
+	c.cancelNamespaceDeletion()
+
 	if err := c.teardownAudits(context.Background()); err != nil {
 		result = multierror.Append(result, fmt.Errorf("error tearing down audits: %w", err))
 	}
