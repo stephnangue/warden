@@ -253,6 +253,12 @@ type PolicyResults struct {
 	Allowed          bool     `json:"allowed"`
 	GrantingPolicies []string `json:"granting_policies,omitempty"`
 
+	// DenyingPolicy names the policy whose deny stanza refused the request. Empty
+	// when none did: a grant whose condition failed denied nothing, and
+	// Condition records that. With DenyingPolicy set, a Condition that denied
+	// without error means the deny rule's condition held.
+	DenyingPolicy string `json:"denying_policy,omitempty"`
+
 	// MCPDecision carries the decision an MCP-shaped request reached,
 	// populated on both outcomes: a contract was consulted and allowed or
 	// denied the call, or no contract was in scope at all and the request

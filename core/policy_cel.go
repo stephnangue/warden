@@ -1073,6 +1073,30 @@ func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te
 	return false, deciding, nil
 }
 
+// evaluateDenyCondition reports whether a conditional deny fires, and the
+// result to audit when it does. A true condition fires it, and so does an
+// erroring one: the rule could not be shown not to apply. A false condition
+// leaves the request to the rest of the policy and records nothing.
+func evaluateDenyCondition(c *compiledCondition, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) (bool, *logical.ConditionResult) {
+	usr := celUserInputFromRequest(req, now)
+	act := newCELActivation(
+		celRequestInputFromRequest(req, nsPath), c.ReqFields,
+		celAgentInput(req, te, now), c.AgtFields,
+		usr, c.UsrFields,
+		now, nil)
+	ok, err := evalCELCondition(c.Program, act)
+	if err == nil && !ok {
+		return false, nil
+	}
+	res := &logical.ConditionResult{Decision: "deny", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, c.RefSegs, act)}
+	if err != nil {
+		res.ErrorKind = celErrorKind(err)
+	}
+	res.UserAbsent = !usr.Present && conditionsReferenceUser([]*compiledCondition{c})
+	res.Sanitize()
+	return true, res
+}
+
 // conditionsReferenceUser reports whether any condition reads the `user`
 // namespace. Because the gate ORs, a deny means every condition failed — so a
 // user credential can only change the outcome if at least one of them looks at

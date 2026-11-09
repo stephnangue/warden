@@ -182,6 +182,9 @@ func (c *Core) CheckToken(ctx context.Context, req *logical.Request, unauth bool
 	if accessControlResults.CBPResults != nil && accessControlResults.CBPResults.Condition != nil {
 		auth.Condition = accessControlResults.CBPResults.Condition
 	}
+	if accessControlResults.CBPResults != nil {
+		auth.DenyingPolicy = accessControlResults.CBPResults.DenyingPolicy
+	}
 
 	if !accessControlResults.Allowed {
 		retErr := accessControlResults.Error

@@ -134,7 +134,7 @@ func ParseMCPPolicy(ns *namespace.Namespace, rules string) (*Policy, error) {
 			expiration = exp
 		}
 
-		normPath, isPrefix, hasSegmentWildcards, err := normalizePathPattern(ns, stanza.Path)
+		normPath, isPrefix, hasSegmentWildcards, segments, err := normalizePathPattern(ns, stanza.Path)
 		if err != nil {
 			return nil, err
 		}
@@ -148,6 +148,7 @@ func ParseMCPPolicy(ns *namespace.Namespace, rules string) (*Policy, error) {
 			Path:                normPath,
 			IsPrefix:            isPrefix,
 			HasSegmentWildcards: hasSegmentWildcards,
+			segments:            segments,
 			Expiration:          expiration,
 			Permissions: &CBPPermissions{
 				MCP: []*CBPMCPRules{rules},

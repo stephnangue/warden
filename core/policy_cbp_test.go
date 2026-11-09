@@ -1589,7 +1589,7 @@ func grantingNames(in []sdklogical.PolicyInfo) []string {
 
 // TestCBP_ParsedPoliciesUntouched pins that compiling and evaluating never
 // writes the parsed policies, which the policy cache shares across requests.
-// Every merge a compile performs is exercised: capabilities, a deny collapse,
+// Every merge a compile performs is exercised: capabilities, a deny rule,
 // pagination, the filter path and conditions at an exact key, a prefix and a
 // segment wildcard, two MCP policies at one key and one MCP policy with two
 // stanzas at one key.
@@ -1698,7 +1698,7 @@ path "pre/*" { capabilities = ["deny"] }
 	assert.Equal(t, []string{"b"}, granting(logical.DeleteOperation, "secret/x"))
 
 	res := cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "pre/zz"}, nil, false)
-	assert.False(t, res.Allowed, "a deny collapses the path")
+	assert.False(t, res.Allowed, "a deny refuses the path")
 	assert.Empty(t, res.GrantingPolicies)
 
 	// The same policy listed twice is named twice, as before.
@@ -2026,10 +2026,10 @@ path "secret/+/data" { capabilities = ["delete"] }
 		return p.CapabilitiesBitmap
 	}
 	for _, bareMount := range []bool{false, true} {
-		// Longest prefix wins, a deny included, and no match is nil.
+		// Longest prefix wins, no match is nil, and a deny is not indexed.
 		assert.Equal(t, UpdateCapabilityInt, caps(only.CheckAllowedFromNonExactPaths("secret/team/x", bareMount)))
 		assert.Equal(t, ReadCapabilityInt, caps(only.CheckAllowedFromNonExactPaths("secret/other", bareMount)))
-		assert.Equal(t, DenyCapabilityInt, caps(only.CheckAllowedFromNonExactPaths("closed/x", bareMount)))
+		assert.Nil(t, only.CheckAllowedFromNonExactPaths("closed/x", bareMount))
 		assert.Nil(t, only.CheckAllowedFromNonExactPaths("public/x", bareMount))
 	}
 	// With wildcards the ranking still decides: a later wildcard beats an

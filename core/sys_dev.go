@@ -220,7 +220,14 @@ func summarizeDevAuditEntry(entry map[string]any) map[string]any {
 	decision, reason := "allow", ""
 	if allowed, ok := results["allowed"].(bool); ok && !allowed {
 		decision = "deny"
-		if cond := obj(results, "condition"); cond != nil {
+		cond := obj(results, "condition")
+		denier := str(results, "denying_policy")
+		switch {
+		case denier != "" && cond != nil:
+			reason = "denied by policy " + denier + " (" + str(cond, "expression") + ")"
+		case denier != "":
+			reason = "denied by policy " + denier
+		case cond != nil:
 			reason = "condition: " + str(cond, "expression")
 		}
 	}
