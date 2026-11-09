@@ -3,11 +3,14 @@
 package fullchain
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/stephnangue/warden/audit"
 	h "github.com/stephnangue/warden/e2e/helpers"
+	"github.com/stephnangue/warden/logical"
 )
 
 // mcp is the only provider whose authorization depends on the request *body*.
@@ -315,4 +318,121 @@ func TestMCP_ValidJSONButInvalidJSONRPCIsDeniedByPolicy(t *testing.T) {
 		Status:        403,
 		UpstreamCalls: 0,
 	})
+}
+
+// mcpMountGovernedBy brings up an MCP mount for one test, under rules.
+func mcpMountGovernedBy(t *testing.T, mount, rules string) h.ProviderEnv {
+	t.Helper()
+	env := h.ProviderEnv{
+		Mount:          mount,
+		Type:           "mcp",
+		URLKey:         "mcp_url",
+		CredType:       "api_key",
+		CredConfig:     map[string]string{"api_key": mcpAPIKey},
+		MCPPolicyRules: rules,
+	}
+	mountEraProvider(t, env, upstream.URL)
+	return env
+}
+
+// attachMCPContract writes a second MCP policy for env's gateway shapes, each
+// followed by suffix, and adds it to the role the test calls under.
+func attachMCPContract(t *testing.T, env h.ProviderEnv, name, suffix, rules string) {
+	t.Helper()
+	doc := fmt.Sprintf("path %q {\n%s\n}\npath %q {\n%s\n}\n",
+		env.Mount+"/gateway"+suffix, rules, env.Mount+"/role/+/gateway"+suffix, rules)
+	if status, body := h.APIRequest(t, "POST", "sys/policies/mcp/"+name, leaderPort, fmt.Sprintf(`{"policy":%q}`, doc)); status >= 300 {
+		t.Fatalf("write mcp policy %s: %d: %s", name, status, body)
+	}
+	t.Cleanup(func() { h.APIRequest(t, "DELETE", "sys/policies/mcp/"+name, leaderPort, "") })
+	h.WriteRoleInNS(t, leaderPort, "", env.CertRole(),
+		h.Role{Policies: []string{env.Policy(), env.MCPPolicy(), name}, CredSpec: env.Spec()})
+}
+
+// callMCP sends one body to path under env's certificate role. An empty body
+// is a body-less GET.
+func callMCP(t *testing.T, env h.ProviderEnv, path, body string) (int, []byte) {
+	t.Helper()
+	upstream.Reset()
+	status, resp, _ := h.ChainRequest(t, leaderPort, env, h.ChainOpts{
+		AgentCertPEM: agentCert(t),
+		Bearer:       h.FullChainUserJWT(t),
+		Role:         env.CertRole(),
+		Path:         path,
+		Body:         body,
+	})
+	return status, resp
+}
+
+// awaitMCPDecision waits for an audited MCP decision on env's mount that
+// match accepts.
+func awaitMCPDecision(t *testing.T, env h.ProviderEnv, match func(*logical.MCPDecision) bool) *logical.MCPDecision {
+	t.Helper()
+	entries := h.AwaitAuditEntries(t, h.NodeNumberForPort(leaderPort), env.Mount, 1, func(e audit.LogEntry) bool {
+		return e.Auth != nil && e.Auth.PolicyResults != nil && e.Auth.PolicyResults.MCPDecision != nil &&
+			match(e.Auth.PolicyResults.MCPDecision)
+	})
+	return entries[0].Auth.PolicyResults.MCPDecision
+}
+
+const mcpDeniesTheDeniedTool = `  tools { denied = ["` + mcpDeniedTool + `"] }`
+
+// A denied list in one contract beats another contract's allow, and the call
+// never reaches the upstream.
+func TestMCP_DeniedListBeatsAnotherContractsAllow(t *testing.T) {
+	ensureEnv(t)
+	env := mcpMountGovernedBy(t, "fc-mcp-denied-final", h.MCPUnrestricted)
+	const guard = "fc-mcp-denied-final-guard"
+	attachMCPContract(t, env, guard, "*", mcpDeniesTheDeniedTool)
+
+	status, body := callMCP(t, env, "", mcpToolCall(mcpDeniedTool))
+	h.AssertChain(t, upstream, status, body, h.ChainWant{Status: 403, UpstreamCalls: 0})
+	decision := awaitMCPDecision(t, env, func(d *logical.MCPDecision) bool { return d.Name == mcpDeniedTool })
+	if decision.RuleType != "denied_tools" || decision.PolicyName != guard || decision.MatchedRule != mcpDeniedTool {
+		t.Fatalf("audited decision = %+v, want denied_tools from %s", decision, guard)
+	}
+
+	status, body = callMCP(t, env, "", mcpToolCall(mcpAllowedTool))
+	h.AssertChain(t, upstream, status, body, h.ChainWant{Status: 200, UpstreamCalls: 1})
+}
+
+// A narrower stanza with only denied lists adds its denials without hiding the
+// broader contract's allows.
+func TestMCP_NarrowDenyOnlyStanzaDoesNotShadowABroaderAllow(t *testing.T) {
+	ensureEnv(t)
+	env := mcpMountGovernedBy(t, "fc-mcp-denied-narrow", h.MCPUnrestricted)
+	attachMCPContract(t, env, "fc-mcp-denied-narrow-guard", "/admin", mcpDeniesTheDeniedTool)
+
+	status, body := callMCP(t, env, "admin", mcpToolCall(mcpAllowedTool))
+	h.AssertChain(t, upstream, status, body, h.ChainWant{Status: 200, UpstreamCalls: 1})
+
+	status, body = callMCP(t, env, "admin", mcpToolCall(mcpDeniedTool))
+	h.AssertChain(t, upstream, status, body, h.ChainWant{Status: 403, UpstreamCalls: 0})
+
+	status, body = callMCP(t, env, "other", mcpToolCall(mcpDeniedTool))
+	h.AssertChain(t, upstream, status, body, h.ChainWant{Status: 200, UpstreamCalls: 1})
+}
+
+// Alone on a path, a stanza with only denied lists refuses what it names and
+// says so, allows nothing else, and has no opinion on a body-less request.
+func TestMCP_DenyOnlyStanzaIsNoContract(t *testing.T) {
+	ensureEnv(t)
+	env := mcpMountGovernedBy(t, "fc-mcp-deny-only", mcpDeniesTheDeniedTool)
+
+	status, body := callMCP(t, env, "", mcpToolCall(mcpDeniedTool))
+	h.AssertChain(t, upstream, status, body, h.ChainWant{Status: 403, UpstreamCalls: 0})
+	decision := awaitMCPDecision(t, env, func(d *logical.MCPDecision) bool { return d.Name == mcpDeniedTool })
+	if decision.RuleType != "denied_tools" || decision.PolicyName != env.MCPPolicy() {
+		t.Fatalf("audited decision = %+v, want denied_tools from %s", decision, env.MCPPolicy())
+	}
+
+	status, body = callMCP(t, env, "", mcpToolCall(mcpAllowedTool))
+	h.AssertChain(t, upstream, status, body, h.ChainWant{Status: 403, UpstreamCalls: 0})
+	if !strings.Contains(string(body), "No MCP policy") {
+		t.Errorf("body = %s, want the absence reason named", body)
+	}
+	awaitMCPDecision(t, env, func(d *logical.MCPDecision) bool { return d.RuleType == "no_mcp_policy" })
+
+	status, body = callMCP(t, env, "", "")
+	h.AssertChain(t, upstream, status, body, h.ChainWant{Status: 200, UpstreamCalls: 1})
 }

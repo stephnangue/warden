@@ -105,6 +105,25 @@ func TestMCPFilter_DeniedToolIsRemovedFromTheListing(t *testing.T) {
 	}
 }
 
+// TestMCPFilter_ToolDeniedByAnotherContractIsHidden: a wildcard contract would
+// keep the whole listing and skip the filter, but a denied list in another
+// contract is final, so the tool it names leaves the listing.
+func TestMCPFilter_ToolDeniedByAnotherContractIsHidden(t *testing.T) {
+	ensureEnv(t)
+	env := mcpMountGovernedBy(t, "fc-mcp-denied-list", h.MCPUnrestricted)
+	attachMCPContract(t, env, "fc-mcp-denied-list-guard", "*", mcpDeniesTheDeniedTool)
+	upstream.SetHandler(t, mcpToolsListUpstream(mcpToolsListBody(), "application/json"))
+
+	status, body := callMCP(t, env, "", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (body: %s)", status, body)
+	}
+	assertUpstreamServed(t)
+	if got := toolNames(t, body); len(got) != 1 || got[0] != mcpAllowedTool {
+		t.Errorf("advertised tools: got %v, want only %q", got, mcpAllowedTool)
+	}
+}
+
 // assertUpstreamServed confirms the request reached the upstream exactly once.
 //
 // Worth stating explicitly on these rows because the response path and the
