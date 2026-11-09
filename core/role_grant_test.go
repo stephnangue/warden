@@ -925,7 +925,7 @@ func TestRoleGrant_AgentGroups(t *testing.T) {
 			if cond != `size(agent.groups) == 0` {
 				req.SetRoleGrant(logical.RoleGrant{Groups: []string{"deployers"}})
 			}
-			ok, _ := evaluatePathConditions([]*compiledCondition{cc}, req, te, now, "")
+			ok, _, _ := evaluatePathConditions([]*compiledCondition{cc}, req, te, now, "")
 			assert.Equal(t, want, ok, cond)
 		}
 	})

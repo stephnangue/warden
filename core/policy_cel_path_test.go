@@ -222,8 +222,9 @@ func TestCBP_PathCondition_MergeUnionBuildsAllFields(t *testing.T) {
 }
 
 // TestCBP_PathCondition_UnconditionalGrantWins confirms a policy that grants the
-// path with no condition makes it unconditional (OR: an unconditional grant
-// admits everything), overriding another policy's condition.
+// same capability with no condition grants it unconditionally (OR: an
+// unconditional grant admits everything), whatever another policy's condition
+// says.
 func TestCBP_PathCondition_UnconditionalGrantWins(t *testing.T) {
 	ctx := testContext()
 	a := testParsePolicy(t, `path "x" { capabilities = ["read"] condition = "agent.metadata.team == 'red'" }`)
@@ -234,6 +235,212 @@ func TestCBP_PathCondition_UnconditionalGrantWins(t *testing.T) {
 	read := &logical.Request{Operation: logical.ReadOperation, Path: "x"}
 	res := cbp.AllowOperation(ctx, read, &logical.TokenEntry{Metadata: map[string]string{"team": "green"}}, false)
 	assert.True(t, res.Allowed, "unconditional grant from B admits any request")
+}
+
+// teamEntry is a token whose metadata names its team.
+func teamEntry(team string) *logical.TokenEntry {
+	return &logical.TokenEntry{Metadata: map[string]string{"team": team}}
+}
+
+// TestCBP_PathCondition_BoundToItsStanza: a condition gates its own stanza's
+// capabilities and no others, whichever policy comes first. An unconditional
+// stanza for other capabilities on the same path does not lift it.
+func TestCBP_PathCondition_BoundToItsStanza(t *testing.T) {
+	ctx := testContext()
+	gated := testParsePolicy(t, `path "aws/gateway*" {
+		capabilities = ["delete"]
+		condition    = "agent.metadata.team == 'red'"
+	}`)
+	open := testParsePolicy(t, `path "aws/gateway*" { capabilities = ["read", "create", "update", "patch"] }`)
+	oneDocument := testParsePolicy(t, `
+		path "aws/gateway*" {
+			capabilities = ["delete"]
+			condition    = "agent.metadata.team == 'red'"
+		}
+		path "aws/gateway*" {
+			capabilities = ["read", "create", "update", "patch"]
+		}
+	`)
+
+	for name, policies := range map[string][]*Policy{
+		"gated first": {gated, open},
+		"open first":  {open, gated},
+		"one policy":  {oneDocument},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cbp, err := NewCBP(ctx, policies)
+			require.NoError(t, err)
+			op := func(o logical.Operation, team string) *CBPResults {
+				return cbp.AllowOperation(ctx, &logical.Request{Operation: o, Path: "aws/gateway/bucket/key"}, teamEntry(team), false)
+			}
+
+			assert.True(t, op(logical.DeleteOperation, "red").Allowed)
+			denied := op(logical.DeleteOperation, "green")
+			assert.False(t, denied.Allowed, "the unconditional stanza brings no delete")
+			require.NotNil(t, denied.Condition)
+			assert.Equal(t, "deny", denied.Condition.Decision)
+
+			read := op(logical.ReadOperation, "green")
+			assert.True(t, read.Allowed)
+			assert.Nil(t, read.Condition, "no condition gates a read")
+		})
+	}
+}
+
+// TestCBP_PathCondition_OnlyTheCapabilitysConditionsCount: of two conditional
+// stanzas with different capabilities, each capability answers to its own.
+func TestCBP_PathCondition_OnlyTheCapabilitysConditionsCount(t *testing.T) {
+	ctx := testContext()
+	const redOnly, blueOnly = "agent.metadata.team == 'red'", "agent.metadata.team == 'blue'"
+	a := testParsePolicy(t, `path "x" { capabilities = ["read"] condition = "`+redOnly+`" }`)
+	b := testParsePolicy(t, `path "x" { capabilities = ["delete"] condition = "`+blueOnly+`" }`)
+	cbp, err := NewCBP(ctx, []*Policy{a, b})
+	require.NoError(t, err)
+	op := func(o logical.Operation, team string) *CBPResults {
+		return cbp.AllowOperation(ctx, &logical.Request{Operation: o, Path: "x"}, teamEntry(team), false)
+	}
+
+	assert.True(t, op(logical.ReadOperation, "red").Allowed)
+	assert.True(t, op(logical.DeleteOperation, "blue").Allowed)
+
+	read := op(logical.ReadOperation, "blue")
+	assert.False(t, read.Allowed, "delete's condition holding does not grant a read")
+	require.NotNil(t, read.Condition)
+	assert.Equal(t, redOnly, read.Condition.Expression, "the audit names read's condition")
+
+	assert.False(t, op(logical.DeleteOperation, "red").Allowed)
+}
+
+// TestCBP_PathCondition_SudoBoundToItsStanza: sudo answers to the condition of
+// the stanza bringing it, and that condition is evaluated only on a path that
+// needs sudo.
+func TestCBP_PathCondition_SudoBoundToItsStanza(t *testing.T) {
+	ctx := testContext()
+	c := createTestCore(t)
+	const redOnly = "agent.metadata.team == 'red'"
+	check := func(t *testing.T, cbp *CBP, team string, needSudo bool) *AuthzResults {
+		t.Helper()
+		return c.performPolicyChecks(ctx, cbp, teamEntry(team),
+			&logical.Request{Operation: logical.ReadOperation, Path: "x"},
+			&PolicyCheckOpts{RootPrivsRequired: needSudo})
+	}
+
+	t.Run("a stanza of its own", func(t *testing.T) {
+		read := testParsePolicy(t, `path "x" { capabilities = ["read"] }`)
+		sudo := testParsePolicy(t, `path "x" { capabilities = ["sudo"] condition = "`+redOnly+`" }`)
+		cbp, err := NewCBP(ctx, []*Policy{read, sudo})
+		require.NoError(t, err)
+
+		held := check(t, cbp, "red", true)
+		assert.True(t, held.Allowed)
+		require.NotNil(t, held.CBPResults.Condition, "the condition that gave sudo is recorded")
+		assert.Equal(t, "allow", held.CBPResults.Condition.Decision)
+		assert.Equal(t, redOnly, held.CBPResults.Condition.Expression)
+
+		refused := check(t, cbp, "green", true)
+		assert.False(t, refused.Allowed, "unconditional read brings no sudo")
+		require.NotNil(t, refused.CBPResults.Condition)
+		assert.Equal(t, "deny", refused.CBPResults.Condition.Decision)
+		assert.Equal(t, redOnly, refused.CBPResults.Condition.Expression)
+
+		open := check(t, cbp, "green", false)
+		assert.True(t, open.Allowed, "the path needs no sudo")
+		assert.Nil(t, open.CBPResults.Condition, "sudo's condition is not evaluated, so the audit shows no deny")
+
+		// A condition that ran and was discarded would show up as allocations.
+		plain, err := NewCBP(ctx, []*Policy{read})
+		require.NoError(t, err)
+		req := &logical.Request{Operation: logical.ReadOperation, Path: "x"}
+		te := teamEntry("green")
+		allocs := func(cbp *CBP) float64 {
+			return testing.AllocsPerRun(200, func() { cbp.allowOperation(ctx, req, te, false, false) })
+		}
+		assert.Equal(t, allocs(plain), allocs(cbp), "no CEL runs for a path that needs no sudo")
+
+		assert.True(t, cbp.AllowOperation(ctx, req, te, true).RootPrivs, "a capability check reports the union")
+		assert.Contains(t, cbp.Capabilities(ctx, "x"), SudoCapability)
+	})
+
+	t.Run("the operation's own stanza", func(t *testing.T) {
+		recipe := testParsePolicy(t, `path "x" { capabilities = ["read", "sudo"] condition = "`+redOnly+`" }`)
+		cbp, err := NewCBP(ctx, []*Policy{recipe})
+		require.NoError(t, err)
+
+		allowed := check(t, cbp, "red", true)
+		assert.True(t, allowed.Allowed)
+		assert.True(t, allowed.RootPrivs)
+		assert.Equal(t, "allow", allowed.CBPResults.Condition.Decision)
+		assert.False(t, check(t, cbp, "green", true).Allowed)
+	})
+
+	t.Run("an unconditional stanza brings it", func(t *testing.T) {
+		gated := testParsePolicy(t, `path "x" { capabilities = ["read"] condition = "`+redOnly+`" }`)
+		sudo := testParsePolicy(t, `path "x" { capabilities = ["sudo"] }`)
+		cbp, err := NewCBP(ctx, []*Policy{gated, sudo})
+		require.NoError(t, err)
+
+		assert.True(t, check(t, cbp, "red", true).Allowed)
+		assert.False(t, check(t, cbp, "green", true).Allowed, "read still answers to its condition")
+	})
+}
+
+// TestCBP_PathCondition_BesideADeny: a deny at the same key refuses whatever a
+// conditional stanza would grant, in either order.
+func TestCBP_PathCondition_BesideADeny(t *testing.T) {
+	ctx := testContext()
+	gated := testParsePolicy(t, `path "x" { capabilities = ["read"] condition = "agent.metadata.team == 'red'" }`)
+	deny := testParsePolicy(t, `path "x" { capabilities = ["deny"] }`)
+	for name, policies := range map[string][]*Policy{"deny first": {deny, gated}, "deny last": {gated, deny}} {
+		t.Run(name, func(t *testing.T) {
+			cbp, err := NewCBP(ctx, policies)
+			require.NoError(t, err)
+			req := &logical.Request{Operation: logical.ReadOperation, Path: "x"}
+			assert.False(t, cbp.AllowOperation(ctx, req, teamEntry("red"), false).Allowed)
+		})
+	}
+}
+
+// TestCBP_PathCondition_EmptyConditionsRefuse: an empty condition list reads as
+// unconditional to the evaluator, so a gated capability with no condition to
+// answer to is refused. NewCBP never builds such an entry.
+func TestCBP_PathCondition_EmptyConditionsRefuse(t *testing.T) {
+	ctx := testContext()
+	cbp := &CBP{exactRules: map[string]*CBPPermissions{
+		"x": {CapabilitiesBitmap: ReadCapabilityInt, ownerCaps: ReadCapabilityInt},
+		"y": {CapabilitiesBitmap: ReadCapabilityInt | SudoCapabilityInt, ownerCaps: ReadCapabilityInt, unconditionalCaps: ReadCapabilityInt},
+	}}
+	read := func(path string) *CBPResults {
+		return cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: path}, nil, false)
+	}
+	assert.False(t, read("x").Allowed)
+	assert.False(t, read("y").RootPrivs)
+}
+
+// TestCBP_GrantingPolicies_OnlyWhatGranted: the audit names the stanzas that
+// granted this request, not every stanza that could have.
+func TestCBP_GrantingPolicies_OnlyWhatGranted(t *testing.T) {
+	ctx := testContext()
+	red := finalizedPolicy(t, "red", PolicyTypeCBP, `path "x" { capabilities = ["read"] condition = "agent.metadata.team == 'red'" }`)
+	blue := finalizedPolicy(t, "blue", PolicyTypeCBP, `path "x" { capabilities = ["read"] condition = "agent.metadata.team == 'blue'" }`)
+	open := finalizedPolicy(t, "open", PolicyTypeCBP, `path "x" { capabilities = ["read"] }`)
+	granting := func(cbp *CBP, team string) []string {
+		res := cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "x"}, teamEntry(team), false)
+		require.True(t, res.Allowed)
+		names := make([]string, 0, len(res.GrantingPolicies))
+		for _, p := range res.GrantingPolicies {
+			names = append(names, p.Name)
+		}
+		return names
+	}
+
+	conditional, err := NewCBP(ctx, []*Policy{red, blue})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"red"}, granting(conditional, "red"))
+	assert.Equal(t, []string{"blue"}, granting(conditional, "blue"))
+
+	mixed, err := NewCBP(ctx, []*Policy{red, open})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"open"}, granting(mixed, "red"), "an unconditional stanza decides, with no condition run")
 }
 
 // TestCBP_RequestParamsRemoved confirms the removed request-body parameter
@@ -288,7 +495,7 @@ func TestCBP_RequestNamespace(t *testing.T) {
 	now := time.Now()
 
 	// Token minted in team-a/ acting in team-a/ -> allow.
-	ok, res := evaluatePathConditions([]*compiledCondition{cond}, req, te, now, "team-a/")
+	ok, res, _ := evaluatePathConditions([]*compiledCondition{cond}, req, te, now, "team-a/")
 	assert.True(t, ok)
 	require.NotNil(t, res)
 	assert.Equal(t, "allow", res.Decision)
@@ -296,7 +503,7 @@ func TestCBP_RequestNamespace(t *testing.T) {
 	assert.Equal(t, "team-a/", res.Inputs["agent.namespace"])
 
 	// Same token acting in child namespace team-a/team-b/ -> deny.
-	ok, res = evaluatePathConditions([]*compiledCondition{cond}, req, te, now, "team-a/team-b/")
+	ok, res, _ = evaluatePathConditions([]*compiledCondition{cond}, req, te, now, "team-a/team-b/")
 	assert.False(t, ok)
 	require.NotNil(t, res)
 	assert.Equal(t, "deny", res.Decision)
@@ -320,7 +527,7 @@ request.path.startsWith("sys/x/")`)
 	req := &logical.Request{Operation: logical.ReadOperation, Path: "sys/x/y"}
 	now := time.Now()
 	for _, cond := range []*compiledCondition{once, many} {
-		ok, res := evaluatePathConditions([]*compiledCondition{cond}, req, nil, now, "")
+		ok, res, _ := evaluatePathConditions([]*compiledCondition{cond}, req, nil, now, "")
 		require.True(t, ok)
 		assert.Equal(t, "sys/x/y", res.Inputs["request.path"])
 	}
@@ -386,6 +593,49 @@ func BenchmarkAllowOperation_WithCondition(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = cbp.AllowOperation(ctx, req, te, false)
+	}
+}
+
+// BenchmarkAllowOperation_MergedConditions is an entry merged from two policies
+// whose conditions both grant the operation: the gate ORs them over one
+// activation built for the union of what they read.
+func BenchmarkAllowOperation_MergedConditions(b *testing.B) {
+	ctx := testContext()
+	first, _ := ParseCBPPolicy(namespace.RootNamespace, `
+		path "db/issue-grant" { capabilities = ["create"] condition = "agent.metadata.env == 'dev'" }
+	`)
+	second, _ := ParseCBPPolicy(namespace.RootNamespace, `
+		path "db/issue-grant" { capabilities = ["create"] condition = "request.data.ttl_seconds <= 3600" }
+	`)
+	cbp, _ := NewCBP(ctx, []*Policy{first, second})
+	te := &logical.TokenEntry{Metadata: map[string]string{"env": "prod"}, ExpireAt: time.Now().Add(time.Hour)}
+	req := &logical.Request{
+		Operation: logical.CreateOperation,
+		Path:      "db/issue-grant",
+		Data:      map[string]any{"ttl_seconds": 3600},
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, te, false)
+	}
+}
+
+// BenchmarkAllowOperation_UnconditionalBesideConditional is an entry where an
+// unconditional stanza grants the operation and another stanza's condition
+// gates a different capability: nothing is evaluated.
+func BenchmarkAllowOperation_UnconditionalBesideConditional(b *testing.B) {
+	ctx := testContext()
+	open, _ := ParseCBPPolicy(namespace.RootNamespace, `
+		path "db/issue-grant" { capabilities = ["create"] }
+	`)
+	gated, _ := ParseCBPPolicy(namespace.RootNamespace, `
+		path "db/issue-grant" { capabilities = ["delete"] condition = "agent.metadata.env == 'prod'" }
+	`)
+	cbp, _ := NewCBP(ctx, []*Policy{gated, open})
+	req := &logical.Request{Operation: logical.CreateOperation, Path: "db/issue-grant"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, nil, false)
 	}
 }
 

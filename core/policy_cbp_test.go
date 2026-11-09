@@ -85,7 +85,7 @@ func TestCBP_CompiledConditionSharedAcrossCallers(t *testing.T) {
 	cached, ok := ps.tokenPoliciesLRU.Get(ps.cacheKey(namespace.RootNamespace, "cond", PolicyTypeCBP))
 	require.True(t, ok, "the parsed policy must stay cached")
 	require.Len(t, cached.Paths, 1)
-	assert.NotEmpty(t, cached.Paths[0].Permissions.Conditions,
+	assert.NotNil(t, cached.Paths[0].Permissions.Condition,
 		"the cached policy carries the compiled condition shared by every caller")
 }
 
@@ -1534,36 +1534,31 @@ func finalizedPolicy(t *testing.T, name string, typ PolicyType, rules string) *P
 // its scalars, the length, capacity and backing array of its slices, and the
 // attribution of its MCP rule-sets.
 type permsSnapshot struct {
-	caps          uint32
-	pagination    int
-	filterPath    string
-	conditions    int
-	conditionsCap int
-	conditionsArr **compiledCondition
-	conditionsAll []*compiledCondition
-	mcp           int
-	mcpCap        int
-	mcpArr        **CBPMCPRules
-	mcpAll        []*CBPMCPRules
-	sources       []string
-	owner         *Policy
-	extra         int
+	caps              uint32
+	pagination        int
+	filterPath        string
+	condition         *compiledCondition
+	unconditionalCaps uint32
+	ownerCaps         uint32
+	mcp               int
+	mcpCap            int
+	mcpArr            **CBPMCPRules
+	mcpAll            []*CBPMCPRules
+	sources           []string
+	owner             *Policy
+	extra             int
 }
 
 func snapshotPerms(p *CBPPermissions) permsSnapshot {
 	s := permsSnapshot{
 		caps: p.CapabilitiesBitmap, pagination: p.PaginationLimit, filterPath: p.ResponseKeysFilterPath,
-		conditions: len(p.Conditions), conditionsCap: cap(p.Conditions),
+		condition: p.Condition, unconditionalCaps: p.unconditionalCaps, ownerCaps: p.ownerCaps,
 		mcp: len(p.MCP), mcpCap: cap(p.MCP),
 		owner: p.owner, extra: len(p.extra),
 	}
 	// The address of element 0 of the full-capacity slice identifies the
 	// backing array, and its contents up to capacity show an append written
 	// into spare room, which leaves length and array unchanged.
-	if cap(p.Conditions) > 0 {
-		all := p.Conditions[:cap(p.Conditions)]
-		s.conditionsArr, s.conditionsAll = &all[0], slices.Clone(all)
-	}
 	if cap(p.MCP) > 0 {
 		all := p.MCP[:cap(p.MCP)]
 		s.mcpArr, s.mcpAll = &all[0], slices.Clone(all)
@@ -1653,7 +1648,6 @@ path "mcp/x" {
 	// anyway. Spare room makes an append written in place observable.
 	for _, p := range []*Policy{a, m1} {
 		for _, pc := range p.Paths {
-			pc.Permissions.Conditions = slices.Grow(pc.Permissions.Conditions, 2)
 			pc.Permissions.MCP = slices.Grow(pc.Permissions.MCP, 2)
 		}
 	}

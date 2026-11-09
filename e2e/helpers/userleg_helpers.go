@@ -305,8 +305,8 @@ func UserLegRequest(t *testing.T, port int, agentCertPEM string, headers map[str
 // the JSON Pointer into a nested `act` claim, which is unit-covered instead.
 const (
 	// UserLegBindingPolicy carries the binding condition. It deliberately does
-	// NOT also grant the unconditioned `-access` policy: conditions merge with
-	// OR across policies covering one path, so attaching both would let the
+	// NOT also grant the unconditioned `-access` policy: it grants the same
+	// capabilities on the same path, so attaching both would let the
 	// unconditioned grant allow everything and the binding would prove nothing.
 	UserLegBindingPolicy = "e2e-userleg-binding"
 

@@ -59,7 +59,7 @@ path "mcp/gateway/*" {
 
 	// An MCP stanza grants nothing: the capability bitmap stays zero.
 	assert.Zero(t, pr.Permissions.CapabilitiesBitmap)
-	assert.Empty(t, pr.Permissions.Conditions, "path-level conditions are a CBP concept")
+	assert.Nil(t, pr.Permissions.Condition, "path-level conditions are a CBP concept")
 
 	require.Len(t, pr.Permissions.MCP, 1)
 	set := pr.Permissions.MCP[0]

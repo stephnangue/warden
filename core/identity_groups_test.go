@@ -917,9 +917,8 @@ func TestGroups_SudoRequired(t *testing.T) {
 // TestGroups_TypeConditionSeparatesWriters: since every group write names its
 // type, a policy condition on request.data.type lets one team write virtual
 // groups and nothing else. The condition is path-level, so it gates reads
-// too, and conditions merge with "unconditional wins": a second, unconditional
-// stanza on the same path, even read-only, makes every capability on it
-// unconditional.
+// too. A condition binds its own stanza's capabilities: a second, unconditional
+// read-only stanza on the same path opens reads and leaves the writes gated.
 func TestGroups_TypeConditionSeparatesWriters(t *testing.T) {
 	c := createTestCore(t)
 	ctx := rootCtx()
@@ -950,8 +949,10 @@ func TestGroups_TypeConditionSeparatesWriters(t *testing.T) {
 	readOnly := testParsePolicy(t, `path "sys/identity/group/*" { capabilities = ["read", "sudo"] }`)
 	merged, err := NewCBP(ctx, []*Policy{recipe, readOnly})
 	require.NoError(t, err)
-	assert.True(t, allowed(merged, logical.UpdateOperation, map[string]any{"type": "static"}),
-		"an unconditional stanza on the same path makes the recipe's writes unconditional")
+	assert.False(t, allowed(merged, logical.UpdateOperation, map[string]any{"type": "static"}),
+		"an unconditional read-only stanza does not lift the recipe's condition on writes")
+	assert.True(t, allowed(merged, logical.UpdateOperation, map[string]any{"type": "virtual"}))
+	assert.True(t, allowed(merged, logical.ReadOperation, nil), "the unconditional stanza opens reads")
 }
 
 // TestIdentityUsage_NormalACL: sys/identity/usage is not a root path. A token
