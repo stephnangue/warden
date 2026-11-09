@@ -37,7 +37,7 @@ func TestMCPCond_BatchSharesOneNow(t *testing.T) {
 		}},
 	}
 
-	d := decideMCP(sets, req, nil, time.Unix(0, 0).UTC(), "")
+	d := decideMCP(sets, nil, req, nil, time.Unix(0, 0).UTC(), "")
 	require.NotNil(t, d)
 	assert.Equal(t, "allow", d.Decision, "both batch calls must see the same now snapshot")
 }

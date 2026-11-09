@@ -291,11 +291,26 @@ func (ps *PolicyStore) appendDefaultPolicies(ctx context.Context, dst []*Policy)
 // stanza on a discovery path that carries a condition, or an MCP contract,
 // does not narrow what the built-ins grant there: policies merge, the
 // built-ins' stanzas carry no condition, so what they grant stays granted, and
-// MCP rule-sets are alternatives. Only a deny matching the path narrows
-// discovery for a role. The warning stays on exact discovery paths: a broad
-// deny that reaches one is what the operator wrote.
+// MCP rule-sets are alternatives. Only a deny matching the path, or an MCP
+// denied list, narrows discovery. The warning stays on exact discovery paths: a
+// broad deny that reaches one is what the operator wrote.
+//
+// A deny-only MCP stanza's condition is also warned about: denied lists take no
+// condition, so it has no effect.
 func builtinPolicyWarnings(p *Policy) []string {
 	var warnings []string
+	for _, pr := range p.Paths {
+		if pr.Permissions == nil {
+			continue
+		}
+		for _, m := range pr.Permissions.MCP {
+			if m.denyOnly() && m.Condition != nil {
+				warnings = append(warnings, fmt.Sprintf(
+					"path %q has only denied lists, which take no condition: its condition has no effect",
+					policyPathDisplay(p, pr)))
+			}
+		}
+	}
 	if isBuiltinPolicy(p.Name, p.Type) {
 		for _, pr := range p.Paths {
 			if !isDiscoveryStanza(p, pr) {
@@ -312,7 +327,8 @@ func builtinPolicyWarnings(p *Policy) []string {
 		}
 		conditional := pr.Permissions != nil && pr.Permissions.Condition != nil &&
 			pr.Permissions.CapabilitiesBitmap&DenyCapabilityInt == 0
-		if p.Type == PolicyTypeMCP || conditional {
+		narrows := pr.Permissions != nil && slices.ContainsFunc(pr.Permissions.MCP, (*CBPMCPRules).hasDenied)
+		if (p.Type == PolicyTypeMCP && !narrows) || conditional {
 			warnings = append(warnings, fmt.Sprintf(
 				"path %q is also granted by the built-in policies, which merge with this one: "+
 					"a condition or an MCP contract here does not narrow discovery; only a deny does",

@@ -57,6 +57,11 @@ type CBP struct {
 	plainDenies       []denyRule
 	conditionalDenies []denyRule
 
+	// mcpDenyRules holds every MCP stanza with a denied list. Like a deny
+	// stanza, a denied list is final on every path it matches, so it answers
+	// apart from the MCP index, whose single winner only says what is allowed.
+	mcpDenyRules []mcpDenyRule
+
 	// root is enabled if the "root" named policy is present.
 	root bool
 
@@ -108,6 +113,12 @@ func (r *denyRule) matches(path string) bool {
 	default:
 		return path == pc.Path
 	}
+}
+
+// mcpDenyRule is one MCP stanza's denied lists, on the path its rule matches.
+type mcpDenyRule struct {
+	denyRule
+	set *CBPMCPRules
 }
 
 // rootGrantingPolicies is the granting-policies answer of every root request.
@@ -261,9 +272,15 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 	// attachment into a compile failure, which surfaces as a 500 on every
 	// request the token makes.
 	grantingPolicyCount := 0
-	stanzas, plainDenies, conditionalDenies := 0, 0, 0
+	stanzas, plainDenies, conditionalDenies, mcpDenies := 0, 0, 0, 0
 	for _, policy := range policies {
-		if policy == nil || policy.Type != PolicyTypeCBP {
+		if policy == nil {
+			continue
+		}
+		if policy.Type == PolicyTypeMCP {
+			mcpDenies += mcpDeniedSets(policy)
+		}
+		if policy.Type != PolicyTypeCBP {
 			continue
 		}
 		grantingPolicyCount++
@@ -286,6 +303,9 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 	}
 	if conditionalDenies > 0 {
 		a.conditionalDenies = make([]denyRule, 0, conditionalDenies)
+	}
+	if mcpDenies > 0 {
+		a.mcpDenyRules = make([]mcpDenyRule, 0, mcpDenies)
 	}
 
 	// Inject each policy
@@ -394,6 +414,26 @@ func (a *CBP) insertMCPPolicy(policy *Policy) error {
 			continue
 		}
 
+		// A stanza with nothing but denied lists stops here: it can allow
+		// nothing, and indexed it would win its path and shadow a broader
+		// contract's allows.
+		denyOnly := true
+		for _, m := range pc.Permissions.MCP {
+			if m.hasDenied() {
+				set := m
+				if set.SourcePolicy != policy.Name {
+					c := *set
+					c.SourcePolicy = policy.Name
+					set = &c
+				}
+				a.mcpDenyRules = append(a.mcpDenyRules, mcpDenyRule{denyRule: denyRule{stanza: pc, policy: policy}, set: set})
+			}
+			denyOnly = denyOnly && m.denyOnly()
+		}
+		if denyOnly {
+			continue
+		}
+
 		existingPerms, ok := lookupEntry(a.mcpExactRules, a.mcpPrefixRules, a.mcpSegmentWildcardPaths, pc)
 		if !ok {
 			// First stanza at this key: index the parsed CBPPermissions itself.
@@ -479,6 +519,22 @@ func (a *CBP) mcpRulesForPath(path string) []*CBPMCPRules {
 	}
 
 	return nil
+}
+
+// mcpDeniesForPath returns the rule-sets of every stanza whose denied lists
+// reach path, however specific. It allocates only when one does, and the
+// result is shared with any list filter the request attaches.
+func (a *CBP) mcpDeniesForPath(path string) []*CBPMCPRules {
+	var sets []*CBPMCPRules
+	for i := range a.mcpDenyRules {
+		if r := &a.mcpDenyRules[i]; r.matches(path) {
+			if sets == nil {
+				sets = make([]*CBPMCPRules, 0, len(a.mcpDenyRules)-i)
+			}
+			sets = append(sets, r.set)
+		}
+	}
+	return sets
 }
 
 func (a *CBP) Capabilities(ctx context.Context, path string) (pathCapabilities []string) {
@@ -758,10 +814,17 @@ CHECK:
 	// logical.MCPPolicyEnforced. A nil descriptor here means either
 	// the routed backend doesn't implement the marker, or it declined
 	// the request (wrong method / Content-Type) — fail closed.
+	//
+	// A denied list answers on every path it matches, but only to an MCP call:
+	// on its own it is no contract, so anything else is left alone here.
 	mcpSets := a.mcpRulesForPath(path)
+	var mcpDenies []*CBPMCPRules
+	if mcpDescriptorPopulated(req) {
+		mcpDenies = a.mcpDeniesForPath(path)
+	}
 	switch {
-	case len(mcpSets) > 0:
-		ret.MCPDecision = decideMCP(mcpSets, req, te, now, ns.Path)
+	case len(mcpSets) > 0 || len(mcpDenies) > 0:
+		ret.MCPDecision = decideMCP(mcpSets, mcpDenies, req, te, now, ns.Path)
 		if ret.MCPDecision != nil && ret.MCPDecision.Decision == "deny" {
 			return ret
 		}
@@ -769,7 +832,7 @@ CHECK:
 		// response-side list filtering: attach a keep-filter for a single
 		// list request, or fail closed on a batched list (unfilterable).
 		if !capCheckOnly && ret.MCPDecision != nil && ret.MCPDecision.Decision == "allow" {
-			if d := attachMCPListFilter(req, mcpSets); d != nil {
+			if d := attachMCPListFilter(req, mcpSets, mcpDenies); d != nil {
 				sanitizeMCPDecision(d)
 				ret.MCPDecision = d
 				return ret

@@ -510,6 +510,22 @@ func TestBuiltinPolicyWarnings(t *testing.T) {
 	elsewhere := mustParseMCP(t, ns, testMCPBody("mcp/gateway", "x"))
 	elsewhere.Name, elsewhere.Type = "ops-mcp", PolicyTypeMCP
 	assert.Empty(t, builtinPolicyWarnings(elsewhere))
+
+	narrowing := mustParseMCP(t, ns, "path \"sys/mcp\" {\n  tools { denied = [\"list_roles\"] }\n}\n")
+	narrowing.Name, narrowing.Type = "ops-mcp", PolicyTypeMCP
+	assert.Empty(t, builtinPolicyWarnings(narrowing), "a denied list does narrow discovery")
+
+	deadCondition := mustParseMCP(t, ns, "path \"mcp/gateway\" {\n  tools { denied = [\"x\"] }\n  condition = \"true\"\n}\n")
+	deadCondition.Name, deadCondition.Type = "ops-mcp", PolicyTypeMCP
+	w = builtinPolicyWarnings(deadCondition)
+	require.Len(t, w, 1)
+	assert.Contains(t, w[0], "no effect")
+
+	editedBuiltin := mustParseMCP(t, ns, "path \"sys/mcp\" {\n  tools { denied = [\"x\"] }\n  condition = \"true\"\n}\n")
+	editedBuiltin.Name, editedBuiltin.Type = builtinMCPPolicy, PolicyTypeMCP
+	w = builtinPolicyWarnings(editedBuiltin)
+	require.Len(t, w, 1, "an edited built-in is warned too")
+	assert.Contains(t, w[0], "no effect")
 }
 
 // buildCBPFor fetches te's namespace and compiles its CBP, as

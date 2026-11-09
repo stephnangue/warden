@@ -123,7 +123,8 @@ type MCPDecision struct {
 	// allowed it and were never consulted. On deny, every rule-set refused and
 	// the most informative refusal is reported, so this names the source of the
 	// reported reason rather than the sole cause: editing that one policy need
-	// not lift the denial, because the others denied too.
+	// not lift the denial, because the others denied too. A denied list is the
+	// exception: it is final, so this names the policy that holds it.
 	//
 	// Empty on structural denies (malformed body, oversized, and so on), which
 	// are produced before any rule-set is chosen.

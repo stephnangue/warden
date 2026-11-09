@@ -1662,7 +1662,7 @@ path "mcp/x" {
 		sets := cbp.mcpRulesForPath("mcp/x")
 		require.Len(t, sets, 3)
 		assert.Equal(t, []string{"m1", "m1", "m2"}, []string{sets[0].SourcePolicy, sets[1].SourcePolicy, sets[2].SourcePolicy})
-		assert.True(t, mcpListItemAllowed(sets, "tools/call", "c"))
+		assert.True(t, mcpListItemAllowed(sets, nil, "tools/call", "c"))
 
 		for _, order := range [][]*Policy{{m2, m1}, {m1}} {
 			_, err := NewCBP(ctx, order)
@@ -1819,14 +1819,14 @@ path "mcp/x" {
 	write("old")
 	first, err := ps.CBP(ctx, names)
 	require.NoError(t, err)
-	require.True(t, mcpListItemAllowed(first.mcpRulesForPath("mcp/x"), "tools/call", "old"))
+	require.True(t, mcpListItemAllowed(first.mcpRulesForPath("mcp/x"), nil, "tools/call", "old"))
 
 	write("new")
 	second, err := ps.CBP(ctx, names)
 	require.NoError(t, err)
 	sets := second.mcpRulesForPath("mcp/x")
-	assert.True(t, mcpListItemAllowed(sets, "tools/call", "new"))
-	assert.False(t, mcpListItemAllowed(sets, "tools/call", "old"))
+	assert.True(t, mcpListItemAllowed(sets, nil, "tools/call", "new"))
+	assert.False(t, mcpListItemAllowed(sets, nil, "tools/call", "old"))
 
 	require.NoError(t, ps.DeletePolicy(ctx, "contract", PolicyTypeMCP))
 	third, err := ps.CBP(ctx, names)
@@ -1952,7 +1952,7 @@ path "mcp/x" {
 				} {
 					cbp.AllowOperation(ctx, req, nil, false)
 				}
-				mcpListItemAllowed(cbp.mcpRulesForPath("mcp/x"), "tools/list", "search_issues")
+				mcpListItemAllowed(cbp.mcpRulesForPath("mcp/x"), nil, "tools/list", "search_issues")
 			}
 		}()
 	}
