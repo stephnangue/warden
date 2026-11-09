@@ -355,6 +355,67 @@ func TestGetProxy_DirectorCarriesRequestID(t *testing.T) {
 	assert.Empty(t, without.Header.Values(listener.ForwardedRequestIDHeader))
 }
 
+// The standby vouches for a client certificate only when it took that
+// certificate from its own handshake with the client, and only from what its
+// listener recorded: a marker or a certificate header the request still
+// carries never goes on, since the active node reads XFCC first.
+func TestGetProxy_DirectorCarriesCertProvenance(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	leaf := &x509.Certificate{}
+	leaf.Subject.CommonName = "fw-test"
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{{Leaf: leaf}}}
+	f := newStandbyForwarder(log, func() *tls.Config { return tlsCfg }, 30)
+	proxy := f.getProxy("https://leader:8201", "https://leader:8200")
+	require.NotNil(t, proxy)
+
+	clientCert := &x509.Certificate{Raw: []byte("client-der")}
+	tests := []struct {
+		name       string
+		ctx        func(context.Context) context.Context
+		wantCert   bool
+		wantMarker string
+	}{
+		{
+			name: "handshake certificate",
+			ctx: func(ctx context.Context) context.Context {
+				return listener.WithHandshakeClientCert(ctx, clientCert)
+			},
+			wantCert:   true,
+			wantMarker: listener.ForwardedCertHandshakeTrue,
+		},
+		{
+			name: "header certificate",
+			ctx: func(ctx context.Context) context.Context {
+				return listener.WithForwardedClientCert(ctx, clientCert)
+			},
+			wantCert: true,
+		},
+		{
+			name: "no certificate",
+			ctx:  func(ctx context.Context) context.Context { return ctx },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "https://standby:8200/v1/aws/gateway", nil)
+			req.Header.Set(listener.ForwardedCertHandshakeHeader, "forged")
+			req.Header.Set("X-Forwarded-Client-Cert", "forged")
+			req.Header.Set("X-SSL-Client-Cert", "forged")
+			req = req.WithContext(tc.ctx(req.Context()))
+
+			proxy.Director(req)
+
+			assert.Empty(t, req.Header.Get("X-Forwarded-Client-Cert"))
+			assert.Equal(t, tc.wantMarker, req.Header.Get(listener.ForwardedCertHandshakeHeader))
+			if tc.wantCert {
+				assert.Contains(t, req.Header.Get("X-SSL-Client-Cert"), "BEGIN+CERTIFICATE")
+			} else {
+				assert.Empty(t, req.Header.Get("X-SSL-Client-Cert"))
+			}
+		})
+	}
+}
+
 // capturingTransport records the request the proxy sends, as it goes out.
 type capturingTransport struct{ sent *http.Request }
 
