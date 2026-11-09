@@ -151,6 +151,12 @@ type Request struct {
 	// truncated hash of its jti), for the audit. Empty on every other request.
 	ProofID string `json:"-"`
 
+	// ProofOfPossession is whether the credential that authenticated this
+	// request proved, on this request, that its holder has the credential's
+	// key: a bound ticket's DPoP proof, or the TLS handshake of a client
+	// certificate. Only core sets it, once the credential has authenticated.
+	ProofOfPossession bool `json:"-"`
+
 	// body is the request body as core buffered it, and hasBody says whether
 	// it did; read through BufferedBody.
 	body    []byte

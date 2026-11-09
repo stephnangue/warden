@@ -56,6 +56,7 @@ func TestRoleHash(t *testing.T) {
 		"provider path": func(r *Role) { r.ProviderPath = "vault/" },
 		"metadata":      func(r *Role) { r.Metadata["env"] = "dev" },
 		"metadata key":  func(r *Role) { r.Metadata["extra"] = "" },
+		"key proof":     func(r *Role) { r.KeyProofOnly = true },
 	} {
 		r := base()
 		mutate(r)

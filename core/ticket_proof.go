@@ -47,7 +47,8 @@ func (e *ticketProofError) Unwrap() error        { return e.err }
 func (e *ticketProofError) Is(target error) bool { return target == ErrTokenNotFound }
 
 // checkTicketProof checks the proof a request offers for the ticket b binds,
-// and records the proof's id on the request for the audit. The proof must sign
+// and records on the request the proof's id, for the audit, and that the
+// credential proved possession of its key. The proof must sign
 // the request's method and path, the ticket, and the request's selectors,
 // query and, where core reads it whole, body (dpop.Context).
 func (c *Core) checkTicketProof(b *logical.KeyBinding, proof *ticketProof) error {
@@ -93,6 +94,7 @@ func (c *Core) checkTicketProof(b *logical.KeyBinding, proof *ticketProof) error
 		return &ticketProofError{proofErrInvalidProof, err}
 	}
 	req.ProofID = dpop.Hash([]byte(p.JTI))[:16]
+	req.ProofOfPossession = true
 	return nil
 }
 

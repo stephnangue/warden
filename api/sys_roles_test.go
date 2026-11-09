@@ -149,6 +149,24 @@ func TestSys_RoleGovernedOnly(t *testing.T) {
 	assert.NotContains(t, rec.body, "governed_only", "nil keeps the stored value")
 }
 
+func TestSys_RoleKeyProofOnly(t *testing.T) {
+	client, rec := newRoleServer(t, http.StatusOK, `{"data":{"name":"prod-deploy","policies":[],"key_proof_only":true}}`)
+	yes, no := true, false
+
+	role, err := client.Sys().UpdateRole("prod-deploy", &RoleInput{KeyProofOnly: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"key_proof_only": true}, rec.body)
+	assert.True(t, role.KeyProofOnly)
+
+	_, err = client.Sys().UpdateRole("prod-deploy", &RoleInput{KeyProofOnly: &no})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"key_proof_only": false}, rec.body)
+
+	_, err = client.Sys().UpdateRole("prod-deploy", &RoleInput{Description: strPtr("x")})
+	require.NoError(t, err)
+	assert.NotContains(t, rec.body, "key_proof_only", "nil keeps the stored value")
+}
+
 func TestSys_UpdateRole_Conflict(t *testing.T) {
 	client, _ := newRoleServer(t, http.StatusConflict, `{"errors":["role \"deploy\" changed since it was read"]}`)
 

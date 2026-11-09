@@ -192,6 +192,7 @@ func TestTicketRequest_Bound(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, resp.Err)
 		assert.True(t, req.TicketAdmitted)
+		assert.True(t, req.ProofOfPossession)
 		assert.Equal(t, "group:humans", req.RoleGrant().GrantedBy)
 
 		entry := e.audit.requestFor(t, "sys/providers")

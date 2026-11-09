@@ -647,3 +647,106 @@ func TestGovernedOnly_Tickets(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, logical.RoleDeniedGovernedOnly, req.RoleGrant().DeniedReason)
 }
+
+// setKeyProofOnly writes the role name's key_proof_only flag through the store.
+func setKeyProofOnly(t *testing.T, c *Core, ctx context.Context, name string, v bool) {
+	t.Helper()
+	r, hash, err := c.roleStore.Get(ctx, name)
+	require.NoError(t, err)
+	r.KeyProofOnly = v
+	_, err = c.roleStore.Update(ctx, r, hash)
+	require.NoError(t, err)
+}
+
+// Flagging a role refuses a credential that proved nothing on its next
+// request, with no write to the group, and grants it to one that did. Clearing
+// the flag restores the grant. A caller no group grants the role learns only
+// that, not that the role asks for a proof.
+func TestKeyProofOnly_Grant(t *testing.T) {
+	e := newIdentityEnv(t)
+	req, _, te, err := e.check("deploy")
+	requireGranted(t, req, te, err, "deploy")
+
+	setKeyProofOnly(t, e.c, e.ctx, "deploy", true)
+	req, _, te, err = e.check("deploy")
+	rerr := requireDenied(t, req, err, logical.RoleDeniedKeyProofRequired)
+	assert.Equal(t, `role "deploy" requires proof of key possession: present a DPoP-bound ticket, or a client certificate over direct mTLS`, rerr.Message)
+	assert.Empty(t, te.Policies)
+
+	req = mustTransparent(e, e.token, "deploy")
+	req.ProofOfPossession = true
+	te = req.TokenEntry()
+	e.c.resolveRoleGrant(req, te, namespace.RootNamespace, time.Now())
+	assert.Empty(t, req.RoleGrant().DeniedReason)
+	assert.Equal(t, "deploy", te.RoleName)
+
+	setKeyProofOnly(t, e.c, e.ctx, "deploy", false)
+	req, _, te, err = e.check("deploy")
+	requireGranted(t, req, te, err, "deploy")
+
+	_, err = e.c.roleStore.Create(e.ctx, &logical.Role{Name: "locked", KeyProofOnly: true})
+	require.NoError(t, err)
+	req, _, _, err = e.check("locked")
+	requireDenied(t, req, err, logical.RoleDeniedNotAssumable)
+}
+
+// The refusal allocates nothing on a cached membership, like every other.
+func TestKeyProofOnly_DoesNotAllocate(t *testing.T) {
+	e := newIdentityEnv(t)
+	setKeyProofOnly(t, e.c, e.ctx, "deploy", true)
+	req := mustTransparent(e, e.token, "deploy")
+	te := req.TokenEntry()
+	now := time.Now()
+	e.c.resolveRoleGrant(req, te, namespace.RootNamespace, now)
+	require.Equal(t, logical.RoleDeniedKeyProofRequired, req.RoleGrant().DeniedReason)
+	assert.Zero(t, testing.AllocsPerRun(1000, func() { e.c.resolveRoleGrant(req, te, namespace.RootNamespace, now) }))
+}
+
+// Reads show the flag, false included. An edit that leaves it out keeps it, an
+// explicit false clears it, and a role without it hashes as before.
+func TestKeyProofOnly_Writes(t *testing.T) {
+	c := setupEntityMounts(t)
+	ctx := rootCtx()
+	resp := roleRequest(t, c, ctx, logical.CreateOperation, "roles/prod-deploy", map[string]any{"policies": []any{"deploy"}})
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, false, resp.Data["key_proof_only"])
+	h1 := resp.Data["hash"]
+
+	resp = roleRequest(t, c, ctx, logical.UpdateOperation, "roles/prod-deploy", map[string]any{"key_proof_only": true})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, true, resp.Data["key_proof_only"])
+	assert.NotEqual(t, h1, resp.Data["hash"], "the flag is part of the hash")
+
+	resp = roleRequest(t, c, ctx, logical.UpdateOperation, "roles/prod-deploy", map[string]any{"description": ""})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, true, resp.Data["key_proof_only"])
+
+	resp = roleRequest(t, c, ctx, logical.ReadOperation, "roles/prod-deploy", nil)
+	assert.Equal(t, true, resp.Data["key_proof_only"])
+
+	resp = roleRequest(t, c, ctx, logical.UpdateOperation, "roles/prod-deploy", map[string]any{"key_proof_only": false})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, false, resp.Data["key_proof_only"])
+	assert.Equal(t, h1, resp.Data["hash"], "a role without the flag hashes as before")
+
+	resp = roleRequest(t, c, ctx, logical.CreateOperation, "roles/born-flagged", map[string]any{"policies": []any{"deploy"}, "key_proof_only": true})
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "%v", resp.Err)
+	assert.Equal(t, true, resp.Data["key_proof_only"], "a create sets the flag")
+}
+
+// A bound ticket whose proof was checked is granted a key_proof_only role; a
+// bearer ticket proves nothing and is refused.
+func TestKeyProofOnly_Tickets(t *testing.T) {
+	e := newTicketRequestEnv(t)
+	setKeyProofOnly(t, e.c, e.ctx, "operator", true)
+
+	resp, req, err := e.doBound(http.MethodGet, "sys/providers?role=operator", nil, "", true, nil)
+	require.NoError(t, err)
+	require.Nil(t, resp.Err)
+	assert.Empty(t, req.RoleGrant().DeniedReason)
+
+	_, req, err = e.do("sys/providers?role=operator", wardenToken(e.value))
+	require.Error(t, err)
+	assert.False(t, req.ProofOfPossession)
+	assert.Equal(t, logical.RoleDeniedKeyProofRequired, req.RoleGrant().DeniedReason)
+}

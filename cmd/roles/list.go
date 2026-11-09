@@ -171,6 +171,7 @@ func projectInventory(roles []*api.Role, grants map[string][]string) []map[strin
 			"skill":          r.Skill,
 			"metadata":       metadata,
 			"governed_only":  r.GovernedOnly,
+			"key_proof_only": r.KeyProofOnly,
 			"builtin":        r.Builtin,
 		}
 		if grants != nil {
@@ -202,10 +203,11 @@ func printInventoryTable(items []map[string]any) {
 			cell(it["provider_path"]),
 			cell(it["skill"]),
 			cell(it["governed_only"]),
+			cell(it["key_proof_only"]),
 			cell(it["metadata"]),
 		}
 	}
-	helpers.PrintTable([]string{"Name", "Built-in", "Description", "Granted By", "Policies", "Cred Spec", "Provider Path", "Skill", "Governed Only", "Metadata"}, rows)
+	helpers.PrintTable([]string{"Name", "Built-in", "Description", "Granted By", "Policies", "Cred Spec", "Provider Path", "Skill", "Governed Only", "Key Proof Only", "Metadata"}, rows)
 }
 
 // projectRoles shapes the discovered roles for output. The discovery fields

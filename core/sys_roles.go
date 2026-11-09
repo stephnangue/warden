@@ -55,6 +55,12 @@ func (b *SystemBackend) pathRoles() []*framework.Path {
 						"active entity. No virtual group grants it, so neither an unclaimed agent nor a human holds it, " +
 						"and a virtual group listing it is refused at write. Defaults to false.",
 				},
+				"key_proof_only": {
+					Type: framework.TypeBool,
+					Description: "Grant the role only to a request whose credential proved possession of its key: a " +
+						"DPoP-bound ticket, or a client certificate from a direct TLS handshake. Bearer credentials and " +
+						"certificates a proxy passed in a header are refused. Defaults to false.",
+				},
 				"expected_hash": {
 					Type:        framework.TypeString,
 					Description: "Apply the update or delete only if the role still has this hash (from a read)",
@@ -83,7 +89,8 @@ func (b *SystemBackend) pathRoles() []*framework.Path {
 				"and how discovery describes it (description, skill, provider_path). " +
 				"A policy or credential spec that does not exist yet is accepted with a warning. " +
 				"governed_only restricts it to static groups of governed entities; the write warns, naming the " +
-				"virtual groups that list it and no longer grant it.",
+				"virtual groups that list it and no longer grant it. " +
+				"key_proof_only refuses a request whose credential did not prove possession of its key.",
 		},
 		{
 			Pattern: "roles/?$",
@@ -125,6 +132,7 @@ func roleToMap(r *logical.Role) map[string]any {
 		"provider_path":  r.ProviderPath,
 		"metadata":       metadata,
 		"governed_only":  r.GovernedOnly,
+		"key_proof_only": r.KeyProofOnly,
 		"created_at":     r.CreatedAt,
 		"updated_at":     r.UpdatedAt,
 	}
@@ -170,6 +178,7 @@ func (b *SystemBackend) handleRoleCreate(ctx context.Context, req *logical.Reque
 		ProviderPath: d.Get("provider_path").(string),
 		Metadata:     d.Get("metadata").(map[string]string),
 		GovernedOnly: d.Get("governed_only").(bool),
+		KeyProofOnly: d.Get("key_proof_only").(bool),
 	}
 
 	warnings, err := b.core.roleStore.Create(ctx, role)
@@ -359,6 +368,9 @@ func mergeRoleFields(role *logical.Role, d *framework.FieldData) {
 	}
 	if v, ok := d.GetOk("governed_only"); ok {
 		role.GovernedOnly = v.(bool)
+	}
+	if v, ok := d.GetOk("key_proof_only"); ok {
+		role.KeyProofOnly = v.(bool)
 	}
 }
 
