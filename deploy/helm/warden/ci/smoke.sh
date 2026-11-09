@@ -19,7 +19,7 @@
 # (which has its own unit + e2e coverage).
 #
 # Image build uses `docker buildx build --load` with the multi-stage
-# Dockerfile.smoke (golang:1.26 -> distroless). Comfortable inside
+# Dockerfile.smoke (golang:1.27 -> distroless). Comfortable inside
 # CI's 16 GB ubuntu-latest runners; Docker Desktop with the default
 # 8 GB cap may OOM on the AWS SDK compile — bump to 12 GB+ locally.
 #
