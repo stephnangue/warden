@@ -369,7 +369,7 @@ func TestBuiltinRoles_BodiesParse(t *testing.T) {
 			// comment there would run into the next clause: comments go
 			// outside the condition, as HCL comments.
 			for _, pc := range p.Paths {
-				for _, cond := range pc.Permissions.Conditions {
+				if cond := pc.Permissions.Condition; cond != nil {
 					assert.NotContains(t, cond.Source, "//", builtinRoles[i].role.Name)
 				}
 			}

@@ -43,7 +43,7 @@ type Auth struct {
 
 	// Condition carries the path-level CEL condition decision when a
 	// path-level condition was evaluated during CBP evaluation. nil when the
-	// matched permission had no path-level condition. Flows through
+	// operation answered to no path-level condition. Flows through
 	// buildAuditAuth into audit.PolicyResults.Condition.
 	Condition *ConditionResult
 

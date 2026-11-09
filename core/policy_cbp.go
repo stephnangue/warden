@@ -183,7 +183,7 @@ type CBPResults struct {
 
 	// Condition is populated when a path-level CEL condition was evaluated,
 	// carrying the audited decision (expression + sanitized error). nil when
-	// the matched permission had no path-level condition.
+	// no stanza's condition had to be evaluated for this operation.
 	Condition *logical.ConditionResult
 }
 
@@ -264,13 +264,13 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 			if !ok {
 				// The compiled entry is a copy of the stanza's permissions in
 				// this compile's slab, recording the policy that brought them.
-				// The copy shares the parsed Conditions backing array; the merge
-				// below never appends into it in place (see the full slice
-				// expression there).
 				a.slab = append(a.slab, *pc.Permissions)
 				e := &a.slab[len(a.slab)-1]
 				e.owner = policy
 				e.ownerCaps = pc.Permissions.CapabilitiesBitmap
+				if pc.Permissions.Condition == nil {
+					e.unconditionalCaps = pc.Permissions.CapabilitiesBitmap
+				}
 				a.store(pc, e, stanzas)
 				continue
 			}
@@ -292,7 +292,10 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 				// Insert the capabilities in this new policy into the existing
 				// value
 				existingPerms.CapabilitiesBitmap = existingPerms.CapabilitiesBitmap | pc.Permissions.CapabilitiesBitmap
-				existingPerms.extra = append(existingPerms.extra, grantRef{policy: policy, caps: pc.Permissions.CapabilitiesBitmap})
+				existingPerms.extra = append(existingPerms.extra, grantRef{policy: policy, caps: pc.Permissions.CapabilitiesBitmap, cond: pc.Permissions.Condition})
+				if pc.Permissions.Condition == nil {
+					existingPerms.unconditionalCaps |= pc.Permissions.CapabilitiesBitmap
+				}
 			}
 
 			// Lowest set pagination limit wins.
@@ -308,22 +311,6 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 			// list_scan_response_keys_filter_path value wins.
 			if len(pc.Permissions.ResponseKeysFilterPath) > 0 && len(existingPerms.ResponseKeysFilterPath) == 0 {
 				existingPerms.ResponseKeysFilterPath = pc.Permissions.ResponseKeysFilterPath
-			}
-
-			// CEL conditions merge with "unconditional wins" OR semantics
-			// across policies: a merged-in policy without a condition makes the
-			// path unconditional (it already permits every request); otherwise
-			// the conditions are appended and the gate passes if any one is true.
-			switch {
-			case existingPerms.Conditions == nil:
-				// Path already unconditional; stays unconditional.
-			case pc.Permissions.Conditions == nil:
-				existingPerms.Conditions = nil
-			default:
-				// Full slice expression: the first policy's Conditions backing
-				// array belongs to the parsed policy, so the append must copy.
-				c := existingPerms.Conditions
-				existingPerms.Conditions = append(c[:len(c):len(c)], pc.Permissions.Conditions...)
 			}
 		}
 	}
@@ -481,8 +468,41 @@ func (a *CBP) Capabilities(ctx context.Context, path string) (pathCapabilities [
 	return pathCapabilities
 }
 
-// AllowOperation is used to check if the given operation is permitted.
-func (a *CBP) AllowOperation(ctx context.Context, req *logical.Request, te *logical.TokenEntry, capCheckOnly bool) (ret *CBPResults) {
+// sudoHeld reports whether sudo applies to this request, given passed, the
+// condition that admitted the operation (nil when an unconditional stanza did).
+// Sudo answers to the condition of the stanza bringing it, like any capability,
+// but is asked for apart from the operation: only a Root path needs it. So a
+// condition that gates nothing but sudo is evaluated only when needSudo is set,
+// and its result is returned for the audit only then.
+func (p *CBPPermissions) sudoHeld(passed *compiledCondition, needSudo bool, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) (bool, *logical.ConditionResult) {
+	if p.unconditionalCaps&SudoCapabilityInt != 0 || p.carries(passed, SudoCapabilityInt) {
+		return true, nil
+	}
+	if !needSudo {
+		return false, nil
+	}
+	var buf [4]*compiledCondition
+	conds := p.conditionsFor(SudoCapabilityInt, buf[:0])
+	if len(conds) == 0 {
+		// Unreachable on an entry NewCBP built. An empty list reads as
+		// unconditional, so it must not reach the evaluator.
+		return false, nil
+	}
+	ok, res, _ := evaluatePathConditions(conds, req, te, now, nsPath)
+	return ok, res
+}
+
+// AllowOperation is used to check if the given operation is permitted. Its
+// RootPrivs is always resolved; the request path goes through allowOperation,
+// which knows whether the path needs it.
+func (a *CBP) AllowOperation(ctx context.Context, req *logical.Request, te *logical.TokenEntry, capCheckOnly bool) *CBPResults {
+	return a.allowOperation(ctx, req, te, capCheckOnly, true)
+}
+
+// allowOperation is AllowOperation for a path that needs sudo or does not. A
+// condition gating nothing but sudo is evaluated only when needSudo is set;
+// otherwise RootPrivs comes back false for it, and nothing reads it.
+func (a *CBP) allowOperation(ctx context.Context, req *logical.Request, te *logical.TokenEntry, capCheckOnly, needSudo bool) (ret *CBPResults) {
 	ret = new(CBPResults)
 
 	// Fast-path root.
@@ -607,15 +627,35 @@ CHECK:
 	// conditions evaluate against a single, consistent instant.
 	now := time.Now()
 
-	// Path-level CEL condition gate, before MCP and parameter validation.
-	// Empty/nil Conditions is unconditional. Fail-closed: an erroring or false
-	// condition denies; the deciding result is recorded for audit on every
-	// branch.
-	if len(permissions.Conditions) > 0 {
-		allowed, condRes := evaluatePathConditions(permissions.Conditions, req, te, now, ns.Path)
-		ret.Condition = condRes
+	// Path-level CEL condition gate, before MCP and parameter validation. Only
+	// the stanzas bringing the operation's capability count: one of them with
+	// no condition grants it outright, otherwise any of their conditions must
+	// hold. Fail-closed: an erroring or false condition denies; the deciding
+	// result is recorded for audit on every branch.
+	var passed *compiledCondition
+	if permissions.unconditionalCaps&grantCap == 0 {
+		var buf [4]*compiledCondition
+		conds := permissions.conditionsFor(grantCap, buf[:0])
+		if len(conds) == 0 {
+			// Unreachable on an entry NewCBP built. An empty list reads as
+			// unconditional, so it must not reach the evaluator.
+			return ret
+		}
+		var allowed bool
+		allowed, ret.Condition, passed = evaluatePathConditions(conds, req, te, now, ns.Path)
 		if !allowed {
 			return ret
+		}
+	}
+
+	// Sudo answers to the condition of the stanza that brought it. A refusal
+	// is the decision that counts, so it replaces the operation's allow; a
+	// sudo condition that held is recorded when nothing else was.
+	if ret.RootPrivs {
+		held, res := permissions.sudoHeld(passed, needSudo, req, te, now, ns.Path)
+		ret.RootPrivs = held
+		if res != nil && (!held || ret.Condition == nil) {
+			ret.Condition = res
 		}
 	}
 
@@ -668,7 +708,7 @@ CHECK:
 		return ret
 	}
 
-	ret.GrantingPolicies = permissions.grantingFor(grantCap)
+	ret.GrantingPolicies = permissions.grantingFor(grantCap, passed)
 
 	// Pagination clamping and list-response key filtering for list/scan.
 	// (Request-body parameter constraints have been removed; express value
@@ -958,7 +998,7 @@ func (c *Core) performPolicyChecks(ctx context.Context, cbp *CBP, te *logical.To
 
 	// First, perform normal CBP checks if requested.
 	if cbp != nil && !opts.Unauth {
-		ret.CBPResults = cbp.AllowOperation(ctx, req, te, false)
+		ret.CBPResults = cbp.allowOperation(ctx, req, te, false, opts.RootPrivsRequired)
 		ret.RootPrivs = ret.CBPResults.RootPrivs
 		// Root is always allowed; skip other checks
 		if ret.CBPResults.IsRoot {

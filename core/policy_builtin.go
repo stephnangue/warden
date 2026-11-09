@@ -289,9 +289,10 @@ func (ps *PolicyStore) appendDefaultPolicies(ctx context.Context, dst []*Policy)
 // to be stored. A built-in is attached to every request, so a stanza outside
 // the discovery paths widens every caller in the namespace. Any other policy
 // stanza on a discovery path that carries a condition, or an MCP contract,
-// does not narrow what the built-ins grant there: policies merge, a merged-in
-// stanza without a condition makes the path unconditional, and MCP rule-sets
-// are alternatives. Only an exact-path deny narrows discovery for a role.
+// does not narrow what the built-ins grant there: policies merge, the
+// built-ins' stanzas carry no condition, so what they grant stays granted, and
+// MCP rule-sets are alternatives. Only an exact-path deny narrows discovery for
+// a role.
 func builtinPolicyWarnings(p *Policy) []string {
 	var warnings []string
 	if isBuiltinPolicy(p.Name, p.Type) {
@@ -308,7 +309,7 @@ func builtinPolicyWarnings(p *Policy) []string {
 		if !isDiscoveryStanza(p, pr) {
 			continue
 		}
-		conditional := pr.Permissions != nil && len(pr.Permissions.Conditions) > 0
+		conditional := pr.Permissions != nil && pr.Permissions.Condition != nil
 		if p.Type == PolicyTypeMCP || conditional {
 			warnings = append(warnings, fmt.Sprintf(
 				"path %q is also granted by the built-in policies, which merge with this one: "+

@@ -98,10 +98,11 @@ type Policy struct {
 }
 
 // grantRef is one policy merged into a compiled path entry after the first,
-// with the capabilities its stanza brought.
+// with the capabilities its stanza brought and the condition they answer to.
 type grantRef struct {
 	policy *Policy
 	caps   uint32
+	cond   *compiledCondition
 }
 
 // policyInfo is the granting-policies record naming p.
@@ -177,7 +178,7 @@ type PathRules struct {
 
 	// ConditionHCL is the optional path-level CEL condition expression. The
 	// rule applies only if it evaluates true (in addition to the structured
-	// gates). Compiled at parse time into pc.Permissions.Conditions.
+	// gates). Compiled at parse time into pc.Permissions.Condition.
 	ConditionHCL string `hcl:"condition"`
 
 	// MCPHCL is the decode target for the removed `mcp { }` block. It exists
@@ -218,12 +219,15 @@ type CBPPermissions struct {
 	owner     *Policy
 	ownerCaps uint32
 	extra     []grantRef
-	// Conditions holds compiled path-level CEL conditions from all merged
-	// policies for this path. nil means no condition (unconditional at this
-	// layer). Non-nil: the gate passes if at least one program evaluates true
-	// (OR across policies). Programs are immutable and shared (not deep-copied)
-	// across merged CBPs.
-	Conditions []*compiledCondition
+	// unconditionalCaps is the capabilities some stanza at this path brought
+	// with no condition. A capability in it is granted without evaluating
+	// anything. Set by NewCBP on its own copy.
+	unconditionalCaps uint32
+	// Condition is the compiled path-level CEL condition of the stanza these
+	// permissions came from, gating that stanza's capabilities and no others.
+	// On a compiled entry it is the owner's; extra holds the others. nil means
+	// no condition. Programs are immutable and shared across merged CBPs.
+	Condition *compiledCondition
 	// MCP holds MCP rule-sets from all merged policies for this path.
 	// nil/empty means no MCP enforcement applies. Non-nil: each entry is one
 	// source stanza's rules; a request is allowed if at least one set
@@ -259,39 +263,70 @@ type CBPMCPRules struct {
 	SourcePolicy string
 }
 
-// grantingFor names the policies whose stanzas brought capability cap to this
-// compiled entry, owner first, then merged policies in insertion order. When
-// the owner alone grants it, the answer is the owner's shared slice and costs
-// no allocation; only a grant shared by several policies builds a new one.
-func (p *CBPPermissions) grantingFor(cap uint32) []sdklogical.PolicyInfo {
+// grantingFor names the policies whose stanzas granted capability cap on this
+// request, owner first, then merged policies in insertion order. passed is the
+// condition that admitted the request, nil when an unconditional stanza did:
+// only the stanzas answering to it granted anything. When the owner alone
+// granted, the answer is the owner's shared slice and costs no allocation; only
+// a grant shared by several policies builds a new one.
+func (p *CBPPermissions) grantingFor(cap uint32, passed *compiledCondition) []sdklogical.PolicyInfo {
 	if p.owner == nil {
 		return nil
 	}
+	ownerGranted := p.ownerCaps&cap != 0 && p.Condition == passed
 	n := 0
-	if p.ownerCaps&cap != 0 {
+	if ownerGranted {
 		n++
 	}
 	for _, g := range p.extra {
-		if g.caps&cap != 0 {
+		if g.caps&cap != 0 && g.cond == passed {
 			n++
 		}
 	}
 	switch {
 	case n == 0:
 		return nil
-	case n == 1 && p.ownerCaps&cap != 0:
+	case n == 1 && ownerGranted:
 		return p.owner.grantInfo()
 	}
 	out := make([]sdklogical.PolicyInfo, 0, n)
-	if p.ownerCaps&cap != 0 {
+	if ownerGranted {
 		out = append(out, policyInfo(p.owner))
 	}
 	for _, g := range p.extra {
-		if g.caps&cap != 0 {
+		if g.caps&cap != 0 && g.cond == passed {
 			out = append(out, policyInfo(g.policy))
 		}
 	}
 	return out
+}
+
+// conditionsFor appends to buf the conditions of the conditional stanzas that
+// bring capability cap. A caller passes a stack buffer, so the common case
+// allocates nothing.
+func (p *CBPPermissions) conditionsFor(cap uint32, buf []*compiledCondition) []*compiledCondition {
+	if p.ownerCaps&cap != 0 && p.Condition != nil {
+		buf = append(buf, p.Condition)
+	}
+	for i := range p.extra {
+		if g := &p.extra[i]; g.caps&cap != 0 && g.cond != nil {
+			buf = append(buf, g.cond)
+		}
+	}
+	return buf
+}
+
+// carries reports whether a stanza answering to condition cond brings cap.
+func (p *CBPPermissions) carries(cond *compiledCondition, cap uint32) bool {
+	if p.ownerCaps&cap != 0 && p.Condition == cond {
+		return true
+	}
+	for i := range p.extra {
+		if g := &p.extra[i]; g.caps&cap != 0 && g.cond == cond {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseCBPPolicy is used to parse the specified CBP rules into an
@@ -506,7 +541,7 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			if err != nil {
 				return fmt.Errorf("path %q condition: %w", key, err)
 			}
-			pc.Permissions.Conditions = []*compiledCondition{cond}
+			pc.Permissions.Condition = cond
 		}
 	PathFinished:
 		paths = append(paths, &pc)

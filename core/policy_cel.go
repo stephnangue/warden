@@ -1017,13 +1017,14 @@ func celErrorKind(err error) string {
 	}
 }
 
-// evaluatePathConditions evaluates the merged path-level conditions with OR
-// semantics: the gate passes if any condition is true. An empty list is
-// unconditional. Evaluation is fail-closed — an erroring condition denies, and
-// if no condition passes the deciding result is recorded for audit (Sanitized).
-func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) (bool, *logical.ConditionResult) {
+// evaluatePathConditions evaluates the conditions of the stanzas granting a
+// capability with OR semantics: the gate passes if any condition is true, and
+// the third result is that condition. An empty list is unconditional.
+// Evaluation is fail-closed — an erroring condition denies, and if no condition
+// passes the deciding result is recorded for audit (Sanitized).
+func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te *logical.TokenEntry, now time.Time, nsPath string) (bool, *logical.ConditionResult, *compiledCondition) {
 	if len(conds) == 0 {
-		return true, nil
+		return true, nil, nil
 	}
 	// Build the activation pruned to the union of fields the conditions read.
 	// The common single-condition case reuses its field-sets with no allocation.
@@ -1052,7 +1053,7 @@ func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te
 		if ok {
 			res := &logical.ConditionResult{Decision: "allow", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, c.RefSegs, act)}
 			res.Sanitize()
-			return true, res
+			return true, res, c
 		}
 		if deciding == nil {
 			deciding = &logical.ConditionResult{Decision: "deny", Expression: c.Source, Inputs: resolveConditionInputs(c.RefPaths, c.RefSegs, act)}
@@ -1069,7 +1070,7 @@ func evaluatePathConditions(conds []*compiledCondition, req *logical.Request, te
 	// Sanitize only rewrites strings, so the flag survives it either way.
 	deciding.UserAbsent = !usr.Present && conditionsReferenceUser(conds)
 	deciding.Sanitize()
-	return false, deciding
+	return false, deciding, nil
 }
 
 // conditionsReferenceUser reports whether any condition reads the `user`
