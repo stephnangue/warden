@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -227,6 +228,34 @@ func bearerRequest(bearer string) *logical.Request {
 	return &logical.Request{Operation: logical.ReadOperation, Path: "introspect/roles", HTTPRequest: httpReq}
 }
 
+// handshakeCertRequest is bearerRequest with a client certificate from a TLS
+// handshake.
+func handshakeCertRequest(bearer string) *logical.Request {
+	req := bearerRequest(bearer)
+	cert := &x509.Certificate{Raw: []byte("client-cert")}
+	req.HTTPRequest = req.HTTPRequest.WithContext(listener.WithHandshakeClientCert(req.HTTPRequest.Context(), cert))
+	return req
+}
+
+// forwardedCertRequest is bearerRequest with a client certificate a proxy
+// passed in a header.
+func forwardedCertRequest(bearer string) *logical.Request {
+	req := bearerRequest(bearer)
+	cert := &x509.Certificate{Raw: []byte("client-cert")}
+	req.HTTPRequest = req.HTTPRequest.WithContext(listener.WithForwardedClientCert(req.HTTPRequest.Context(), cert))
+	return req
+}
+
+// rolesAs is the names of the roles sys/introspect/roles lists for req.
+func (e *discEnv) rolesAs(req *logical.Request) []string {
+	e.t.Helper()
+	resp, err := e.introspectAs(req)
+	require.NoError(e.t, err)
+	require.NotNil(e.t, resp)
+	require.NoError(e.t, resp.Err)
+	return roleNames(resp.Data["roles"].([]admittedRole))
+}
+
 // introspectAs reads sys/introspect/roles through the request path, in the
 // env's namespace, with req's HTTP request.
 func (e *discEnv) introspectAs(req *logical.Request) (*logical.Response, error) {
@@ -327,6 +356,33 @@ func discRule(mounts []string, repos ...string) logical.GroupRule {
 		r["repo"] = repos
 	}
 	return r
+}
+
+// A key_proof_only role is judged at its own target mount, by the credential
+// that mount would take from the request, however many mounts admit it.
+func TestDiscoveryAdmit_KeyProofPerTarget(t *testing.T) {
+	e := newDiscEnv(t, "", "")
+	e.stub.nextFormat = logical.CredentialFormatCert
+	e.mountAuth("cert/").needCert = true
+	e.stub.nextFormat = logical.CredentialFormatJWT
+	e.mountAuth("jwt/")
+	e.stub.nextFormat = logical.CredentialFormatSPIFFE
+	e.mountAuth("spiffe/")
+	e.provider("vault", "vault-cert/", "auth/cert/")
+	e.provider("vault", "vault-jwt/", "auth/jwt/")
+	e.provider("vault", "vault-spiffe/", "auth/spiffe/")
+	e.grant("all", []string{"auth/cert/", "auth/jwt/", "auth/spiffe/"},
+		&logical.Role{Name: "via-cert", ProviderPath: "vault-cert/", KeyProofOnly: true},
+		&logical.Role{Name: "via-jwt", ProviderPath: "vault-jwt/", KeyProofOnly: true},
+		&logical.Role{Name: "via-spiffe", ProviderPath: "vault-spiffe/", KeyProofOnly: true})
+
+	assert.Equal(t, []string{"via-cert", "via-spiffe"}, e.rolesAs(handshakeCertRequest("")))
+	assert.Equal(t, []string{"via-cert", "via-spiffe"}, e.rolesAs(handshakeCertRequest("eyJ.any.token")),
+		"the JWT mount takes the bearer; a SPIFFE mount takes the certificate over a JWT that is no SVID")
+
+	svid := mintK8sJWT(`{"sub":"spiffe://example.org/ns/default/sa/api"}`)
+	assert.Equal(t, []string{"via-cert"}, e.rolesAs(handshakeCertRequest(svid)),
+		"a SPIFFE mount prefers a JWT-SVID to the certificate beside it")
 }
 
 // A role is listed when the target mount admits the credential and a group

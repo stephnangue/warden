@@ -247,12 +247,14 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 	}
 	slices.SortFunc(admitted, func(a, b discoveryAdmitted) int { return strings.Compare(a.mount, b.mount) })
 
-	// A governed_only role a virtual group grants is not listed: the next
-	// request would refuse it.
+	// A role the next request would refuse is not listed: a governed_only
+	// role a virtual group grants, or a key_proof_only role whose target would
+	// not take a certificate the handshake proved. Each is judged at its own
+	// target, since the credential a request presents depends on the mount.
 	var granted []*logical.Role
 	for i, r := range roles {
 		if t := targetOf[i]; t != "" {
-			if g, ok := grants[t][r.Name]; ok && r.GrantedThrough(g.Type) {
+			if g, ok := grants[t][r.Name]; ok && r.GrantedThrough(g.Type) && (!r.KeyProofOnly || c.certProvenAt(ctx, req, t)) {
 				granted = append(granted, r)
 			}
 		}
@@ -261,6 +263,25 @@ func (c *Core) discoverFromAdmissions(ctx context.Context, req *logical.Request)
 		ns: ns, granted: granted, providers: providers, warnings: warnings,
 		admitted: admitted, failed: failed,
 	}, nil
+}
+
+// certProvenAt reports whether a request through the auth mount at mount
+// (relative to the namespace in ctx, without "auth/") would be authenticated
+// by a client certificate from a TLS handshake, the only proof of possession
+// open to a credential an auth mount admits. The bearer comes from the request's
+// header, whatever req.ClientToken holds, as the mounts' own admission reads it:
+// a JWT-SVID there is what a SPIFFE mount would take, not the certificate beside
+// it.
+func (c *Core) certProvenAt(ctx context.Context, req *logical.Request, mount string) bool {
+	if !certFromHandshake(req) {
+		return false
+	}
+	presented := &logical.Request{
+		HTTPRequest: req.HTTPRequest,
+		ClientToken: logical.StripBearer(req.HTTPRequest.Header.Get("Authorization")),
+	}
+	tc, _, err := c.transparentCredentialAt(ctx, presented, mount)
+	return err == nil && tc.cert
 }
 
 // namespaceAuthTarget returns the auth mount the namespace's auto_auth_path

@@ -137,20 +137,31 @@ func (c *Core) admitRoleless(ctx context.Context, req *logical.Request) *logical
 // namespace in ctx, without "auth/"): the credential keyed as implicit auth
 // keys it (transparentCredentialOf), with the mount's accessor.
 func (c *Core) identityTokenIDAt(ctx context.Context, req *logical.Request, mount string) (string, error) {
-	path := authRoutePrefix + mount
-	entry, backend := c.router.MatchingMountEntryAndBackend(ctx, path)
-	if entry == nil {
-		return "", fmt.Errorf("no auth mount at %q", path)
-	}
-	formatProvider, ok := backend.(logical.CredentialFormatProvider)
-	if !ok {
-		return "", fmt.Errorf("auth method %q at %q names no credential format", entry.Type, path)
-	}
-	tc, err := transparentCredentialOf(req, "", formatProvider.CredentialFormat(), entry.Type, path)
+	tc, accessor, err := c.transparentCredentialAt(ctx, req, mount)
 	if err != nil {
 		return "", err
 	}
-	return identityTokenType.ComputeID(identityTokenType.LookupValue(tc.key, entry.Accessor)), nil
+	return identityTokenType.ComputeID(identityTokenType.LookupValue(tc.key, accessor)), nil
+}
+
+// transparentCredentialAt returns the credential the auth mount at mount
+// (relative to the namespace in ctx, without "auth/") takes from req, and the
+// mount's accessor.
+func (c *Core) transparentCredentialAt(ctx context.Context, req *logical.Request, mount string) (transparentCredential, string, error) {
+	path := authRoutePrefix + mount
+	entry, backend := c.router.MatchingMountEntryAndBackend(ctx, path)
+	if entry == nil {
+		return transparentCredential{}, "", fmt.Errorf("no auth mount at %q", path)
+	}
+	formatProvider, ok := backend.(logical.CredentialFormatProvider)
+	if !ok {
+		return transparentCredential{}, "", fmt.Errorf("auth method %q at %q names no credential format", entry.Type, path)
+	}
+	tc, err := transparentCredentialOf(req, "", formatProvider.CredentialFormat(), entry.Type, path)
+	if err != nil {
+		return transparentCredential{}, "", err
+	}
+	return tc, entry.Accessor, nil
 }
 
 // discoveryAnonymousMethods are the MCP methods of the discovery server whose
