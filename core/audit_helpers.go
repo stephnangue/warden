@@ -179,6 +179,7 @@ func buildAuditAuth(auth *logical.Auth, te *logical.TokenEntry) *audit.Auth {
 			if auth.Condition != nil {
 				auditAuth.PolicyResults.Condition = auth.Condition
 			}
+			auditAuth.PolicyResults.DenyingPolicy = auth.DenyingPolicy
 		}
 	}
 

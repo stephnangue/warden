@@ -47,6 +47,11 @@ type Auth struct {
 	// buildAuditAuth into audit.PolicyResults.Condition.
 	Condition *ConditionResult
 
+	// DenyingPolicy names the policy whose deny stanza refused the request. Empty
+	// when none did. Flows through buildAuditAuth into
+	// audit.PolicyResults.DenyingPolicy.
+	DenyingPolicy string
+
 	// PrincipalID names the caller, as the auth mount's configuration reads it
 	// from the credential. A login carries no role and no credential spec:
 	// every login is an admission, and the role is granted per request.

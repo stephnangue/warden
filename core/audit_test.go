@@ -1279,6 +1279,16 @@ func TestBuildAuditAuth_FromAuth(t *testing.T) {
 	assert.Contains(t, result.PolicyResults.GrantingPolicies, "p1")
 }
 
+func TestBuildAuditAuth_DenyingPolicy(t *testing.T) {
+	auth := &logical.Auth{
+		DenyingPolicy: "guard",
+		PolicyResults: &sdklogical.PolicyResults{Allowed: false},
+	}
+	result := buildAuditAuth(auth, nil)
+	require.NotNil(t, result)
+	assert.Equal(t, "guard", result.PolicyResults.DenyingPolicy)
+}
+
 // The Auth overrides the principal; the role is the token entry's, the role
 // projected onto this request's copy: an Auth carries none.
 func TestBuildAuditAuth_AuthOverridesTE(t *testing.T) {

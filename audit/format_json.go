@@ -318,6 +318,14 @@ func (f *JSONFormat) saltPolicyResultsField(ctx context.Context, pr *PolicyResul
 			}
 		}
 		return nil
+	case "denying_policy":
+		if err := leaf(rest); err != nil {
+			return err
+		}
+		if pr == nil {
+			return nil
+		}
+		return f.salt(ctx, &pr.DenyingPolicy)
 	case "condition":
 		// "...condition.inputs" salts every referenced-input value;
 		// "...condition.inputs.<dotted-key>" salts one (the input map keys are
@@ -471,6 +479,7 @@ var (
 	omitPolicyResultsLeaves = map[string]func(*PolicyResults){
 		"allowed":           func(p *PolicyResults) { p.Allowed = false },
 		"granting_policies": func(p *PolicyResults) { p.GrantingPolicies = nil },
+		"denying_policy":    func(p *PolicyResults) { p.DenyingPolicy = "" },
 		"mcp_decision":      func(p *PolicyResults) { p.MCPDecision = nil },
 		"mcp_client":        func(p *PolicyResults) { p.MCPClient = nil },
 	}

@@ -49,6 +49,14 @@ type CBP struct {
 	// policies use. Readers tolerate nil: a nil map reads as empty, and the
 	// trees are guarded (lookupEntry, checkAllowedFromNonExactPaths).
 
+	// plainDenies and conditionalDenies are this compile's deny stanzas. They
+	// stay out of the indexes above, which answer "which one stanza decides":
+	// a deny applies on every path it matches, whatever else matches, and one
+	// indexed there would shadow a broader grant even while its condition is
+	// false. Nil when no policy holds one.
+	plainDenies       []denyRule
+	conditionalDenies []denyRule
+
 	// root is enabled if the "root" named policy is present.
 	root bool
 
@@ -62,6 +70,44 @@ type CBP struct {
 	// Every other MCP entry is a parsed policy's own CBPPermissions, shared
 	// with the policy cache and never written.
 	ownedMCP []*CBPPermissions
+}
+
+// denyRule is one deny stanza and the policy that holds it.
+type denyRule struct {
+	stanza *PathRules
+	policy *Policy
+}
+
+// appliesTo reports whether the rule matches the canonical request path in any
+// form a grant lookup could try for op: every match fires, so erring wide is
+// safe, and a List or Scan may be resolved without its trailing slash.
+func (r *denyRule) appliesTo(path string, op logical.Operation) bool {
+	if r.matches(path) {
+		return true
+	}
+	if (op == logical.ListOperation || op == logical.ScanOperation) && strings.HasSuffix(path, "/") {
+		return r.matches(path[:len(path)-1])
+	}
+	return false
+}
+
+func (r *denyRule) matches(path string) bool {
+	switch pc := r.stanza; {
+	case pc.HasSegmentWildcards:
+		segments := pc.segments
+		if segments == nil {
+			// Every parser sets it. A stanza built another way must not turn
+			// into a deny that never matches, while a grant at the same
+			// pattern, which doesn't need it, still works.
+			segments = strings.Split(strings.TrimSuffix(pc.Path, "*"), "/")
+		}
+		_, ok := matchSegments(segments, strings.HasSuffix(pc.Path, "*"), path)
+		return ok
+	case pc.IsPrefix:
+		return strings.HasPrefix(path, pc.Path)
+	default:
+		return path == pc.Path
+	}
 }
 
 // rootGrantingPolicies is the granting-policies answer of every root request.
@@ -168,6 +214,10 @@ type CBPResults struct {
 	GrantingPolicies       []sdklogical.PolicyInfo
 	ResponseKeysFilterPath string
 
+	// DenyingPolicy names the policy whose deny stanza refused the request. Empty
+	// when none did: a grant whose condition failed denied nothing.
+	DenyingPolicy string
+
 	// MCPDecision is populated on every branch of the MCP gate, allow and
 	// deny, so the audit and deny-response layers can render the decision
 	// unconditionally. That covers two cases: a rule-set was consulted, or an
@@ -177,13 +227,14 @@ type CBPResults struct {
 	//
 	// Invariant: when MCPDecision.Decision == "deny", Allowed is
 	// false. The reverse (Allowed=false with Decision="allow") is
-	// possible — the MCP gate runs between conditions and the
-	// parameter check, so a later check can deny after MCP allows.
+	// possible — the MCP gate runs after denies and conditions and before
+	// the parameter check, so a later check can deny after MCP allows.
 	MCPDecision *logical.MCPDecision
 
-	// Condition is populated when a path-level CEL condition was evaluated,
-	// carrying the audited decision (expression + sanitized error). nil when
-	// no stanza's condition had to be evaluated for this operation.
+	// Condition is populated when a path-level CEL condition decided the
+	// request: a grant condition that passed or failed, a sudo condition, or a
+	// deny condition that fired. It carries the audited decision (expression +
+	// sanitized error). A deny condition that stood aside records nothing.
 	Condition *logical.ConditionResult
 }
 
@@ -210,15 +261,31 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 	// attachment into a compile failure, which surfaces as a 500 on every
 	// request the token makes.
 	grantingPolicyCount := 0
-	stanzas := 0
+	stanzas, plainDenies, conditionalDenies := 0, 0, 0
 	for _, policy := range policies {
-		if policy != nil && policy.Type == PolicyTypeCBP {
-			grantingPolicyCount++
-			stanzas += len(policy.Paths)
+		if policy == nil || policy.Type != PolicyTypeCBP {
+			continue
+		}
+		grantingPolicyCount++
+		for _, pc := range policy.Paths {
+			switch {
+			case pc.Permissions.CapabilitiesBitmap&DenyCapabilityInt == 0:
+				stanzas++
+			case pc.Permissions.Condition == nil:
+				plainDenies++
+			default:
+				conditionalDenies++
+			}
 		}
 	}
 	if stanzas > 0 {
 		a.slab = make([]CBPPermissions, 0, stanzas)
+	}
+	if plainDenies > 0 {
+		a.plainDenies = make([]denyRule, 0, plainDenies)
+	}
+	if conditionalDenies > 0 {
+		a.conditionalDenies = make([]denyRule, 0, conditionalDenies)
 	}
 
 	// Inject each policy
@@ -232,8 +299,8 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 		case PolicyTypeCBP:
 		case PolicyTypeMCP:
 			// MCP policies go into their own index and never touch the
-			// capability trees, the granting-policies map or the deny-collapse
-			// path below — they carry no capabilities to collapse.
+			// capability trees, the granting-policies map or the deny rules
+			// below — they carry no capabilities.
 			if err := a.insertMCPPolicy(policy); err != nil {
 				return nil, err
 			}
@@ -260,6 +327,15 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 				continue
 			}
 
+			if pc.Permissions.CapabilitiesBitmap&DenyCapabilityInt != 0 {
+				if pc.Permissions.Condition == nil {
+					a.plainDenies = append(a.plainDenies, denyRule{stanza: pc, policy: policy})
+				} else {
+					a.conditionalDenies = append(a.conditionalDenies, denyRule{stanza: pc, policy: policy})
+				}
+				continue
+			}
+
 			existingPerms, ok := lookupEntry(a.exactRules, a.prefixRules, a.segmentWildcardPaths, pc)
 			if !ok {
 				// The compiled entry is a copy of the stanza's permissions in
@@ -277,25 +353,10 @@ func NewCBP(ctx context.Context, policies []*Policy) (*CBP, error) {
 
 			// existingPerms is this compile's slab copy: every merge below
 			// writes it in place, never the parsed policy.
-			switch {
-			case existingPerms.CapabilitiesBitmap&DenyCapabilityInt > 0:
-				// If we are explicitly denied in the existing capability set,
-				// don't save anything else
-				continue
-
-			case pc.Permissions.CapabilitiesBitmap&DenyCapabilityInt > 0:
-				// If this new policy explicitly denies, only save the deny value
-				existingPerms.CapabilitiesBitmap = DenyCapabilityInt
-				continue
-
-			default:
-				// Insert the capabilities in this new policy into the existing
-				// value
-				existingPerms.CapabilitiesBitmap = existingPerms.CapabilitiesBitmap | pc.Permissions.CapabilitiesBitmap
-				existingPerms.extra = append(existingPerms.extra, grantRef{policy: policy, caps: pc.Permissions.CapabilitiesBitmap, cond: pc.Permissions.Condition})
-				if pc.Permissions.Condition == nil {
-					existingPerms.unconditionalCaps |= pc.Permissions.CapabilitiesBitmap
-				}
+			existingPerms.CapabilitiesBitmap = existingPerms.CapabilitiesBitmap | pc.Permissions.CapabilitiesBitmap
+			existingPerms.extra = append(existingPerms.extra, grantRef{policy: policy, caps: pc.Permissions.CapabilitiesBitmap, cond: pc.Permissions.Condition})
+			if pc.Permissions.Condition == nil {
+				existingPerms.unconditionalCaps |= pc.Permissions.CapabilitiesBitmap
 			}
 
 			// Lowest set pagination limit wins.
@@ -546,6 +607,16 @@ func (a *CBP) allowOperation(ctx context.Context, req *logical.Request, te *logi
 		}
 	}
 
+	// A plain deny needs no condition and no grant to look at: it refuses
+	// wherever it matches, and a capability check reports it.
+	for i := range a.plainDenies {
+		if r := &a.plainDenies[i]; r.appliesTo(path, op) {
+			ret.DenyingPolicy = r.policy.Name
+			ret.CapabilitiesBitmap = DenyCapabilityInt
+			return ret
+		}
+	}
+
 	// Find an exact matching rule, look for prefix if no match
 	var capabilities uint32
 	if e, ok := a.exactRules[path]; ok {
@@ -583,8 +654,6 @@ func (a *CBP) allowOperation(ctx context.Context, req *logical.Request, te *logi
 
 CHECK:
 	// Check if the minimum permissions are met
-	// If "deny" has been explicitly set, only deny will be in the map, so we
-	// only need to check for the existence of other values
 	ret.RootPrivs = capabilities&SudoCapabilityInt > 0
 
 	// This is after the RootPrivs check so we can gate on it being from sudo
@@ -626,6 +695,20 @@ CHECK:
 	// now is snapshotted once so the path-level condition and any per-call MCP
 	// conditions evaluate against a single, consistent instant.
 	now := time.Now()
+
+	// A conditional deny beats every grant, so it runs before their conditions,
+	// and after the capability check, so no CEL runs for a request already
+	// refused. Every rule matching the path is asked, however specific.
+	for i := range a.conditionalDenies {
+		r := &a.conditionalDenies[i]
+		if !r.appliesTo(path, op) {
+			continue
+		}
+		if fired, res := evaluateDenyCondition(r.stanza.Permissions.Condition, req, te, now, ns.Path); fired {
+			ret.Condition, ret.DenyingPolicy, ret.RootPrivs = res, r.policy.Name, false
+			return ret
+		}
+	}
 
 	// Path-level CEL condition gate, before MCP and parameter validation. Only
 	// the stanzas bringing the operation's capability count: one of them with
@@ -822,6 +905,38 @@ func checkAllowedFromNonExactPaths(
 	return rankNonExactPaths(prefixRules, segmentWildcardPaths, path, bareMount)
 }
 
+// matchSegments reports whether path matches a segment-wildcard pattern, and
+// how many "+" segments the pattern has. Both the grant ranking and the deny
+// rules decide a match here, so they cannot disagree on what a pattern covers.
+// isPrefix means the pattern ended in "*": its last segment is a prefix and
+// path may run on past it. It walks path in place and allocates nothing.
+func matchSegments(pattern []string, isPrefix bool, path string) (wildcards int, ok bool) {
+	rest := path
+	for i, part := range pattern {
+		seg, tail, more := strings.Cut(rest, "/")
+		last := i == len(pattern)-1
+		switch {
+		case part == "+":
+			wildcards++
+		case part == seg:
+		case isPrefix && last && strings.HasPrefix(seg, part):
+		default:
+			return 0, false
+		}
+		if last {
+			if more && !isPrefix {
+				return 0, false
+			}
+			return wildcards, true
+		}
+		if !more {
+			return 0, false
+		}
+		rest = tail
+	}
+	return 0, false
+}
+
 // rankNonExactPaths ranks the longest prefix rule against every segment
 // wildcard that matches path and returns the winner's permissions, or for a
 // bare-mount check the first wildcard under it granting anything.
@@ -902,7 +1017,11 @@ func rankNonExactPaths(
 		}
 	}
 
-	pathParts := strings.Split(path, "/")
+	// Only a bare-mount check walks the parts; the ranking compares in place.
+	var pathParts []string
+	if bareMount {
+		pathParts = strings.Split(path, "/")
+	}
 
 SWCPATH:
 	for fullWCPath := range segmentWildcardPaths {
@@ -920,12 +1039,14 @@ SWCPATH:
 
 		splitCurrWCPath := strings.Split(currWCPath, "/")
 
-		if !bareMount && len(pathParts) < len(splitCurrWCPath) {
-			// check if the path coming in is shorter; if so it can't match
-			continue
-		}
-		if !bareMount && !pd.isPrefix && len(splitCurrWCPath) != len(pathParts) {
-			// If it's not a prefix we expect the same number of segments
+		if !bareMount {
+			wildcards, ok := matchSegments(splitCurrWCPath, pd.isPrefix, path)
+			if !ok {
+				continue
+			}
+			pd.wildcards = wildcards
+			pd.perms = segmentWildcardPaths[fullWCPath].(*CBPPermissions)
+			wcPathDescrs = append(wcPathDescrs, pd)
 			continue
 		}
 
@@ -941,10 +1062,6 @@ SWCPATH:
 
 			case pd.isPrefix && i == len(splitCurrWCPath)-1 && strings.HasPrefix(pathParts[i], aclPart):
 				segments = append(segments, pathParts[i:]...)
-
-			case !bareMount:
-				// Found a mismatch, give up on this segmentWildcardPath
-				continue SWCPATH
 			}
 
 			// -2 because we're always invoked with a trailing "/" in case bareMount.

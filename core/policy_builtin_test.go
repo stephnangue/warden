@@ -496,6 +496,13 @@ func TestBuiltinPolicyWarnings(t *testing.T) {
 	conditional.Name, conditional.Type = "ops", PolicyTypeCBP
 	assert.Len(t, builtinPolicyWarnings(conditional), 1)
 
+	conditionalDeny := parseCBP(`path "sys/mcp" {
+		capabilities = ["deny"]
+		condition    = "true"
+	}`)
+	conditionalDeny.Name, conditionalDeny.Type = "ops", PolicyTypeCBP
+	assert.Empty(t, builtinPolicyWarnings(conditionalDeny), "a conditional deny does narrow discovery")
+
 	contract := mustParseMCP(t, ns, testMCPBody("sys/mcp", "list_roles"))
 	contract.Name, contract.Type = "ops-mcp", PolicyTypeMCP
 	assert.Len(t, builtinPolicyWarnings(contract), 1)

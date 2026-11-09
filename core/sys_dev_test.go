@@ -83,6 +83,28 @@ func auditLine(t *testing.T, entry map[string]any) string {
 	return string(raw)
 }
 
+// A deny refusal gives its policy as the reason, with the expression when a
+// condition fired it.
+func TestReadDevAudit_DenyReason(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	request := map[string]any{"path": "role/atm/gateway", "mount_point": "bank/", "mount_class": "provider"}
+	entry := func(timestamp string, results map[string]any) string {
+		return auditLine(t, map[string]any{"type": "request", "timestamp": timestamp, "request": request,
+			"auth": map[string]any{"principal_id": "agent-1", "policy_results": results}})
+	}
+	lines := []string{
+		entry("t1", map[string]any{"allowed": false, "denying_policy": "closed"}),
+		entry("t2", map[string]any{"allowed": false, "denying_policy": "guard", "condition": map[string]any{"expression": "request.client_ip == 'x'"}}),
+	}
+	require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
+
+	all, err := readDevAudit(path, 10, devAuditFilter{})
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+	assert.Equal(t, "denied by policy guard (request.client_ip == 'x')", all[0]["reason"])
+	assert.Equal(t, "denied by policy closed", all[1]["reason"])
+}
+
 func TestReadDevAudit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.log")
 	entries := []map[string]any{

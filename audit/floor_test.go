@@ -97,6 +97,7 @@ func secretEntry() *LogEntry {
 			PolicyResults: &PolicyResults{
 				Allowed:          true,
 				GrantingPolicies: []string{"S-POLICY"},
+				DenyingPolicy:    "S-DENYING-POLICY",
 				Condition:        &logical.ConditionResult{Decision: "allow", Inputs: map[string]string{"agent.metadata.env": "S-INPUT"}},
 			},
 		},
@@ -120,6 +121,7 @@ func secretEntry() *LogEntry {
 var everySaltPath = []string{
 	"auth.token_id", "auth.token_accessor", "auth.principal_id", "auth.alias_name", "auth.created_by_ip",
 	"auth.policy_results.granting_policies", "auth.policy_results.condition.inputs",
+	"auth.policy_results.denying_policy",
 	"request.client_ip",
 	"response.credential.credential_id", "response.credential.lease_id", "response.credential.token_id",
 	"response.credential.metadata",

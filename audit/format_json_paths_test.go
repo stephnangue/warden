@@ -23,6 +23,7 @@ var acceptedSaltPaths = []string{
 	"response.auth_result.principal_id",
 	"auth.token_id", "auth.token_accessor", "auth.principal_id", "auth.alias_name", "auth.created_by_ip",
 	"auth.policy_results.granting_policies",
+	"auth.policy_results.denying_policy",
 	"auth.policy_results.condition.inputs",
 	"auth.policy_results.condition.inputs.agent.metadata.env",
 	"auth.policy_results.condition.inputs.request.data.model",

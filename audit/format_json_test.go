@@ -565,6 +565,59 @@ func TestFormatConditionInputsSalting(t *testing.T) {
 	})
 }
 
+// TestFormatDenyingPolicySaltAndOmit: denying_policy holds a policy name, like
+// granting_policies, so it can be salted or omitted.
+func TestFormatDenyingPolicySaltAndOmit(t *testing.T) {
+	mockSalt := func(ctx context.Context, data string) (string, error) {
+		return "hmac-sha256:" + data + "-salted", nil
+	}
+	format := func(t *testing.T, opts ...JSONFormatOption) *PolicyResults {
+		t.Helper()
+		entry := &LogEntry{
+			Timestamp: time.Now(),
+			Auth: &Auth{PolicyResults: &PolicyResults{
+				DenyingPolicy: "guard",
+				Condition: &logical.ConditionResult{
+					Decision:   "deny",
+					Expression: "agent.metadata.env != 'prod'",
+				},
+			}},
+		}
+		data, err := NewJSONFormat(append(opts, WithSaltFunc(mockSalt))...).FormatRequest(context.Background(), entry)
+		if err != nil {
+			t.Fatalf("FormatRequest failed: %v", err)
+		}
+		var got LogEntry
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("unmarshal failed: %v", err)
+		}
+		return got.Auth.PolicyResults
+	}
+	const salted = "hmac-sha256:guard-salted"
+
+	t.Run("clear by default", func(t *testing.T) {
+		got := format(t)
+		if got.DenyingPolicy != "guard" {
+			t.Errorf("the name should be clear, got %q", got.DenyingPolicy)
+		}
+	})
+	t.Run("salted", func(t *testing.T) {
+		got := format(t, WithSaltFields([]string{"auth.policy_results.denying_policy"}))
+		if got.DenyingPolicy != salted {
+			t.Errorf("the name should be salted, got %q", got.DenyingPolicy)
+		}
+	})
+	t.Run("omitted", func(t *testing.T) {
+		got := format(t, WithOmitFields([]string{"auth.policy_results.denying_policy"}))
+		if got.DenyingPolicy != "" {
+			t.Errorf("the name should be omitted, got %q", got.DenyingPolicy)
+		}
+		if got.Condition == nil || got.Condition.Expression == "" {
+			t.Error("omitting the name should leave the condition")
+		}
+	})
+}
+
 func TestFormatResponseWithSalting(t *testing.T) {
 	mockSalt := func(ctx context.Context, data string) (string, error) {
 		return "hmac-sha256:" + data + "-salted", nil

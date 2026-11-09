@@ -4,6 +4,7 @@
 package core
 
 import (
+	"context"
 	"strconv"
 	"testing"
 	"time"
@@ -416,6 +417,364 @@ func TestCBP_PathCondition_EmptyConditionsRefuse(t *testing.T) {
 	assert.False(t, read("y").RootPrivs)
 }
 
+// TestCBP_Deny_ConditionDecidesWhenItApplies: a conditional deny refuses when
+// its condition holds and stands aside when it doesn't, in either policy order.
+func TestCBP_Deny_ConditionDecidesWhenItApplies(t *testing.T) {
+	ctx := testContext()
+	const notRed = "agent.metadata.team != 'red'"
+	grant := finalizedPolicy(t, "grant", PolicyTypeCBP, `path "x" { capabilities = ["read"] }`)
+	guard := finalizedPolicy(t, "guard", PolicyTypeCBP, `path "x" { capabilities = ["deny"] condition = "`+notRed+`" }`)
+
+	for name, policies := range map[string][]*Policy{"guard last": {grant, guard}, "guard first": {guard, grant}} {
+		t.Run(name, func(t *testing.T) {
+			cbp, err := NewCBP(ctx, policies)
+			require.NoError(t, err)
+			read := func(team string) *CBPResults {
+				return cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "x"}, teamEntry(team), false)
+			}
+
+			refused := read("green")
+			assert.False(t, refused.Allowed)
+			assert.Equal(t, "guard", refused.DenyingPolicy)
+			require.NotNil(t, refused.Condition)
+			assert.Equal(t, "deny", refused.Condition.Decision)
+			assert.Equal(t, notRed, refused.Condition.Expression)
+			assert.Empty(t, refused.Condition.ErrorKind)
+
+			allowed := read("red")
+			assert.True(t, allowed.Allowed)
+			assert.Empty(t, allowed.DenyingPolicy)
+			assert.Nil(t, allowed.Condition, "a deny that stood aside records nothing")
+		})
+	}
+}
+
+// TestCBP_Deny_ReachesEveryMatchingPath: a deny is not ranked against grants,
+// so specificity helps neither side.
+func TestCBP_Deny_ReachesEveryMatchingPath(t *testing.T) {
+	ctx := testContext()
+	const notRed = "agent.metadata.team != 'red'"
+	read := func(cbp *CBP, path, team string) bool {
+		return cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: path}, teamEntry(team), false).Allowed
+	}
+
+	t.Run("a broader conditional deny beats a specific grant", func(t *testing.T) {
+		cbp, err := NewCBP(ctx, []*Policy{
+			testParsePolicy(t, `path "a/b/c" { capabilities = ["read"] }`),
+			testParsePolicy(t, `path "a/*" { capabilities = ["deny"] condition = "`+notRed+`" }`),
+		})
+		require.NoError(t, err)
+		assert.False(t, read(cbp, "a/b/c", "green"))
+		assert.True(t, read(cbp, "a/b/c", "red"))
+	})
+
+	t.Run("a narrower conditional deny does not shadow a broad grant", func(t *testing.T) {
+		cbp, err := NewCBP(ctx, []*Policy{
+			testParsePolicy(t, `path "a/*" { capabilities = ["read"] }`),
+			testParsePolicy(t, `path "a/b" { capabilities = ["deny"] condition = "`+notRed+`" }`),
+		})
+		require.NoError(t, err)
+		assert.True(t, read(cbp, "a/b", "red"), "the rule stands aside and the broad grant decides")
+		assert.False(t, read(cbp, "a/b", "green"))
+		assert.True(t, read(cbp, "a/c", "green"), "the rule doesn't reach another path")
+	})
+
+	t.Run("a plain deny beats a specific grant from the same policy", func(t *testing.T) {
+		cbp, err := NewCBP(ctx, []*Policy{testParsePolicy(t, `
+			path "a/*" { capabilities = ["deny"] }
+			path "a/public" { capabilities = ["read"] }
+		`)})
+		require.NoError(t, err)
+		assert.False(t, read(cbp, "a/public", "red"))
+	})
+
+	t.Run("a plain deny beats a specific grant from another policy", func(t *testing.T) {
+		cbp, err := NewCBP(ctx, []*Policy{
+			testParsePolicy(t, `path "a/+/c" { capabilities = ["read"] }`),
+			testParsePolicy(t, `path "a/*" { capabilities = ["deny"] }`),
+		})
+		require.NoError(t, err)
+		assert.False(t, read(cbp, "a/b/c", "red"))
+	})
+
+	t.Run("a carve-out written into the deny works", func(t *testing.T) {
+		cbp, err := NewCBP(ctx, []*Policy{testParsePolicy(t, `
+			path "a/*" {
+				capabilities = ["deny"]
+				condition    = "request.path != 'a/public'"
+			}
+			path "a/*" { capabilities = ["read"] }
+		`)})
+		require.NoError(t, err)
+		assert.True(t, read(cbp, "a/public", "green"))
+		assert.False(t, read(cbp, "a/private", "green"))
+	})
+}
+
+// TestCBP_Deny_MatchesTheFormsAGrantLookupTries covers every kind of pattern,
+// and the trailing slash a List or Scan may be resolved without.
+func TestCBP_Deny_MatchesTheFormsAGrantLookupTries(t *testing.T) {
+	ctx := testContext()
+	for _, tc := range []struct {
+		name, pattern, path string
+		op                  logical.Operation
+		want                bool
+	}{
+		{"exact", "a/b", "a/b", logical.ReadOperation, true},
+		{"exact, another path", "a/b", "a/c", logical.ReadOperation, false},
+		{"exact, longer path", "a/b", "a/b/c", logical.ReadOperation, false},
+		{"exact, list with a slash", "a/b", "a/b/", logical.ListOperation, true},
+		{"exact, scan with a slash", "a/b", "a/b/", logical.ScanOperation, true},
+		{"exact, read with a slash", "a/b", "a/b/", logical.ReadOperation, false},
+		{"prefix", "a/*", "a/b/c", logical.ReadOperation, true},
+		{"prefix, partial segment", "a/b*", "a/bcd", logical.ReadOperation, true},
+		{"prefix, another path", "a/*", "b/c", logical.ReadOperation, false},
+		{"wildcard", "a/+/c", "a/b/c", logical.ReadOperation, true},
+		{"wildcard, too long", "a/+/c", "a/b/c/d", logical.ReadOperation, false},
+		{"wildcard, too short", "a/+/c", "a/b", logical.ReadOperation, false},
+		{"wildcard, another segment", "a/+/c", "a/b/d", logical.ReadOperation, false},
+		{"wildcard, list with a slash", "a/+", "a/b/", logical.ListOperation, true},
+		{"wildcard, read with a slash", "a/+", "a/b/", logical.ReadOperation, false},
+		{"wildcard prefix", "a/+/c*", "a/b/cde/f", logical.ReadOperation, true},
+		{"wildcard prefix, another segment", "a/+/c*", "a/b/d", logical.ReadOperation, false},
+		{"wildcard first", "+/b", "a/b", logical.ReadOperation, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caps := map[logical.Operation]string{logical.ReadOperation: "read", logical.ListOperation: "list", logical.ScanOperation: "scan"}[tc.op]
+			cbp, err := NewCBP(ctx, []*Policy{
+				testParsePolicy(t, `path "*" { capabilities = ["`+caps+`"] }`),
+				testParsePolicy(t, `path "`+tc.pattern+`" { capabilities = ["deny"] }`),
+			})
+			require.NoError(t, err)
+			res := cbp.AllowOperation(ctx, &logical.Request{Operation: tc.op, Path: tc.path}, nil, false)
+			assert.Equal(t, tc.want, !res.Allowed)
+		})
+	}
+}
+
+// TestCBP_Deny_FailsClosed: a deny condition that errors fires. That includes
+// reading a field an unread body doesn't have, which is why a has() guard, right
+// on a grant, lets a caller escape a deny by relabelling the body.
+func TestCBP_Deny_FailsClosed(t *testing.T) {
+	ctx := testContext()
+	grant := testParsePolicy(t, `path "x" { capabilities = ["create"] }`)
+	create := func(t *testing.T, condition string) *CBPResults {
+		t.Helper()
+		guard := finalizedPolicy(t, "guard", PolicyTypeCBP, `path "x" { capabilities = ["deny"] condition = "`+condition+`" }`)
+		cbp, err := NewCBP(ctx, []*Policy{grant, guard})
+		require.NoError(t, err)
+		return cbp.AllowOperation(ctx, &logical.Request{Operation: logical.CreateOperation, Path: "x"}, nil, false)
+	}
+
+	unguarded := create(t, "request.data.tier == 'gold'")
+	assert.False(t, unguarded.Allowed)
+	assert.Equal(t, "guard", unguarded.DenyingPolicy)
+	require.NotNil(t, unguarded.Condition)
+	assert.Equal(t, "no_such_key", unguarded.Condition.ErrorKind)
+
+	assert.True(t, create(t, "has(request.data.tier) && request.data.tier == 'gold'").Allowed,
+		"the guard makes an unread body false, so the rule doesn't fire")
+
+	absent := create(t, "user.metadata.x == 'bad'")
+	assert.False(t, absent.Allowed)
+	require.NotNil(t, absent.Condition)
+	assert.True(t, absent.Condition.UserAbsent, "a user could change the outcome")
+}
+
+// TestCBP_Deny_RecordsWhichPolicy: a plain deny names its policy on every way
+// to a refusal and records no condition, since none ran.
+func TestCBP_Deny_RecordsWhichPolicy(t *testing.T) {
+	ctx := testContext()
+	deny := finalizedPolicy(t, "closed", PolicyTypeCBP, `path "a/*" { capabilities = ["deny"] }`)
+	read := finalizedPolicy(t, "reader", PolicyTypeCBP, `path "a/b" { capabilities = ["read"] }`)
+	cbp, err := NewCBP(ctx, []*Policy{deny, read})
+	require.NoError(t, err)
+
+	for name, req := range map[string]*logical.Request{
+		"no grant at the path": {Operation: logical.ReadOperation, Path: "a/none"},
+		"grant lacks the op":   {Operation: logical.DeleteOperation, Path: "a/b"},
+		"grant holds the op":   {Operation: logical.ReadOperation, Path: "a/b"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := cbp.AllowOperation(ctx, req, nil, false)
+			assert.False(t, res.Allowed)
+			assert.Equal(t, "closed", res.DenyingPolicy)
+			assert.Nil(t, res.Condition)
+		})
+	}
+}
+
+// TestCBP_Deny_CapabilitiesReportIt: a capability check says deny under a plain
+// deny at any depth. A conditional one is not evaluated there, as a conditional
+// grant isn't.
+func TestCBP_Deny_CapabilitiesReportIt(t *testing.T) {
+	ctx := testContext()
+	cbp, err := NewCBP(ctx, []*Policy{
+		testParsePolicy(t, `path "broad/*" { capabilities = ["deny"] }`),
+		testParsePolicy(t, `path "broad/specific" { capabilities = ["read"] }`),
+		testParsePolicy(t, `path "open/*" { capabilities = ["read"] }`),
+		testParsePolicy(t, `path "open/closed" { capabilities = ["deny"] }`),
+		testParsePolicy(t, `path "open/maybe" { capabilities = ["deny"] condition = "false" }`),
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{DenyCapability}, cbp.Capabilities(ctx, "broad/specific"), "under a broader deny")
+	assert.Equal(t, []string{DenyCapability}, cbp.Capabilities(ctx, "open/closed"), "a narrower deny over a broad grant")
+	assert.Equal(t, []string{ReadCapability}, cbp.Capabilities(ctx, "open/maybe"))
+}
+
+// TestCBP_Deny_RootPrivsAndBypasses: a firing deny leaves no sudo behind, and
+// root and Help answer to no deny, as they answer to no condition.
+func TestCBP_Deny_RootPrivsAndBypasses(t *testing.T) {
+	ctx := testContext()
+	grant := testParsePolicy(t, `path "x" { capabilities = ["read", "sudo"] }`)
+	deny := testParsePolicy(t, `path "x" { capabilities = ["deny"] condition = "true" }`)
+	plain := testParsePolicy(t, `path "x" { capabilities = ["deny"] }`)
+	read := &logical.Request{Operation: logical.ReadOperation, Path: "x"}
+
+	cbp, err := NewCBP(ctx, []*Policy{grant, deny})
+	require.NoError(t, err)
+	res := cbp.AllowOperation(ctx, read, nil, false)
+	assert.False(t, res.Allowed)
+	assert.False(t, res.RootPrivs)
+
+	help, err := NewCBP(ctx, []*Policy{plain})
+	require.NoError(t, err)
+	assert.True(t, help.AllowOperation(ctx, &logical.Request{Operation: logical.HelpOperation, Path: "x"}, nil, false).Allowed)
+
+	root, err := NewCBP(ctx, []*Policy{plain})
+	require.NoError(t, err)
+	root.root = true
+	assert.True(t, root.AllowOperation(ctx, read, nil, false).Allowed)
+}
+
+// TestCBP_Deny_ExpiredStanzaIsDropped: an expired deny stanza no longer applies.
+func TestCBP_Deny_ExpiredStanzaIsDropped(t *testing.T) {
+	ctx := testContext()
+	deny := testParsePolicy(t, `path "x" { capabilities = ["deny"] expiration = "2099-01-01T00:00:00Z" }`)
+	deny.Paths[0].Expiration = time.Now().Add(-time.Hour)
+	grant := testParsePolicy(t, `path "x" { capabilities = ["read"] }`)
+	cbp, err := NewCBP(ctx, []*Policy{deny, grant})
+	require.NoError(t, err)
+	assert.True(t, cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "x"}, nil, false).Allowed)
+}
+
+// TestCBP_Deny_InvalidConditionIsRefused: a deny's condition is compiled, so a
+// broken one is refused where it used to be ignored.
+func TestCBP_Deny_InvalidConditionIsRefused(t *testing.T) {
+	_, err := ParseCBPPolicy(namespace.RootNamespace, `path "x" { capabilities = ["deny"] condition = "request.client_ip ==" }`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "condition")
+}
+
+// TestCBP_Deny_NoAllocationToMatch: scanning deny rules that don't apply,
+// segment wildcards included, costs a request no allocation.
+func TestCBP_Deny_NoAllocationToMatch(t *testing.T) {
+	ctx := testContext()
+	grant := testParsePolicy(t, `path "kv/*" { capabilities = ["read"] }`)
+	withRules, err := NewCBP(ctx, []*Policy{grant, testParsePolicy(t, `
+		path "other/x" { capabilities = ["deny"] }
+		path "other/*" { capabilities = ["deny"] }
+		path "kv/+/secret" { capabilities = ["deny"] }
+		path "other/maybe" { capabilities = ["deny"] condition = "true" }
+	`)})
+	require.NoError(t, err)
+	without, err := NewCBP(ctx, []*Policy{grant})
+	require.NoError(t, err)
+
+	req := &logical.Request{Operation: logical.ReadOperation, Path: "kv/app/config"}
+	allocs := func(cbp *CBP) float64 {
+		return testing.AllocsPerRun(200, func() { cbp.AllowOperation(ctx, req, nil, false) })
+	}
+	assert.Equal(t, allocs(without), allocs(withRules))
+}
+
+// TestCBP_Deny_InANamespace: a rule's path carries its policy's namespace and
+// the request's path its own, through different code, and they must meet.
+func TestCBP_Deny_InANamespace(t *testing.T) {
+	ns := &namespace.Namespace{ID: "ns1", Path: "ns1/"}
+	ctx := namespace.ContextWithNamespace(context.Background(), ns)
+	policy, err := ParseCBPPolicy(ns, `
+		path "a/*" { capabilities = ["read"] }
+		path "a/+/secret" { capabilities = ["deny"] }
+		path "a/guarded" { capabilities = ["deny"] condition = "true" }
+	`)
+	require.NoError(t, err)
+	cbp, err := NewCBP(ctx, []*Policy{policy})
+	require.NoError(t, err)
+	read := func(path string) bool {
+		return cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: path}, nil, false).Allowed
+	}
+
+	assert.False(t, read("a/x/secret"))
+	assert.False(t, read("a/guarded"))
+	assert.True(t, read("a/x/open"))
+}
+
+// TestCBP_Deny_ConditionalOnAListPath: a conditional deny is asked on the form
+// without the trailing slash too.
+func TestCBP_Deny_ConditionalOnAListPath(t *testing.T) {
+	ctx := testContext()
+	cbp, err := NewCBP(ctx, []*Policy{
+		testParsePolicy(t, `path "*" { capabilities = ["list"] }`),
+		testParsePolicy(t, `path "a/+" { capabilities = ["deny"] condition = "true" }`),
+	})
+	require.NoError(t, err)
+	assert.False(t, cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ListOperation, Path: "a/b/"}, nil, false).Allowed)
+}
+
+// TestCBP_Deny_SegmentsMissing: a wildcard deny built without the parser's
+// split still matches, so it can't silently stop applying.
+func TestCBP_Deny_SegmentsMissing(t *testing.T) {
+	r := denyRule{stanza: &PathRules{Path: "a/+/c*", HasSegmentWildcards: true}}
+	assert.True(t, r.matches("a/b/cd"))
+	assert.False(t, r.matches("a/b/d"))
+}
+
+// TestMatchSegments pins the comparison the grant ranking and the deny rules
+// share.
+func TestMatchSegments(t *testing.T) {
+	for _, tc := range []struct {
+		pattern   []string
+		isPrefix  bool
+		path      string
+		wildcards int
+		ok        bool
+	}{
+		{[]string{"a", "+", "c"}, false, "a/b/c", 1, true},
+		{[]string{"a", "+", "c"}, false, "a/b/c/", 0, false},
+		{[]string{"a", "+", "c"}, false, "a/b", 0, false},
+		{[]string{"+", "+"}, false, "a/b", 2, true},
+		{[]string{"a", "+"}, false, "a/", 1, true},
+		{[]string{"a", "+", "c"}, true, "a/b/cd/e", 1, true},
+		{[]string{"a", "+", ""}, true, "a/b/", 1, true},
+		{[]string{"a", "+", ""}, true, "a/b/c/d", 1, true},
+		{[]string{"a", "+", ""}, true, "a/b", 0, false},
+		{[]string{"a", "+", "c"}, true, "a/b/d", 0, false},
+		{[]string{"+"}, false, "a", 1, true},
+		{[]string{"+"}, false, "a/b", 0, false},
+		{[]string{"+", "b"}, true, "a/bc/d", 1, true},
+	} {
+		wildcards, ok := matchSegments(tc.pattern, tc.isPrefix, tc.path)
+		assert.Equal(t, tc.ok, ok, "%v %s", tc.pattern, tc.path)
+		assert.Equal(t, tc.wildcards, wildcards, "%v %s", tc.pattern, tc.path)
+	}
+}
+
+// TestCBP_FailedGrantNamesNoDenyingPolicy: a grant whose condition failed
+// denied nothing, so only a deny stanza is ever named.
+func TestCBP_FailedGrantNamesNoDenyingPolicy(t *testing.T) {
+	ctx := testContext()
+	red := finalizedPolicy(t, "red-read", PolicyTypeCBP, `path "x" { capabilities = ["read"] condition = "agent.metadata.team == 'red'" }`)
+	cbp, err := NewCBP(ctx, []*Policy{red})
+	require.NoError(t, err)
+
+	refused := cbp.AllowOperation(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "x"}, teamEntry("green"), false)
+	assert.False(t, refused.Allowed)
+	require.NotNil(t, refused.Condition)
+	assert.Empty(t, refused.DenyingPolicy)
+}
+
 // TestCBP_GrantingPolicies_OnlyWhatGranted: the audit names the stanzas that
 // granted this request, not every stanza that could have.
 func TestCBP_GrantingPolicies_OnlyWhatGranted(t *testing.T) {
@@ -636,6 +995,41 @@ func BenchmarkAllowOperation_UnconditionalBesideConditional(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = cbp.AllowOperation(ctx, req, nil, false)
+	}
+}
+
+// BenchmarkAllowOperation_PlainDenies is a request that several plain deny
+// rules, segment wildcards included, are checked against and none apply to.
+func BenchmarkAllowOperation_PlainDenies(b *testing.B) {
+	ctx := testContext()
+	grant, _ := ParseCBPPolicy(namespace.RootNamespace, `path "kv/*" { capabilities = ["read"] }`)
+	denies, _ := ParseCBPPolicy(namespace.RootNamespace, `
+		path "other/x" { capabilities = ["deny"] }
+		path "other/*" { capabilities = ["deny"] }
+		path "kv/+/secret" { capabilities = ["deny"] }
+	`)
+	cbp, _ := NewCBP(ctx, []*Policy{grant, denies})
+	req := &logical.Request{Operation: logical.ReadOperation, Path: "kv/app/config"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, nil, false)
+	}
+}
+
+// BenchmarkAllowOperation_ConditionalDeny is a conditional deny that matches
+// the path and stands aside, the cost a guarded request pays.
+func BenchmarkAllowOperation_ConditionalDeny(b *testing.B) {
+	ctx := testContext()
+	grant, _ := ParseCBPPolicy(namespace.RootNamespace, `path "kv/*" { capabilities = ["read"] }`)
+	guard, _ := ParseCBPPolicy(namespace.RootNamespace, `
+		path "kv/*" { capabilities = ["deny"] condition = "agent.metadata.env != 'prod'" }
+	`)
+	cbp, _ := NewCBP(ctx, []*Policy{grant, guard})
+	te := &logical.TokenEntry{Metadata: map[string]string{"env": "prod"}, ExpireAt: time.Now().Add(time.Hour)}
+	req := &logical.Request{Operation: logical.ReadOperation, Path: "kv/app/config"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, te, false)
 	}
 }
 

@@ -164,6 +164,11 @@ type PathRules struct {
 	HasSegmentWildcards bool
 	Capabilities        []string
 
+	// segments is a segment-wildcard path split on "/", its trailing "*"
+	// dropped. Split once at parse, since a deny rule compares it on every
+	// request and NewCBP runs on every request.
+	segments []string
+
 	ExpirationRaw string    `hcl:"expiration"`
 	Expiration    time.Time `hcl:"-"`
 
@@ -456,13 +461,28 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 			}
 		}
 
-		normPath, isPrefix, hasSegmentWildcards, err := normalizePathPattern(result.namespace, pc.Path)
+		normPath, isPrefix, hasSegmentWildcards, segments, err := normalizePathPattern(result.namespace, pc.Path)
 		if err != nil {
 			return err
 		}
 		pc.Path = normPath
 		pc.IsPrefix = isPrefix
 		pc.HasSegmentWildcards = hasSegmentWildcards
+		pc.segments = segments
+
+		// Compiled before the capabilities, whose deny case jumps past the
+		// rest of the stanza: a deny's condition decides when it applies.
+		if pc.ConditionHCL != "" {
+			env, err := baseCELEnv()
+			if err != nil {
+				return fmt.Errorf("path %q: cel env: %w", key, err)
+			}
+			cond, err := compileCELCondition(env, pc.ConditionHCL)
+			if err != nil {
+				return fmt.Errorf("path %q condition: %w", key, err)
+			}
+			pc.Permissions.Condition = cond
+		}
 
 		// Initialize the map
 		pc.Permissions.CapabilitiesBitmap = 0
@@ -531,18 +551,6 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 				"day_of_week → now.getDayOfWeek(\"UTC\"); "+
 				"token_metadata → agent.metadata.<key>", key)
 		}
-
-		if pc.ConditionHCL != "" {
-			env, err := baseCELEnv()
-			if err != nil {
-				return fmt.Errorf("path %q: cel env: %w", key, err)
-			}
-			cond, err := compileCELCondition(env, pc.ConditionHCL)
-			if err != nil {
-				return fmt.Errorf("path %q condition: %w", key, err)
-			}
-			pc.Permissions.Condition = cond
-		}
 	PathFinished:
 		paths = append(paths, &pc)
 	}
@@ -558,7 +566,7 @@ func parsePaths(result *Policy, list *ast.ObjectList) error {
 // Both the CBP and the MCP parser call this. Sharing it is what guarantees the
 // two indexes can never disagree on a path key — a divergence there would make
 // MCP stanzas silently miss the requests they were written for.
-func normalizePathPattern(ns *namespace.Namespace, key string) (path string, isPrefix, hasSegmentWildcards bool, err error) {
+func normalizePathPattern(ns *namespace.Namespace, key string) (path string, isPrefix, hasSegmentWildcards bool, segments []string, err error) {
 	path = key
 
 	// Strip a leading '/' as paths start after the / in the API path
@@ -570,7 +578,7 @@ func normalizePathPattern(ns *namespace.Namespace, key string) (path string, isP
 	path = ns.Path + path
 
 	if strings.Contains(path, "+*") {
-		return "", false, false, fmt.Errorf("path %q: invalid use of wildcards ('+*' is forbidden)", path)
+		return "", false, false, nil, fmt.Errorf("path %q: invalid use of wildcards ('+*' is forbidden)", path)
 	}
 
 	if path == "+" || strings.Count(path, "/+") > 0 || strings.HasPrefix(path, "+/") {
@@ -587,7 +595,11 @@ func normalizePathPattern(ns *namespace.Namespace, key string) (path string, isP
 		}
 	}
 
-	return path, isPrefix, hasSegmentWildcards, nil
+	if hasSegmentWildcards {
+		segments = strings.Split(strings.TrimSuffix(path, "*"), "/")
+	}
+
+	return path, isPrefix, hasSegmentWildcards, segments, nil
 }
 
 // canonicaliseMCPRules converts a parsed MCP rule-set into the

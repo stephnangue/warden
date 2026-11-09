@@ -87,6 +87,23 @@ func TestCheckToken_StandbyNode(t *testing.T) {
 	assert.ErrorIs(t, err, ErrStandby)
 }
 
+// A refusal by a deny stanza names its policy on the Auth the audit is built from.
+func TestCheckToken_RecordsDenyingPolicy(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+	storeTestPolicy(t, c, "closed", PolicyTypeCBP, `path "kv/*" { capabilities = ["deny"] }`)
+
+	te := &logical.TokenEntry{ID: "tok-denied", NamespaceID: namespace.RootNamespaceID, Policies: []string{"closed"}}
+	req := &logical.Request{Path: "kv/x", Operation: logical.ReadOperation, ClientToken: te.ID}
+	req.SetTokenEntry(te)
+
+	auth, _, _, err := c.CheckToken(ctx, req, false)
+	require.Error(t, err)
+	require.NotNil(t, auth)
+	assert.False(t, auth.PolicyResults.Allowed)
+	assert.Equal(t, "closed", auth.DenyingPolicy)
+}
+
 // TestHandleRequest_NamespaceNotFound tests that requests fail when namespace is not found
 func TestHandleRequest_NamespaceNotFound(t *testing.T) {
 	core := createTestCore(t)
