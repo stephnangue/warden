@@ -1016,6 +1016,28 @@ func BenchmarkAllowOperation_PlainDenies(b *testing.B) {
 	}
 }
 
+// BenchmarkAllowOperation_SizeDependentCondition is a condition whose cost grows
+// with the request body, so it runs under the runtime cost limit.
+func BenchmarkAllowOperation_SizeDependentCondition(b *testing.B) {
+	ctx := testContext()
+	policy, _ := ParseCBPPolicy(namespace.RootNamespace, `
+		path "db/issue-grant" {
+			capabilities = ["create"]
+			condition = "request.data.all(k, k != '')"
+		}
+	`)
+	cbp, _ := NewCBP(ctx, []*Policy{policy})
+	data := make(map[string]any, 8)
+	for i := range 8 {
+		data["k"+strconv.Itoa(i)] = i
+	}
+	req := &logical.Request{Operation: logical.CreateOperation, Path: "db/issue-grant", Data: data}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, nil, false)
+	}
+}
+
 // BenchmarkAllowOperation_ConditionalDeny is a conditional deny that matches
 // the path and stands aside, the cost a guarded request pays.
 func BenchmarkAllowOperation_ConditionalDeny(b *testing.B) {

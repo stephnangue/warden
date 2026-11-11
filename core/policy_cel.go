@@ -12,12 +12,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/checker"
-	celast "github.com/google/cel-go/common/ast"
-	"github.com/google/cel-go/common/types"
-	"github.com/google/cel-go/common/types/ref"
-	"github.com/google/cel-go/interpreter"
+	"cel.dev/cel-go/cel"
+	celast "cel.dev/cel-go/common/ast"
+	"cel.dev/cel-go/common/cost"
+	"cel.dev/cel-go/common/types"
+	"cel.dev/cel-go/common/types/ref"
+	"cel.dev/cel-go/interpreter"
 
 	"github.com/stephnangue/warden/logical"
 )
@@ -247,17 +247,17 @@ type celCostEstimator struct {
 	maxSize uint64
 }
 
-func (e celCostEstimator) EstimateSize(node checker.AstNode) *checker.SizeEstimate {
+func (e celCostEstimator) EstimateSize(node cost.AstNode) *cost.SizeEstimate {
 	if path := node.Path(); len(path) > 0 {
 		switch path[0] {
 		case "request", "agent", "user", "call":
-			return &checker.SizeEstimate{Min: 0, Max: e.maxSize}
+			return &cost.SizeEstimate{Min: 0, Max: e.maxSize}
 		}
 	}
 	return nil
 }
 
-func (e celCostEstimator) EstimateCallCost(function, overloadID string, target *checker.AstNode, args []checker.AstNode) *checker.CallEstimate {
+func (e celCostEstimator) EstimateCallCost(function, overloadID string, target *cost.AstNode, args []cost.AstNode) *cost.CallEstimate {
 	return nil
 }
 
