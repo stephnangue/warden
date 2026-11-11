@@ -714,3 +714,70 @@ func TestCEL_UserCostEstimated(t *testing.T) {
 		t.Fatalf("expected a cost-limit error, got: %v", err)
 	}
 }
+
+// TestCEL_InConstantList: `in` over a constant list, built as a set lookup,
+// decides as the chain of `==` it replaces, an absent path included.
+func TestCEL_InConstantList(t *testing.T) {
+	env := mustEnv(t, false)
+	in := mustCompile(t, env, `request.path in ["a", "b"]`)
+	eq := mustCompile(t, env, `request.path == "a" || request.path == "b"`)
+	now := time.Unix(0, 0).UTC()
+	path := func(p string) map[string]any { return baseAct(celRequestInput{Path: p}, celPrincipalInput{}, now) }
+
+	for _, tc := range []struct {
+		name    string
+		act     map[string]any
+		want    bool
+		wantErr bool
+	}{
+		{"first", path("a"), true, false},
+		{"second", path("b"), true, false},
+		{"another", path("c"), false, false},
+		{"empty", path(""), false, false},
+		{"absent", map[string]any{"request": map[string]any{}}, false, true},
+	} {
+		for name, prg := range map[string]cel.Program{"in": in, "==": eq} {
+			got, err := evalCELCondition(prg, tc.act)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Fatalf("%s %s: got %v, err %v; want %v, error %v", tc.name, name, got, err, tc.want, tc.wantErr)
+			}
+		}
+	}
+
+	// The set lookup can't hash bytes: the condition errors, so an allow
+	// denies and a deny fires, where a scan of the list answered false. No
+	// request field is bytes; this pins the outcome should one become so.
+	if ok, err := evalCELCondition(in, map[string]any{"request": map[string]any{"path": []byte("a")}}); ok || err == nil {
+		t.Fatalf("bytes path: got %v, err %v; want an error", ok, err)
+	}
+}
+
+// TestCEL_ConstantRegex: a constant `matches` pattern, compiled once with the
+// program, decides as it did compiled on every evaluation.
+func TestCEL_ConstantRegex(t *testing.T) {
+	prg := mustCompile(t, mustEnv(t, false), `request.path.matches("^sys/(auth|audit)$")`)
+	now := time.Unix(0, 0).UTC()
+	for p, want := range map[string]bool{"sys/auth": true, "sys/audit": true, "sys/authx": false} {
+		got, err := evalCELCondition(prg, baseAct(celRequestInput{Path: p}, celPrincipalInput{}, now))
+		if err != nil || got != want {
+			t.Fatalf("%s: got %v, err %v; want %v", p, got, err, want)
+		}
+	}
+}
+
+// TestCEL_ConstantThatFailsStillCompiles: a constant that fails to evaluate
+// fails the optimized build, so the plain program is kept and the error comes
+// at evaluation, as before, where an `||` can still absorb it.
+func TestCEL_ConstantThatFailsStillCompiles(t *testing.T) {
+	env := mustEnv(t, false)
+	now := time.Unix(0, 0).UTC()
+	for _, bad := range []string{`request.path.matches("[")`, `timestamp("bad") < now`, `int("abc") == 1`} {
+		prg := mustCompile(t, env, bad+` || request.operation == "read"`)
+		for op, want := range map[string]bool{"read": true, "update": false} {
+			got, err := evalCELCondition(prg, baseAct(celRequestInput{Path: "x", Operation: op}, celPrincipalInput{}, now))
+			if got != want || (err == nil) != want {
+				t.Fatalf("%s on %s: got %v, err %v; want %v", bad, op, got, err, want)
+			}
+		}
+	}
+}

@@ -304,7 +304,16 @@ func compileCELConditionWithLimits(env *cel.Env, src string, maxCost, sizeBound 
 		progOpts = append(progOpts, cel.CostLimit(maxCost))
 	}
 
-	prg, err := env.Program(ast, progOpts...)
+	// Constant work moves to build time: an `in` over a constant list becomes a
+	// set lookup, and a constant `matches` pattern compiles once instead of on
+	// every evaluation. A constant that fails to evaluate (a bad regex, a bad
+	// timestamp literal) makes the optimized build fail where the plain program
+	// only errors at evaluation — which an allow's `||` may absorb and a deny
+	// treats as firing — so fall back to the plain program and keep that.
+	prg, err := env.Program(ast, append(progOpts, cel.EvalOptions(cel.OptOptimize))...)
+	if err != nil {
+		prg, err = env.Program(ast, progOpts...)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("condition program construction failed: %w", err)
 	}
