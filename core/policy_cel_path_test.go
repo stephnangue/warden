@@ -606,7 +606,7 @@ func TestCBP_ConstantThatFailsKeepsItsPolicy(t *testing.T) {
 	assert.False(t, refused.Allowed)
 	assert.Equal(t, "guard", refused.DenyingPolicy)
 	require.NotNil(t, refused.Condition)
-	assert.NotEmpty(t, refused.Condition.ErrorKind)
+	assert.Equal(t, "eval_error", refused.Condition.ErrorKind)
 }
 
 // TestCBP_Deny_RecordsWhichPolicy: a plain deny names its policy on every way
@@ -1088,12 +1088,26 @@ func BenchmarkAllowOperation_PathInList(b *testing.B) {
 			policy, _ := ParseCBPPolicy(namespace.RootNamespace, `path "*" { capabilities = ["read"] condition = "`+bc.condition+`" }`)
 			cbp, _ := NewCBP(ctx, []*Policy{policy})
 			req := &logical.Request{Operation: logical.ReadOperation, Path: paths[len(paths)-1]}
-			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				_ = cbp.AllowOperation(ctx, req, nil, false)
 			}
 		})
+	}
+}
+
+// BenchmarkAllowOperation_ConstantRegex is a condition matching a constant
+// pattern, compiled once with the program.
+func BenchmarkAllowOperation_ConstantRegex(b *testing.B) {
+	ctx := testContext()
+	policy, _ := ParseCBPPolicy(namespace.RootNamespace, `
+		path "kv/*" { capabilities = ["read"] condition = "request.path.matches('^kv/(app|web)/[a-z]+$')" }
+	`)
+	cbp, _ := NewCBP(ctx, []*Policy{policy})
+	req := &logical.Request{Operation: logical.ReadOperation, Path: "kv/app/config"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, nil, false)
 	}
 }
 

@@ -306,11 +306,17 @@ func compileCELConditionWithLimits(env *cel.Env, src string, maxCost, sizeBound 
 
 	// Constant work moves to build time: an `in` over a constant list becomes a
 	// set lookup, and a constant `matches` pattern compiles once instead of on
-	// every evaluation. A constant that fails to evaluate (a bad regex, a bad
-	// timestamp literal) makes the optimized build fail where the plain program
-	// only errors at evaluation — which an allow's `||` may absorb and a deny
-	// treats as firing — so fall back to the plain program and keep that.
-	prg, err := env.Program(ast, append(progOpts, cel.EvalOptions(cel.OptOptimize))...)
+	// every evaluation. Where that would change an outcome, the plain program is
+	// built instead. An `in` over an empty list would answer false without
+	// evaluating its left side, whose error the plain program surfaces. A
+	// constant that fails to evaluate (a bad regex, a bad timestamp literal)
+	// fails the optimized build where the plain program only errors at
+	// evaluation — which an allow's `||` may absorb and a deny treats as firing.
+	optimized := progOpts
+	if !celInOverEmptyList(ast) {
+		optimized = append(progOpts, cel.EvalOptions(cel.OptOptimize))
+	}
+	prg, err := env.Program(ast, optimized...)
 	if err != nil {
 		prg, err = env.Program(ast, progOpts...)
 	}
@@ -365,6 +371,27 @@ func celCostIsSizeDependent(env *cel.Env, ast *cel.Ast, sizeBound uint64) (bool,
 		return false, fmt.Errorf("condition cost estimation failed: %w", err)
 	}
 	return est2.Max != est.Max, nil
+}
+
+// celInOverEmptyList reports whether an `in` has an empty list literal on its
+// right side, which the optimizer folds to false without evaluating the left.
+func celInOverEmptyList(a *cel.Ast) bool {
+	native := a.NativeRep()
+	if native == nil || native.Expr() == nil {
+		return false
+	}
+	found := false
+	celast.PreOrderVisit(native.Expr(), celast.NewExprVisitor(func(e celast.Expr) {
+		if found || e.Kind() != celast.CallKind || e.AsCall().FunctionName() != "@in" || len(e.AsCall().Args()) != 2 {
+			return
+		}
+		celast.PreOrderVisit(e.AsCall().Args()[1], celast.NewExprVisitor(func(r celast.Expr) {
+			if r.Kind() == celast.ListKind && r.AsList().Size() == 0 {
+				found = true
+			}
+		}))
+	}))
+	return found
 }
 
 // fieldSet is the set of top-level namespace fields (e.g. "data", "metadata")

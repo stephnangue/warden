@@ -752,6 +752,47 @@ func TestCEL_InConstantList(t *testing.T) {
 	}
 }
 
+// TestCEL_InEmptyList: `x in []` reads x, so an absent x errors — an allow
+// denies, a deny fires — where a set lookup over an empty list would answer
+// false without looking.
+func TestCEL_InEmptyList(t *testing.T) {
+	env := mustEnv(t, false)
+	act := baseAct(celRequestInput{Data: map[string]any{}}, celPrincipalInput{}, time.Unix(0, 0).UTC())
+	for _, src := range []string{`request.data.x in []`, `!(request.data.x in [])`} {
+		ok, err := evalCELCondition(mustCompile(t, env, src), act)
+		if ok || err == nil || celErrorKind(err) != "no_such_key" {
+			t.Fatalf("%s: got %v, err %v; want a no_such_key error", src, ok, err)
+		}
+	}
+}
+
+// TestCEL_InConstantListNumbers: an MCP number arrives as a double, and the set
+// lookup still finds it in a list of ints, as the scan of the list did.
+func TestCEL_InConstantListNumbers(t *testing.T) {
+	prg := mustCompile(t, mustEnv(t, true), "call.args.level in [1, 2, 3]")
+	now := time.Unix(0, 0).UTC()
+	for level, want := range map[string]bool{"1": true, "1.0": true, "3": true, "4": false, "1.5": false} {
+		got, err := evalCELCondition(prg, mcpAct(now, "t", map[string]logical.ParamValue{"level": num(level)}))
+		if err != nil || got != want {
+			t.Fatalf("level %s: got %v, err %v; want %v", level, got, err, want)
+		}
+	}
+}
+
+// TestCEL_InConstantListUnderCostLimit: a set lookup inside a comprehension is
+// cheaper than the scan it replaces, and the runtime cost limit still stops it.
+func TestCEL_InConstantListUnderCostLimit(t *testing.T) {
+	c, err := compileCELConditionWithLimits(mustEnv(t, false), "request.data.all(k, !(k in ['a', 'b']))", 100, 5)
+	if err != nil {
+		t.Fatalf("expected the expression to compile under the injected bound: %v", err)
+	}
+	act := buildBaseActivation(celRequestInput{Data: bigStringKeyMap(500)}, celPrincipalInput{}, celPrincipalInput{}, time.Unix(0, 0).UTC())
+	ok, err := evalCELCondition(c.Program, act)
+	if ok || err == nil || celErrorKind(err) != "cost_exceeded" {
+		t.Fatalf("got %v, err %v; want a cost_exceeded error", ok, err)
+	}
+}
+
 // TestCEL_ConstantRegex: a constant `matches` pattern, compiled once with the
 // program, decides as it did compiled on every evaluation.
 func TestCEL_ConstantRegex(t *testing.T) {

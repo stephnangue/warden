@@ -75,6 +75,7 @@ var builtinRoleCases = []builtinCase{
 	{"sys/roles/x", logical.ReadOperation, "system", false, true, roles("warden-admin", "warden-security-admin", "warden-viewer")},
 	{"sys/roles/x", logical.UpdateOperation, "system", false, true, roles("warden-admin", "warden-security-admin")},
 	{"sys/roles", logical.ListOperation, "system", false, true, roles("warden-admin", "warden-security-admin", "warden-viewer")},
+	{"sys/rolesx", logical.ReadOperation, "system", false, false, roles("warden-admin")},
 	{"sys/policies/cbp/x", logical.ReadOperation, "system", false, false, roles("warden-admin", "warden-security-admin", "warden-viewer")},
 	{"sys/policies/cbp/x", logical.UpdateOperation, "system", false, false, roles("warden-admin", "warden-security-admin")},
 	{"sys/identity/group/x", logical.ReadOperation, "system", false, true, roles("warden-admin", "warden-security-admin", "warden-viewer")},
