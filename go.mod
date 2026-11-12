@@ -3,6 +3,7 @@ module github.com/stephnangue/warden
 go 1.27.3
 
 require (
+	cel.dev/cel-go v0.33.2
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.24.0
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.3
 	github.com/ProtonMail/go-crypto v1.5.2
@@ -27,7 +28,6 @@ require (
 	github.com/go-jose/go-jose/v3 v3.0.5
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/go-viper/mapstructure/v2 v2.5.0
-	github.com/google/cel-go v0.30.0
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/cap v0.15.0
 	github.com/hashicorp/errwrap v1.1.0

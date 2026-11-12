@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/cel-go/cel"
+	"cel.dev/cel-go/cel"
 
 	"github.com/stephnangue/warden/logical"
 )
@@ -149,7 +149,7 @@ func TestCEL_RuntimeCostLimitDenies(t *testing.T) {
 }
 
 // TestCEL_ErrorKind pins celErrorKind's categorization (it substring-matches
-// cel-go v0.28.1 error text — a table test guards against silent reclassification
+// cel-go's error text — a table test guards against silent reclassification
 // on upgrade).
 func TestCEL_ErrorKind(t *testing.T) {
 	now := time.Unix(0, 0).UTC()
