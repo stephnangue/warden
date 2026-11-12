@@ -6,6 +6,7 @@ package core
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -581,6 +582,33 @@ func TestCBP_Deny_FailsClosed(t *testing.T) {
 	assert.True(t, absent.Condition.UserAbsent, "a user could change the outcome")
 }
 
+// TestCBP_ConstantThatFailsKeepsItsPolicy: a condition whose constant fails to
+// evaluate still loads, so its policy keeps working: a grant's `||` absorbs the
+// error and a deny's error fires it.
+func TestCBP_ConstantThatFailsKeepsItsPolicy(t *testing.T) {
+	ctx := testContext()
+	const bad = "request.path.matches('[')"
+	grant := testParsePolicy(t, `
+		path "x" { capabilities = ["read", "update"] condition = "`+bad+` || request.operation == 'read'" }
+		path "y" { capabilities = ["read"] }
+	`)
+	guard := finalizedPolicy(t, "guard", PolicyTypeCBP, `path "y" { capabilities = ["deny"] condition = "`+bad+`" }`)
+	cbp, err := NewCBP(ctx, []*Policy{grant, guard})
+	require.NoError(t, err)
+	allow := func(op logical.Operation, path string) *CBPResults {
+		return cbp.AllowOperation(ctx, &logical.Request{Operation: op, Path: path}, nil, false)
+	}
+
+	assert.True(t, allow(logical.ReadOperation, "x").Allowed)
+	assert.False(t, allow(logical.UpdateOperation, "x").Allowed)
+
+	refused := allow(logical.ReadOperation, "y")
+	assert.False(t, refused.Allowed)
+	assert.Equal(t, "guard", refused.DenyingPolicy)
+	require.NotNil(t, refused.Condition)
+	assert.Equal(t, "eval_error", refused.Condition.ErrorKind)
+}
+
 // TestCBP_Deny_RecordsWhichPolicy: a plain deny names its policy on every way
 // to a refusal and records no condition, since none ran.
 func TestCBP_Deny_RecordsWhichPolicy(t *testing.T) {
@@ -1032,6 +1060,51 @@ func BenchmarkAllowOperation_SizeDependentCondition(b *testing.B) {
 		data["k"+strconv.Itoa(i)] = i
 	}
 	req := &logical.Request{Operation: logical.CreateOperation, Path: "db/issue-grant", Data: data}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cbp.AllowOperation(ctx, req, nil, false)
+	}
+}
+
+// BenchmarkAllowOperation_PathInList is warden-viewer's exact paths as one `in`,
+// a set lookup, against the chain of `==` it replaced, on the last path.
+func BenchmarkAllowOperation_PathInList(b *testing.B) {
+	paths := []string{
+		"sys/providers", "sys/skills", "sys/roles", "sys/auth", "sys/audit",
+		"sys/namespaces", "sys/oidc-issuer/config", "sys/protected-resource/config",
+	}
+	eq := make([]string, len(paths))
+	quoted := make([]string, len(paths))
+	for i, p := range paths {
+		eq[i] = "request.path == '" + p + "'"
+		quoted[i] = "'" + p + "'"
+	}
+	for _, bc := range []struct{ name, condition string }{
+		{"eq_chain", strings.Join(eq, " || ")},
+		{"in_list", "request.path in [" + strings.Join(quoted, ", ") + "]"},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			ctx := testContext()
+			policy, _ := ParseCBPPolicy(namespace.RootNamespace, `path "*" { capabilities = ["read"] condition = "`+bc.condition+`" }`)
+			cbp, _ := NewCBP(ctx, []*Policy{policy})
+			req := &logical.Request{Operation: logical.ReadOperation, Path: paths[len(paths)-1]}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = cbp.AllowOperation(ctx, req, nil, false)
+			}
+		})
+	}
+}
+
+// BenchmarkAllowOperation_ConstantRegex is a condition matching a constant
+// pattern, compiled once with the program.
+func BenchmarkAllowOperation_ConstantRegex(b *testing.B) {
+	ctx := testContext()
+	policy, _ := ParseCBPPolicy(namespace.RootNamespace, `
+		path "kv/*" { capabilities = ["read"] condition = "request.path.matches('^kv/(app|web)/[a-z]+$')" }
+	`)
+	cbp, _ := NewCBP(ctx, []*Policy{policy})
+	req := &logical.Request{Operation: logical.ReadOperation, Path: "kv/app/config"}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = cbp.AllowOperation(ctx, req, nil, false)

@@ -72,8 +72,7 @@ path "*" {
 path "*" {
   capabilities = ["create", "read", "update", "delete", "list", "patch", "scan", "sudo"]
   condition    = <<EOT
-request.path == "sys/providers" ||
-request.path == "sys/skills" ||
+request.path in ["sys/providers", "sys/skills"] ||
 request.path.startsWith("sys/providers/") ||
 request.path.startsWith("sys/cred/") ||
 request.path.startsWith("sys/skills/") ||
@@ -92,11 +91,13 @@ EOT
 path "*" {
   capabilities = ["create", "read", "update", "delete", "list", "patch", "sudo"]
   condition    = <<EOT
-request.path == "sys/roles" ||
-request.path == "sys/auth" ||
-request.path == "sys/audit" ||
-request.path == "sys/oidc-issuer/config" ||
-request.path == "sys/protected-resource/config" ||
+request.path in [
+  "sys/roles",
+  "sys/auth",
+  "sys/audit",
+  "sys/oidc-issuer/config",
+  "sys/protected-resource/config"
+] ||
 request.path.startsWith("sys/policies/") ||
 request.path.startsWith("sys/roles/") ||
 request.path.startsWith("sys/identity/") ||
@@ -114,14 +115,16 @@ EOT
 path "*" {
   capabilities = ["read", "list", "sudo"]
   condition    = <<EOT
-request.path == "sys/providers" ||
-request.path == "sys/skills" ||
-request.path == "sys/roles" ||
-request.path == "sys/auth" ||
-request.path == "sys/audit" ||
-request.path == "sys/namespaces" ||
-request.path == "sys/oidc-issuer/config" ||
-request.path == "sys/protected-resource/config" ||
+request.path in [
+  "sys/providers",
+  "sys/skills",
+  "sys/roles",
+  "sys/auth",
+  "sys/audit",
+  "sys/namespaces",
+  "sys/oidc-issuer/config",
+  "sys/protected-resource/config"
+] ||
 request.path.startsWith("sys/providers/") ||
 request.path.startsWith("sys/cred/") ||
 request.path.startsWith("sys/skills/") ||
