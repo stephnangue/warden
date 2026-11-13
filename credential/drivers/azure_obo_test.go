@@ -111,7 +111,7 @@ func TestAzureOBO_Keyless_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 
 	form := entra.lastForm(t)
-	assert.Equal(t, oboGrantType, form.Get("grant_type"))
+	assert.Equal(t, "urn:ietf:params:oauth:grant-type:jwt-bearer", form.Get("grant_type"))
 	assert.Equal(t, testAzureClient, form.Get("client_id"))
 	assert.Equal(t, userTok, form.Get("assertion"), "the user's token is the OBO assertion")
 	assert.Equal(t, "on_behalf_of", form.Get("requested_token_use"))

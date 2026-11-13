@@ -63,6 +63,8 @@ func TestCredentialIssueError(t *testing.T) {
 		GetErrorCode(&CredentialIssueError{Err: ErrBadRequest("spec fault")}))
 	assert.Equal(t, http.StatusUnauthorized,
 		GetErrorCode(&CredentialIssueError{Err: fmt.Errorf("x: %w", credential.ErrUserRequired)}))
+	assert.Equal(t, http.StatusForbidden,
+		GetErrorCode(&CredentialIssueError{Err: fmt.Errorf("x: %w", credential.ErrUserNotAllowed)}))
 }
 
 // timeoutErr is a net.Error that timed out, as a dial or read does.
@@ -115,6 +117,7 @@ func TestCredentialIssueError_Status(t *testing.T) {
 		{"no answer: deadline", fmt.Errorf("mint: %w", context.DeadlineExceeded), http.StatusServiceUnavailable},
 		{"Warden-side failure", errors.New("the identity issuer is not ready"), 0},
 		{"user required", credential.ErrUserRequired, 0},
+		{"user not allowed", fmt.Errorf("delegated user: %w", credential.ErrUserNotAllowed), 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := &CredentialIssueError{Spec: "s", Err: tc.cause}

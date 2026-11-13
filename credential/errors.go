@@ -95,6 +95,15 @@ var (
 	// succeed.
 	ErrReservedPrincipal = errors.New("the user principal uses the reserved agent subject prefix " + WardenSubjectPrefix)
 
+	// ErrUserNotAllowed is returned (wrapped) when a spec that acts as the user
+	// refuses the verified user: the identity names no one the spec may act for —
+	// an address outside the domains it lists, say, or a user the upstream does
+	// not know. Like ErrReservedPrincipal it is a sentinel so the status is
+	// attached where the error surfaces: GetErrorCode maps it to 403, since the
+	// user was verified and presenting the same identity again cannot succeed.
+	// Wrapping errors never repeat the refused value.
+	ErrUserNotAllowed = errors.New("the verified user is not one this credential spec may act for")
+
 	// ErrChainedSecretRejected is returned (wrapped) by a chained-secret consuming
 	// driver when the downstream rejects the fetched secret — e.g. an OAuth
 	// invalid_client, or a 401 from a resource. It signals the manager that a

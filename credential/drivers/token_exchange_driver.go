@@ -43,11 +43,10 @@ func TokenExchangeSupportsActor(sourceCfg credential.Config) bool {
 	return credential.GetString(sourceCfg, "grant", tokenExchangeGrantRFC8693) != tokenExchangeGrantJWTBearer
 }
 
-// grant_type URNs sent in the token request.
-const (
-	grantTypeTokenExchange = "urn:ietf:params:oauth:grant-type:token-exchange"
-	grantTypeJWTBearer     = "urn:ietf:params:oauth:grant-type:jwt-bearer"
-)
+// grantTypeTokenExchange is the RFC 8693 grant_type URN sent in the token
+// request; the jwt-bearer one, grantTypeJWTBearer, lives with the other
+// assertion-grant pieces in signed_assertion.go.
+const grantTypeTokenExchange = "urn:ietf:params:oauth:grant-type:token-exchange"
 
 // Compile-time interface assertions.
 var _ credential.SourceDriver = (*TokenExchangeDriver)(nil)
