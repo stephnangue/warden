@@ -2,6 +2,7 @@ package httpproxy
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/stephnangue/warden/logical"
@@ -45,6 +46,17 @@ func TestValidateSpec(t *testing.T) {
 
 	t.Run("valid spec", func(t *testing.T) {
 		assert.NoError(t, ValidateSpec(testSpec()))
+	})
+
+	// A spec counting on the hook to refuse what it cannot rewrite must have one.
+	t.Run("RewriteWithoutPrefix without the hooks", func(t *testing.T) {
+		s := *testSpec()
+		s.RewriteWithoutPrefix = true
+		assert.Contains(t, ValidateSpec(&s).Error(), "RewriteWithoutPrefix")
+
+		s.RewriteResponse = func(*http.Request, map[string]any) bool { return true }
+		s.ModifyResponse = func(*http.Response, RewriteContext) error { return nil }
+		assert.NoError(t, ValidateSpec(&s))
 	})
 }
 

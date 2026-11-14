@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
@@ -118,8 +119,23 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 		}
 	}
 
+	// Dropped segments are read off the first "/gateway" in the full path, as the
+	// provider read them. Should a namespace, mount or role named "gateway" come
+	// first, that cut is not the routed one, and the segments dropped (and the
+	// host a provider built from them) would not be the request's; such a path
+	// is refused rather than guessed at.
+	if dispatch.DropSegments > 0 && req.AuditPath != "" {
+		routed, ok := gatewayAPIFromAuditPath(req.AuditPath)
+		if cut, _ := PathAfterGateway(req.HTTPRequest.URL.Path); !ok || cut != routed {
+			b.Logger.Error("Gateway path is ambiguous: a path segment before it is named gateway",
+				logger.String("audit_path", req.AuditPath))
+			b.writeInternalFailure(req)
+			return
+		}
+	}
+
 	// Build target URL
-	parsedURL, err := buildTargetURL(providerURL, req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery)
+	parsedURL, err := buildTargetURL(providerURL, req.HTTPRequest.URL.Path, req.HTTPRequest.URL.RawQuery, dispatch.DropSegments)
 	if err != nil {
 		b.Logger.Error("Failed to build target URL", logger.Err(err))
 		b.writeInternalFailure(req)
@@ -165,11 +181,13 @@ func (b *proxyBackend) handleGateway(ctx context.Context, req *logical.Request) 
 	// A spec that rewrites this response gets it through the same hook, with
 	// where its links should point. Accept-Encoding is dropped so the body arrives
 	// uncompressed and can be read; a request with no prefix to rewrite onto is
-	// left exactly as it was.
+	// left exactly as it was, unless the spec asked to decide that case itself.
 	if b.spec.ModifyResponse != nil && b.spec.RewriteResponse != nil && b.spec.RewriteResponse(r, state) {
 		if prefix := b.rewritePrefix(ctx, req); prefix != "" {
 			r = r.WithContext(withRewriteContext(r.Context(), RewriteContext{Prefix: prefix, MaxBodySize: maxBody}))
 			r.Header.Del("Accept-Encoding")
+		} else if b.spec.RewriteWithoutPrefix {
+			r = r.WithContext(withRewriteContext(r.Context(), RewriteContext{MaxBodySize: maxBody}))
 		}
 	}
 
@@ -197,8 +215,10 @@ func (b *proxyBackend) writeInternalFailure(req *logical.Request) {
 
 // buildTargetURL constructs the target URL from the gateway path. path is the
 // decoded request path the request was authorized on; it is escaped once on
-// the wire and never decoded again (see package upstream).
-func buildTargetURL(providerURL, path, rawQuery string) (*url.URL, error) {
+// the wire and never decoded again (see package upstream). dropSegments is a
+// Dispatch.DropSegments: that many leading segments of the path after
+// "/gateway" are not forwarded.
+func buildTargetURL(providerURL, path, rawQuery string, dropSegments int) (*url.URL, error) {
 	// Providers whose upstream is instance-specific (gitlab, kubernetes,
 	// splunk, mcp, ...) ship an empty DefaultURL and require the operator
 	// to configure one. Guard here so a request to an unconfigured mount fails
@@ -218,6 +238,19 @@ func buildTargetURL(providerURL, path, rawQuery string) (*url.URL, error) {
 	// trailing slash that strict servers 301-redirect; host-only upstreams are
 	// unaffected since net/http sends an empty path as "/".
 
+	for i := 0; i < dropSegments; i++ {
+		// Each dropped segment is "/<segment>"; what follows it, from its own
+		// "/", is the rest of the authorized path.
+		if !strings.HasPrefix(apiPath, "/") {
+			return nil, fmt.Errorf("gateway path has fewer than %d segments to drop", dropSegments)
+		}
+		next := strings.IndexByte(apiPath[1:], '/')
+		if next == -1 {
+			apiPath = ""
+			continue
+		}
+		apiPath = apiPath[1+next:]
+	}
 	return upstream.URL(providerURL, apiPath, rawQuery)
 }
 
@@ -231,6 +264,25 @@ func buildTargetURL(providerURL, path, rawQuery string) (*url.URL, error) {
 // namespace or role named "gateway-prod" or "gateways" is not the gateway.
 func PathAfterGateway(path string) (string, bool) {
 	return framework.AfterGatewaySegment(path)
+}
+
+// gatewayAPIFromAuditPath returns the path after the gateway segment of a
+// mount-relative path, "gateway/..." or "role/<role>/gateway/...", the forms
+// core routes to a gateway. ok is false for any other shape.
+func gatewayAPIFromAuditPath(audit string) (string, bool) {
+	rest := audit
+	if r, ok := strings.CutPrefix(rest, "role/"); ok {
+		slash := strings.IndexByte(r, '/')
+		if slash <= 0 {
+			return "", false
+		}
+		rest = r[slash+1:]
+	}
+	// A slice of audit, "" or "/...": nothing is allocated on the request path.
+	if rest == "gateway" || strings.HasPrefix(rest, "gateway/") {
+		return rest[len("gateway"):], true
+	}
+	return "", false
 }
 
 // resolveAcceptDefault returns the Accept value to inject when the client did

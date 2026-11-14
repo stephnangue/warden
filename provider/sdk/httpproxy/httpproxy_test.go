@@ -1238,7 +1238,7 @@ func TestBuildTargetURL(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := buildTargetURL(tc.provider, tc.path, tc.query)
+			result, err := buildTargetURL(tc.provider, tc.path, tc.query, 0)
 			if tc.wantErr {
 				assert.Error(t, err)
 			} else {
@@ -1247,6 +1247,132 @@ func TestBuildTargetURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A provider may drop leading segments that address the upstream; the rest of
+// the authorized path is forwarded as it is.
+func TestBuildTargetURL_DropSegments(t *testing.T) {
+	const path = "/ws/role/r/gateway/gmail.googleapis.com/gmail/v1/users/me/messages"
+	tests := []struct {
+		name     string
+		provider string
+		path     string
+		drop     int
+		query    string
+		expected string
+		wantErr  bool
+	}{
+		{name: "the host segment", provider: "https://gmail.googleapis.com", path: path, drop: 1, query: "maxResults=10",
+			expected: "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10"},
+		{name: "two segments", provider: "https://gmail.googleapis.com", path: path, drop: 2,
+			expected: "https://gmail.googleapis.com/v1/users/me/messages"},
+		{name: "onto a base with a path", provider: "https://stub.test/base", path: path, drop: 1,
+			expected: "https://stub.test/base/gmail/v1/users/me/messages"},
+		{name: "nothing left", provider: "https://gmail.googleapis.com", path: "/ws/gateway/gmail.googleapis.com", drop: 1,
+			expected: "https://gmail.googleapis.com"},
+		{name: "a slash left", provider: "https://gmail.googleapis.com", path: "/ws/gateway/gmail.googleapis.com/", drop: 1,
+			expected: "https://gmail.googleapis.com/"},
+		{name: "more than there are", provider: "https://gmail.googleapis.com", path: "/ws/gateway/gmail.googleapis.com", drop: 2, wantErr: true},
+		{name: "nothing to drop", provider: "https://gmail.googleapis.com", path: "/ws/gateway", drop: 1, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := buildTargetURL(tc.provider, tc.path, tc.query, tc.drop)
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, result.String())
+		})
+	}
+}
+
+// Only a whole "/gateway" segment is the gateway: a mount named "gateway-tools"
+// is not.
+func TestPathAfterGateway(t *testing.T) {
+	tests := []struct {
+		in, want string
+		ok       bool
+	}{
+		{"/v1/m/gateway/a/b", "/a/b", true},
+		{"/v1/m/role/r/gateway/a", "/a", true},
+		{"/v1/m/gateway", "", true},
+		{"/v1/m/gateway/", "/", true},
+		{"/v1/gateway-tools/role/r/gateway/a/b", "/a/b", true},
+		{"/v1/gateways/gateway/a", "/a", true},
+		{"/v1/m/gatewayx", "", false},
+		{"/v1/m/role/r", "", false},
+	}
+	for _, tc := range tests {
+		got, ok := PathAfterGateway(tc.in)
+		assert.Equal(t, tc.ok, ok, tc.in)
+		assert.Equal(t, tc.want, got, tc.in)
+	}
+}
+
+// The path a provider shortens reaches the upstream as authorized, escaped once.
+// A path whose first "/gateway" is not the routed one is refused before anything
+// is sent: the segments the provider dropped, and the host it built from them,
+// would not be the request's.
+func TestHandleGateway_ResolveUpstream_DropSegments(t *testing.T) {
+	var gotURI string
+	var hits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		gotURI = r.RequestURI
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	var resolved bool
+	spec := testSpec()
+	spec.ExtractCredentials = func(req *logical.Request) (map[string]string, error) {
+		return map[string]string{"Authorization": "Bearer test"}, nil
+	}
+	spec.ResolveUpstream = func(r *http.Request, _ string, _ map[string]any) (Dispatch, bool) {
+		// The host segment addresses the upstream; this stub serves every host.
+		return Dispatch{UpstreamURL: upstream.URL, DropSegments: 1}, resolved
+	}
+	pb := setupBackend(t, spec).(*proxyBackend)
+
+	call := func(target, auditPath string) int {
+		rec := httptest.NewRecorder()
+		pb.handleGateway(context.Background(), &logical.Request{
+			HTTPRequest: httptest.NewRequest("GET", target, nil), ResponseWriter: rec, AuditPath: auditPath,
+		})
+		return rec.Code
+	}
+
+	resolved = true
+	// "x%2525 y" was authorized as "x%25 y": it leaves escaped exactly once, so the
+	// upstream sees that same segment — never decoded a second time into "x% y".
+	assert.Equal(t, 200, call("/v1/ws/gateway/drive.googleapis.com/drive/v3/files/x%2525%20y?fields=id",
+		"gateway/drive.googleapis.com/drive/v3/files/x%25 y"))
+	assert.Equal(t, "/drive/v3/files/x%2525%20y?fields=id", gotURI)
+
+	// A mount named like the gateway is not mistaken for it.
+	assert.Equal(t, 200, call("/v1/gateway-ws/role/r/gateway/drive.googleapis.com/drive/v3/files",
+		"role/r/gateway/drive.googleapis.com/drive/v3/files"))
+	assert.Equal(t, "/drive/v3/files", gotURI)
+
+	hits = 0
+	for _, tc := range []struct{ name, target, audit string }{
+		{"a role named gateway", "/v1/ws/role/gateway/gateway/drive.googleapis.com/drive/v3/files",
+			"role/gateway/gateway/drive.googleapis.com/drive/v3/files"},
+		{"a mount named gateway", "/v1/gateway/gateway/drive.googleapis.com/drive/v3/files",
+			"gateway/drive.googleapis.com/drive/v3/files"},
+	} {
+		assert.Equal(t, http.StatusInternalServerError, call(tc.target, tc.audit), tc.name)
+	}
+	assert.Zero(t, hits, "an ambiguous cut is never forwarded")
+
+	// A dispatch the provider did not claim drops nothing.
+	resolved = false
+	pb.providerURL = upstream.URL
+	assert.Equal(t, 200, call("/v1/ws/gateway/drive.googleapis.com/drive/v3/files",
+		"gateway/drive.googleapis.com/drive/v3/files"))
+	assert.Equal(t, "/drive.googleapis.com/drive/v3/files", gotURI)
 }
 
 // --- prepareHeaders tests ---
@@ -1959,7 +2085,8 @@ func TestRewritePrefix(t *testing.T) {
 }
 
 // A spec that asks for it gets the upstream response, with the prefix, through
-// the proxy's response hook; without an external base the response is untouched.
+// the proxy's response hook; without an external base the response is untouched
+// unless the spec set RewriteWithoutPrefix, when the hook decides.
 func TestHandleGateway_RewriteResponse(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1968,40 +2095,61 @@ func TestHandleGateway_RewriteResponse(t *testing.T) {
 	defer upstream.Close()
 
 	var seen []RewriteContext
+	var acceptEncoding []string
 	spec := testSpec()
 	spec.RewriteResponse = func(r *http.Request, _ map[string]any) bool { return r.Method == http.MethodGet }
 	spec.ModifyResponse = func(resp *http.Response, rc RewriteContext) error {
 		seen = append(seen, rc)
+		acceptEncoding = append(acceptEncoding, resp.Request.Header.Get("Accept-Encoding"))
+		if rc.Prefix == "" {
+			// What a spec deciding the unrewritable case may do: refuse it.
+			return fmt.Errorf("nothing to rewrite onto")
+		}
 		resp.Body = io.NopCloser(strings.NewReader(`{"next":"rewritten"}`))
 		resp.ContentLength = -1
 		resp.Header.Del("Content-Length")
 		return nil
 	}
 
-	call := func(pb *proxyBackend) string {
+	call := func(pb *proxyBackend) (int, string) {
 		rec := httptest.NewRecorder()
 		ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 		httpReq := httptest.NewRequest(http.MethodGet, "/test/role/r/gateway/v1/list", nil).WithContext(ctx)
+		httpReq.Header.Set("Accept-Encoding", "identity")
 		pb.handleGateway(ctx, &logical.Request{
 			HTTPRequest: httpReq, ResponseWriter: rec,
 			MountPoint: "test/", AuditPath: "role/r/gateway/v1/list",
 			Credential: &credential.Credential{Type: credential.TypeAPIKey, Data: map[string]string{"api_key": "sk-test"}},
 		})
-		return rec.Body.String()
+		return rec.Code, rec.Body.String()
 	}
 
 	pb := setupBackend(t, spec).(*proxyBackend)
 	pb.providerURL = upstream.URL
 	pb.StreamingBackend.InitProxy(upstream.Client().Transport)
 	pb.installMCPListFilter()
-	assert.JSONEq(t, `{"next":"upstream"}`, call(pb), "no external base: untouched")
-	assert.Empty(t, seen)
+	_, body := call(pb)
+	assert.JSONEq(t, `{"next":"upstream"}`, body, "no external base: untouched")
+	assert.Empty(t, seen, "and the hook is not called")
 
 	pb.externalBaseURL = func(context.Context) string { return "https://warden.example.com" }
-	assert.JSONEq(t, `{"next":"rewritten"}`, call(pb))
+	_, body = call(pb)
+	assert.JSONEq(t, `{"next":"rewritten"}`, body)
 	require.Len(t, seen, 1)
 	assert.Equal(t, "https://warden.example.com/v1/test/role/r/gateway", seen[0].Prefix)
 	assert.Positive(t, seen[0].MaxBodySize)
+	assert.Empty(t, acceptEncoding[0], "the body is read, so it arrives uncompressed")
+
+	// A spec that decides the unrewritable case is called with no prefix, gets
+	// the response as the client asked for it, and may refuse it.
+	pb.spec.RewriteWithoutPrefix = true
+	pb.externalBaseURL = nil
+	status, _ := call(pb)
+	assert.Equal(t, http.StatusBadGateway, status)
+	require.Len(t, seen, 2)
+	assert.Empty(t, seen[1].Prefix)
+	assert.Positive(t, seen[1].MaxBodySize)
+	assert.Equal(t, "identity", acceptEncoding[1], "nothing to rewrite onto, so the client's encoding is kept")
 }
 
 // With a renderer the refusal is answered in the provider's error shape.
