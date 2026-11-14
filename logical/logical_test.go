@@ -280,3 +280,84 @@ func TestRequest_TokenEntry(t *testing.T) {
 	require.NotNil(t, r.TokenEntry())
 	assert.Equal(t, "test-id", r.TokenEntry().ID)
 }
+
+// Media types are case-insensitive and +json types are JSON, so a caller cannot
+// relabel a JSON body to keep policy from reading it.
+func TestBodyMediaType(t *testing.T) {
+	tests := []struct {
+		contentType string
+		mediaType   string
+		json        bool
+	}{
+		{"", "", true},
+		{"application/json", "application/json", true},
+		{"Application/JSON", "application/json", true},
+		{"application/json; charset=utf-8", "application/json", true},
+		{"application/json;;", "application/json", true}, // malformed parameter
+		{"text/json", "text/json", true},
+		{"application/vnd.api+json", "application/vnd.api+json", true},
+		{"application/merge-patch+json", "application/merge-patch+json", true},
+		{"application/x-www-form-urlencoded", "application/x-www-form-urlencoded", false},
+		{"text/plain", "text/plain", false},
+		{"application/jsonl", "application/jsonl", false}, // a stream of documents, not one
+		{"application/json+protobuf", "application/json+protobuf", false},
+		{"multipart/form-data; boundary=x", "multipart/form-data", false},
+		{" Application/JSON ; charset=utf-8", "application/json", true},
+		{"application/json; a=1; a=2", "application/json", true}, // a parameter mime.ParseMediaType refuses
+		{"application json", "application json", false},          // not a media type at all
+		{"application/x+jſon", "application/x+jſon", false},      // U+017F folds to s, but is not one
+		{"   ", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.contentType, func(t *testing.T) {
+			got := BodyMediaType(tt.contentType)
+			assert.Equal(t, tt.mediaType, got)
+			assert.Equal(t, tt.json, IsJSONMediaType(got))
+		})
+	}
+}
+
+// A label is one media type, read the same by whoever reads all of it.
+func TestIsMediaTypeLabel(t *testing.T) {
+	for _, label := range []string{
+		"application/json",
+		"Application/JSON",
+		"application/json; charset=utf-8",
+		"application/json;charset=UTF-8",
+		"application/json ;charset=utf-8",
+		"application/json; charset = utf-8", // spaces mime.ParseMediaType accepts
+		"application/json;",
+		"application/json;; charset=utf-8;",
+		`application/json; charset="utf-8"`,
+		`application/json; x="a \"quoted\"; value, with a comma"`,
+		"multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW",
+		"application/x-git-upload-pack-request",
+	} {
+		assert.True(t, IsMediaTypeLabel(label), label)
+	}
+	for _, label := range []string{
+		"",
+		" ",
+		"json",
+		"application/",
+		"/json",
+		"application/x-www-form-urlencoded, application/x+json",
+		"application/x-www-form-urlencoded; a=b, application/json",
+		"application/x-www-form-urlencoded;, application/json",
+		"application/json; a=b, application/x-www-form-urlencoded",
+		"application/json; charset",
+		"application/json; charset=",
+		`application/json; charset="utf-8`,
+		`application/json; charset="utf-8" x`,
+		"application/json; charset=\"a\x01b\"",
+		" application/json",
+		"applİcation/json",
+		"application/json; charset=utf‑8",
+	} {
+		assert.False(t, IsMediaTypeLabel(label), label)
+	}
+
+	assert.Zero(t, testing.AllocsPerRun(100, func() {
+		_ = IsMediaTypeLabel(`multipart/form-data; boundary="b"; charset=utf-8`)
+	}))
+}

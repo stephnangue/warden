@@ -61,6 +61,7 @@ import (
 	"github.com/stephnangue/warden/provider/github"
 	"github.com/stephnangue/warden/provider/gitlab"
 	"github.com/stephnangue/warden/provider/grafana"
+	"github.com/stephnangue/warden/provider/gws"
 	"github.com/stephnangue/warden/provider/honeycomb"
 	"github.com/stephnangue/warden/provider/ibmcloud"
 	"github.com/stephnangue/warden/provider/kubernetes"
@@ -182,6 +183,7 @@ Usage: warden server [options]
 		"ibmcloud":      ibmcloud.Factory,
 		"github":        github.Factory,
 		"gitlab":        gitlab.Factory,
+		"gws":           gws.Factory,
 		"mcp":           mcp.Factory,
 		"mcp_aws":       mcp_aws.Factory,
 		"mistral":       mistral.Factory,
@@ -215,6 +217,7 @@ Usage: warden server [options]
 		"aws":           aws.Skill(),
 		"github":        github.Skill(),
 		"gitlab":        gitlab.Skill(),
+		"gws":           gws.Skill(),
 		"mcp":           mcp.Skill(),
 		"mcp_aws":       mcp_aws.Skill(),
 		"msgraph":       msgraph.Skill(),

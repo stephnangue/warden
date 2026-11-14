@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -33,7 +32,6 @@ import (
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
-	"golang.org/x/net/http/httpguts"
 )
 
 const (
@@ -1660,48 +1658,19 @@ func (c *Core) parseRequestBodyLimit(req *logical.Request, limit int64) error {
 }
 
 // parseBody dispatches to the appropriate body parser based on Content-Type.
-// Supports JSON (see isJSONMediaType) and application/x-www-form-urlencoded.
+// Supports JSON (see logical.IsJSONMediaType) and application/x-www-form-urlencoded.
 // Unknown content types are silently skipped (body left untouched).
 func (c *Core) parseBody(req *logical.Request, limit int64) error {
-	mediaType := bodyMediaType(req.HTTPRequest.Header.Get("Content-Type"))
+	mediaType := logical.BodyMediaType(req.HTTPRequest.Header.Get("Content-Type"))
 
 	switch {
-	case isJSONMediaType(mediaType):
+	case logical.IsJSONMediaType(mediaType):
 		return c.parseJSONBody(req, limit)
 	case mediaType == "application/x-www-form-urlencoded":
 		return c.parseFormBody(req, limit)
 	default:
 		return nil
 	}
-}
-
-// bodyMediaType returns the media type of a Content-Type value: lowercased, with
-// its parameters dropped, and "" for an absent header. Media types are
-// case-insensitive (RFC 9110 §8.3.1). A value mime.ParseMediaType rejects (a
-// malformed parameter, say) still yields the part before ';', so a sloppy
-// parameter cannot turn a JSON body into one policy never sees.
-func bodyMediaType(contentType string) string {
-	if strings.TrimSpace(contentType) == "" {
-		return ""
-	}
-	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil {
-		return mediaType
-	}
-	mediaType, _, _ := strings.Cut(contentType, ";")
-	return strings.ToLower(strings.TrimSpace(mediaType))
-}
-
-// isJSONMediaType reports whether a body labelled mediaType is parsed as JSON for
-// policy. That is any spelling an upstream may decode as JSON, so a caller cannot
-// relabel a body to slip it past a condition: application/json, text/json, any
-// structured-syntax +json type (RFC 6839, e.g. application/vnd.api+json or
-// application/merge-patch+json), and an absent type, which core has always read as
-// JSON. A body that then fails to parse is refused.
-func isJSONMediaType(mediaType string) bool {
-	return mediaType == "" ||
-		mediaType == "application/json" ||
-		mediaType == "text/json" ||
-		strings.HasSuffix(mediaType, "+json")
 }
 
 // readAndRestoreBody buffers the request body under the size cap and puts it back, so
@@ -1745,7 +1714,7 @@ func (c *Core) parseJSONBody(req *logical.Request, limit int64) error {
 		return nil
 	}
 
-	if !isJSONMediaType(bodyMediaType(req.HTTPRequest.Header.Get("Content-Type"))) {
+	if !logical.IsJSONMediaType(logical.BodyMediaType(req.HTTPRequest.Header.Get("Content-Type"))) {
 		return nil // Not JSON, skip
 	}
 
@@ -1843,107 +1812,10 @@ func checkBodyLabel(r *http.Request) error {
 		return nil
 	case len(labels) > 1:
 		return logical.ErrBadRequest("request carries more than one Content-Type")
-	case !isMediaTypeLabel(labels[0]):
+	case !logical.IsMediaTypeLabel(labels[0]):
 		return logical.ErrBadRequest("request Content-Type is not a single media type")
 	}
 	return nil
-}
-
-// isMediaTypeLabel reports whether a Content-Type value is ASCII and one RFC 9110
-// media type: type/subtype, both tokens, then parameters each a token=token or
-// token="quoted string". Anything else after the type — a comma starting a second
-// one, a stray word — is where core and an upstream could part ways.
-func isMediaTypeLabel(label string) bool {
-	for i := 0; i < len(label); i++ {
-		if label[i] >= utf8.RuneSelf {
-			return false
-		}
-	}
-	base, params, _ := strings.Cut(label, ";")
-	typ, sub, ok := strings.Cut(strings.TrimSpace(base), "/")
-	return ok && isHTTPToken(typ) && isHTTPToken(sub) && isMediaTypeParams(params)
-}
-
-// isMediaTypeParams reports whether s, what follows a media type's first ';', is
-// RFC 9110 parameters: *( OWS ";" OWS [ token "=" ( token / quoted-string ) ] ),
-// empty ones allowed as the grammar allows them. Spaces around '=', which the
-// grammar forbids but mime.ParseMediaType accepts, are accepted: they leave
-// nothing to read two ways.
-func isMediaTypeParams(s string) bool {
-	for {
-		s = strings.Trim(s, " \t")
-		if s == "" {
-			return true
-		}
-		if s[0] == ';' {
-			s = s[1:]
-			continue
-		}
-		name := tokenPrefix(s)
-		if name == 0 {
-			return false
-		}
-		s = strings.TrimLeft(s[name:], " \t")
-		if s == "" || s[0] != '=' {
-			return false
-		}
-		s = strings.TrimLeft(s[1:], " \t")
-		var value int
-		if s != "" && s[0] == '"' {
-			value = quotedStringPrefix(s)
-		} else {
-			value = tokenPrefix(s)
-		}
-		if value == 0 {
-			return false
-		}
-		s = strings.TrimLeft(s[value:], " \t")
-		if s != "" && s[0] != ';' {
-			return false
-		}
-	}
-}
-
-// tokenPrefix returns how many leading bytes of s are token characters.
-func tokenPrefix(s string) int {
-	i := 0
-	for i < len(s) && httpguts.IsTokenRune(rune(s[i])) {
-		i++
-	}
-	return i
-}
-
-// quotedStringPrefix returns the length of the RFC 9110 quoted-string s opens with,
-// or 0 when it does not close. s is ASCII.
-func quotedStringPrefix(s string) int {
-	for i := 1; i < len(s); i++ {
-		switch c := s[i]; {
-		case c == '"':
-			return i + 1
-		case c == '\\':
-			// quoted-pair: a backslash and one HTAB, SP or visible character.
-			i++
-			if i == len(s) || (s[i] != '\t' && (s[i] < 0x20 || s[i] == 0x7f)) {
-				return 0
-			}
-		case c != '\t' && (c < 0x20 || c == 0x7f):
-			return 0
-		}
-	}
-	return 0
-}
-
-// isHTTPToken reports whether s is an RFC 9110 token.
-func isHTTPToken(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if !httpguts.IsTokenRune(rune(s[i])) {
-			return false
-		}
-	}
-	return true
 }
 
 // logPrefix returns at most n bytes of a caller-supplied string, cut at a rune

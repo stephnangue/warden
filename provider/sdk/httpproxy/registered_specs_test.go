@@ -20,6 +20,7 @@ import (
 	"github.com/stephnangue/warden/provider/github"
 	"github.com/stephnangue/warden/provider/gitlab"
 	"github.com/stephnangue/warden/provider/grafana"
+	"github.com/stephnangue/warden/provider/gws"
 	"github.com/stephnangue/warden/provider/honeycomb"
 	"github.com/stephnangue/warden/provider/kubernetes"
 	"github.com/stephnangue/warden/provider/mcp"
@@ -55,6 +56,7 @@ func TestRegisteredProviderSpecsValid(t *testing.T) {
 		"elastic":       elastic.Spec,
 		"github":        github.Spec,
 		"gitlab":        gitlab.Spec,
+		"gws":           gws.Spec,
 		"grafana":       grafana.Spec,
 		"honeycomb":     honeycomb.Spec,
 		"kubernetes":    kubernetes.Spec,
