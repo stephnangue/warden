@@ -475,7 +475,7 @@ func TestKeyValueCredType_GCP_LocatorCharsets(t *testing.T) {
 // token, so both would be accepted and never read.
 func TestKeyValueCredType_GCP_RejectsTokenMintKeys(t *testing.T) {
 	ct := NewKeyValueCredType()
-	for _, key := range []string{"scopes", "lifetime"} {
+	for _, key := range []string{"scopes", "lifetime", "delegated_user_claim", "delegated_user_domains"} {
 		err := ct.ValidateConfig(credential.NewConfig(map[string]string{
 			"mint_method": "secret_read", "secret_name": "keys", "project": "acme-prod", key: "v",
 		}), credential.SourceTypeGCP)

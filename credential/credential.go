@@ -10,6 +10,7 @@ const (
 	TypeVaultToken        = "vault_token"
 	TypeAzureBearerToken  = "azure_bearer_token"
 	TypeGCPAccessToken    = "gcp_access_token"
+	TypeGCPDelegatedToken = "gcp_delegated_token"
 	TypeGitLabAccessToken = "gitlab_access_token"
 	TypeGitHubToken       = "github_token"
 	TypeAPIKey            = "api_key"

@@ -2,13 +2,20 @@ package drivers
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -69,6 +76,29 @@ func TestGCPDriverFactory_ValidateConfig_Federation(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("oauth_token_endpoint is a federation override", func(t *testing.T) {
+		federated := map[string]string{
+			"auth_method":                "oidc_federation",
+			"workload_identity_provider": testWIFProvider,
+			"oauth_token_endpoint":       "https://token.example.test/token",
+		}
+		require.NoError(t, f.ValidateConfig(credential.NewConfig(federated)))
+
+		log, _ := logger.NewGatedLogger(nil, logger.GatedWriterConfig{})
+		d, err := f.Create(credential.NewConfig(federated), log)
+		require.NoError(t, err)
+		assert.Equal(t, "https://token.example.test/token", d.(*GCPDriver).oauthTokenURL)
+
+		// Only domain-wide delegation trades there, and a static source cannot serve it.
+		err = f.ValidateConfig(credential.NewConfig(map[string]string{
+			"auth_method":          "static",
+			"service_account_key":  `{"type":"service_account","project_id":"p","private_key_id":"kid","client_email":"x@y.iam.gserviceaccount.com","private_key":"k"}`,
+			"oauth_token_endpoint": "https://token.example.test/token",
+		}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "oauth_token_endpoint is only valid for auth_method=oidc_federation")
+	})
+
 	t.Run("static still requires key", func(t *testing.T) {
 		err := f.ValidateConfig(credential.NewConfig(map[string]string{"auth_method": "static"}))
 		require.Error(t, err)
@@ -95,11 +125,17 @@ func TestGCPDriverFactory_InferCredentialType_Federation(t *testing.T) {
 		assert.Equal(t, credential.TypeGCPAccessToken, got, "mint_method=%q", mm)
 	}
 
+	// A token acting as a Workspace user is a type of its own, which the gcp and
+	// mcp providers do not accept.
+	got, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "delegated_access_token"}))
+	require.NoError(t, err)
+	assert.Equal(t, credential.TypeGCPDelegatedToken, got)
+
 	// cloud_sql_iam_token infers a type but has no mint path, so a spec naming it
 	// used to write cleanly and fail on every request. Refused here instead — the
 	// db_auth_token validator refuses it too, for the operator who states `type`
 	// rather than leaving it inferred.
-	_, err := f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "cloud_sql_iam_token"}))
+	_, err = f.InferCredentialType(credential.NewConfig(map[string]string{"mint_method": "cloud_sql_iam_token"}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not implemented")
 
@@ -425,6 +461,17 @@ func TestGCPAssertionResource(t *testing.T) {
 		assert.Equal(t, "gcp-wif:"+testWIFProvider, res)
 	})
 
+	// The pool binds the right to sign as the delegating account to this value, so
+	// it names the account under the prefix no spec may write.
+	t.Run("delegation names the account under the reserved prefix", func(t *testing.T) {
+		res, ok := gcpAssertionResource(
+			credential.NewConfig(federatedSource),
+			credential.NewConfig(map[string]string{"mint_method": "delegated_access_token", "target_service_account": "dwd@proj.iam.gserviceaccount.com"}),
+		)
+		assert.True(t, ok)
+		assert.Equal(t, credential.GCPDelegationResourcePrefix+"dwd@proj.iam.gserviceaccount.com", res)
+	})
+
 	t.Run("routed via DeriveAssertionResource", func(t *testing.T) {
 		res, ok := DeriveAssertionResource(credential.SourceTypeGCP,
 			credential.NewConfig(federatedSource),
@@ -487,4 +534,389 @@ func TestGCPAssertionAudience(t *testing.T) {
 		_, ok := DeriveAssertionAudience(credential.SourceTypeAWS, credential.NewConfig(map[string]string{}), credential.NewConfig(map[string]string{}))
 		assert.False(t, ok)
 	})
+}
+
+// delegationFakes stands in for the three Google endpoints a domain-wide
+// delegation mint calls: STS, the IAM Credentials signJwt API, and the OAuth2
+// token endpoint, which answers with tokenStatus and tokenBody.
+type delegationFakes struct {
+	sts, iam, token *httptest.Server
+	hits            atomic.Int32 // calls to any of the three
+
+	mu           sync.Mutex
+	signAuth     string
+	signPath     string
+	signedClaims map[string]interface{}
+	tokenForm    url.Values
+}
+
+func newDelegationFakes(t *testing.T, signStatus, tokenStatus int, tokenBody string) *delegationFakes {
+	t.Helper()
+	f := &delegationFakes{}
+	f.sts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.hits.Add(1)
+		_, _ = w.Write([]byte(`{"access_token":"FED-TOKEN","expires_in":3600}`))
+	}))
+	f.iam = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.hits.Add(1)
+		var req struct {
+			Payload string `json:"payload"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		var claims map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(req.Payload), &claims))
+		f.mu.Lock()
+		f.signAuth, f.signPath, f.signedClaims = r.Header.Get("Authorization"), r.URL.Path, claims
+		f.mu.Unlock()
+		w.WriteHeader(signStatus)
+		if signStatus != http.StatusOK {
+			// Google's answer can quote the account, as this one does.
+			_, _ = w.Write([]byte(`{"error":{"code":403,"message":"Permission 'iam.serviceAccounts.signJwt' denied on resource 'projects/-/serviceAccounts/` + testDWDAccount + `' (or it may not exist).","status":"PERMISSION_DENIED"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"keyId":"k1","signedJwt":"SIGNED-JWT"}`))
+	}))
+	f.token = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.hits.Add(1)
+		require.NoError(t, r.ParseForm())
+		f.mu.Lock()
+		f.tokenForm = r.PostForm
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(tokenStatus)
+		_, _ = w.Write([]byte(tokenBody))
+	}))
+	t.Cleanup(func() {
+		f.sts.Close()
+		f.iam.Close()
+		f.token.Close()
+	})
+	return f
+}
+
+func (f *delegationFakes) driver() *GCPDriver {
+	d := newFederationDriver(testWIFProvider, f.sts.URL, f.iam.URL)
+	d.oauthTokenURL = f.token.URL
+	return d
+}
+
+const testDWDAccount = "dwd@proj.iam.gserviceaccount.com"
+
+func delegationSpec(maxTTL time.Duration) *credential.CredSpec {
+	return &credential.CredSpec{
+		Name:   "workspace-user",
+		Type:   credential.TypeGCPDelegatedToken,
+		MaxTTL: maxTTL,
+		Config: credential.NewConfig(map[string]string{
+			"mint_method":            "delegated_access_token",
+			"target_service_account": testDWDAccount,
+			"scopes":                 "https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/drive.file",
+			"delegated_user_claim":   "email",
+			"delegated_user_domains": "example.com",
+		}),
+	}
+}
+
+// delegationInputs is what core hands the driver for a delegation spec: Warden's
+// assertion naming the user (and the agent as actor), and the user's projected
+// claims.
+func delegationInputs(email string) *credential.ExchangeInputs {
+	return &credential.ExchangeInputs{
+		SubjectToken: makeUnsignedJWT(map[string]interface{}{
+			"sub": "user-42",
+			"act": map[string]interface{}{"sub": "wid:root:auth/jwt/:agent-1"},
+		}),
+		UserClaims: map[string]string{"sub": "user-42", "email": email},
+	}
+}
+
+func TestGCPDriver_DelegatedAccessToken_MintsAsTheUser(t *testing.T) {
+	f := newDelegationFakes(t, http.StatusOK, http.StatusOK, `{"access_token":"USER-TOKEN","expires_in":3600,"token_type":"Bearer"}`)
+	d := f.driver()
+
+	raw, meta, ttl, lease, err := d.MintCredentialWithExchange(context.Background(), delegationSpec(0), delegationInputs("Alice@Example.com"))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]interface{}{"access_token": "USER-TOKEN"}, raw)
+	assert.Empty(t, lease, "a delegated token cannot be revoked")
+	assert.Equal(t, 59*time.Minute, ttl, "the hour Google gives, less the refresh buffer")
+
+	assert.Equal(t, "alice@example.com", meta["delegated_user"])
+	assert.Equal(t, testDWDAccount, meta["service_account"])
+	assert.Equal(t, "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.file", meta["scopes"])
+	assert.Equal(t, "user-42", meta["subject"], "the assertion's subject, as Google saw it")
+	assert.Equal(t, "wid:root:auth/jwt/:agent-1", meta["actor"])
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Google signs as the account, authorized by the token federated for the caller.
+	assert.Equal(t, "Bearer FED-TOKEN", f.signAuth)
+	assert.True(t, strings.HasSuffix(f.signPath, "/v1/projects/-/serviceAccounts/"+testDWDAccount+":signJwt"), "path was %q", f.signPath)
+	assert.Equal(t, testDWDAccount, f.signedClaims["iss"])
+	assert.Equal(t, "alice@example.com", f.signedClaims["sub"])
+	assert.Equal(t, "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.file", f.signedClaims["scope"],
+		"Google wants the scopes space-separated")
+	assert.Equal(t, "https://oauth2.googleapis.com/token", f.signedClaims["aud"],
+		"the audience is Google's endpoint wherever the trade is sent")
+	assert.Equal(t, float64(310), f.signedClaims["exp"].(float64)-f.signedClaims["iat"].(float64),
+		"a five-minute assertion, iat backdated ten seconds")
+
+	assert.Equal(t, "urn:ietf:params:oauth:grant-type:jwt-bearer", f.tokenForm.Get("grant_type"))
+	assert.Equal(t, "SIGNED-JWT", f.tokenForm.Get("assertion"))
+
+	d.tokenCache.mu.Lock()
+	defer d.tokenCache.mu.Unlock()
+	assert.Empty(t, d.tokenCache.cache, "a user's token is never kept on the driver, where only scopes key it")
+}
+
+func TestGCPDriver_DelegatedAccessToken_MaxTTLCapsTheLease(t *testing.T) {
+	f := newDelegationFakes(t, http.StatusOK, http.StatusOK, `{"access_token":"USER-TOKEN","expires_in":3600}`)
+
+	_, _, ttl, _, err := f.driver().MintCredentialWithExchange(context.Background(), delegationSpec(10*time.Minute), delegationInputs("alice@example.com"))
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Minute, ttl)
+}
+
+func TestResolveDelegatedSubject(t *testing.T) {
+	// kexample.com is listed so the Kelvin-sign row proves the raw match: folded
+	// first, alice@Kexample.com would land on it.
+	domains := []string{"example.com", "eng.example.org", "kexample.com"}
+	tests := []struct {
+		name    string
+		claims  map[string]string
+		want    string
+		refused bool // ErrUserNotAllowed
+		wantErr string
+	}{
+		{name: "listed domain", claims: map[string]string{"email": "alice@example.com"}, want: "alice@example.com"},
+		{name: "folded to lowercase", claims: map[string]string{"email": "Alice.Smith@EXAMPLE.com"}, want: "alice.smith@example.com"},
+		{name: "apostrophe and dash", claims: map[string]string{"email": "o'neil-jr@example.com"}, want: "o'neil-jr@example.com"},
+		{name: "listed subdomain", claims: map[string]string{"email": "bob@eng.example.org"}, want: "bob@eng.example.org"},
+		{name: "subdomain not implied", claims: map[string]string{"email": "bob@eng.example.com"}, refused: true},
+		{name: "parent not implied", claims: map[string]string{"email": "bob@example.org"}, refused: true},
+		{name: "unlisted domain", claims: map[string]string{"email": "eve@evil.com"}, refused: true},
+		{name: "suffix is not the domain", claims: map[string]string{"email": "eve@notexample.com"}, refused: true},
+		{name: "two @", claims: map[string]string{"email": "eve@evil.com@example.com"}, refused: true},
+		{name: "multi-valued fact", claims: map[string]string{"email": "alice@example.com,eve@example.com"}, refused: true},
+		{name: "trailing dot", claims: map[string]string{"email": "alice@example.com."}, refused: true},
+		{name: "plus addressing", claims: map[string]string{"email": "alice+x@example.com"}, refused: true},
+		// U+212A KELVIN SIGN lowercases to an ASCII k; matched raw, it never gets there.
+		{name: "kelvin sign", claims: map[string]string{"email": "alice@Kexample.com"}, refused: true},
+		{name: "empty", claims: map[string]string{"email": ""}, refused: true},
+		{name: "too long", claims: map[string]string{"email": strings.Repeat("a", 250) + "@example.com"}, refused: true},
+		{name: "claim not projected", claims: map[string]string{"sub": "user-42"}, wantErr: "not among the user's projected claims"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveDelegatedSubject(tt.claims, "email", domains)
+			switch {
+			case tt.refused:
+				require.ErrorIs(t, err, credential.ErrUserNotAllowed)
+				if v := tt.claims["email"]; v != "" {
+					assert.NotContains(t, err.Error(), v, "a refusal never repeats the address")
+				}
+			case tt.wantErr != "":
+				require.Error(t, err)
+				assert.NotErrorIs(t, err, credential.ErrUserNotAllowed, "a spec fault, not a user to refuse")
+				assert.Contains(t, err.Error(), tt.wantErr)
+			default:
+				require.NoError(t, err)
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+
+	// The user's principal id is projected as sub; named as the claim, it is not an
+	// address and is refused rather than sent to Google.
+	_, err := resolveDelegatedSubject(map[string]string{"sub": "user-42"}, "sub", domains)
+	require.ErrorIs(t, err, credential.ErrUserNotAllowed)
+}
+
+func TestGCPDelegatedAccess(t *testing.T) {
+	assert.True(t, GCPDelegatedAccess(credential.TypeGCPDelegatedToken, credential.NewConfig(nil)))
+	assert.True(t, GCPDelegatedAccess(credential.TypeGCPAccessToken,
+		credential.NewConfig(map[string]string{"mint_method": "delegated_access_token"})),
+		"a spec naming the method meets the delegation rules whatever its type")
+	assert.False(t, GCPDelegatedAccess(credential.TypeGCPAccessToken,
+		credential.NewConfig(map[string]string{"mint_method": "impersonated_access_token"})))
+}
+
+// A token acting as a user is issued only as the type the gcp and mcp providers
+// refuse.
+func TestGCPDriver_DelegatedAccessToken_RefusesAnotherType(t *testing.T) {
+	f := newDelegationFakes(t, http.StatusOK, http.StatusOK, `{"access_token":"USER-TOKEN"}`)
+	spec := delegationSpec(0)
+	spec.Type = credential.TypeGCPAccessToken
+
+	_, _, _, _, err := f.driver().MintCredentialWithExchange(context.Background(), spec, delegationInputs("alice@example.com"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "issues a gcp_delegated_token")
+	assert.Zero(t, f.hits.Load())
+}
+
+func TestGCPDriver_DelegatedAccessToken_Answers(t *testing.T) {
+	t.Run("no expires_in takes the short fallback", func(t *testing.T) {
+		f := newDelegationFakes(t, http.StatusOK, http.StatusOK, `{"access_token":"USER-TOKEN"}`)
+		_, _, ttl, _, err := f.driver().MintCredentialWithExchange(context.Background(), delegationSpec(0), delegationInputs("alice@example.com"))
+		require.NoError(t, err)
+		assert.Equal(t, 4*time.Minute, ttl, "five minutes less the refresh buffer")
+	})
+
+	t.Run("an answer without a token", func(t *testing.T) {
+		f := newDelegationFakes(t, http.StatusOK, http.StatusOK, `{"token_type":"Bearer","expires_in":3600}`)
+		_, _, _, _, err := f.driver().MintCredentialWithExchange(context.Background(), delegationSpec(0), delegationInputs("alice@example.com"))
+		require.ErrorIs(t, err, errNoAccessToken)
+		assert.Contains(t, err.Error(), "no usable answer")
+	})
+
+	t.Run("an outage is not a refusal", func(t *testing.T) {
+		f := newDelegationFakes(t, http.StatusOK, http.StatusServiceUnavailable, `<html>unavailable</html>`)
+		_, _, _, _, err := f.driver().MintCredentialWithExchange(context.Background(), delegationSpec(0), delegationInputs("alice@example.com"))
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "refused")
+		assert.NotErrorIs(t, err, credential.ErrUserNotAllowed)
+		status, ok := credential.UpstreamStatus(err)
+		require.True(t, ok)
+		assert.Equal(t, http.StatusServiceUnavailable, status, "answered as an outage, which clients retry")
+	})
+}
+
+// A user the spec may not act for is refused before Google is asked anything.
+func TestGCPDriver_DelegatedAccessToken_RefusedUserCostsNoCall(t *testing.T) {
+	f := newDelegationFakes(t, http.StatusOK, http.StatusOK, `{"access_token":"USER-TOKEN"}`)
+
+	_, _, _, _, err := f.driver().MintCredentialWithExchange(context.Background(), delegationSpec(0), delegationInputs("eve@evil.com"))
+	require.ErrorIs(t, err, credential.ErrUserNotAllowed)
+	assert.Zero(t, f.hits.Load())
+}
+
+func TestGCPDriver_DelegatedAccessToken_Refusals(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		body      string
+		userFault bool
+	}{
+		{name: "delegation not authorized", status: http.StatusUnauthorized, body: `{"error":"unauthorized_client","error_description":"Client is unauthorized to retrieve access tokens using this method, or client not authorized for any of the scopes requested."}`},
+		{name: "scope not authorized, on a 403", status: http.StatusForbidden, body: `{"error":"access_denied","error_description":"Requested client not authorized."}`},
+		{name: "unknown scope", status: http.StatusBadRequest, body: `{"error":"invalid_scope","error_description":"Invalid OAuth scope or ID token audience provided."}`},
+		{name: "clock skew", status: http.StatusBadRequest, body: `{"error":"invalid_grant","error_description":"Invalid JWT: Token must be a short-lived token (60 minutes) and in a reasonable timeframe."}`},
+		{name: "no such user", status: http.StatusBadRequest, body: `{"error":"invalid_grant","error_description":"Invalid email or User ID"}`, userFault: true},
+		{name: "not an email", status: http.StatusBadRequest, body: `{"error":"invalid_grant","error_description":"Not a valid email."}`, userFault: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newDelegationFakes(t, http.StatusOK, tt.status, tt.body)
+
+			_, _, _, _, err := f.driver().MintCredentialWithExchange(context.Background(), delegationSpec(0), delegationInputs("alice@example.com"))
+			require.Error(t, err)
+			assert.Equal(t, tt.userFault, errors.Is(err, credential.ErrUserNotAllowed))
+			var tee *tokenEndpointError
+			require.ErrorAs(t, err, &tee, "the token endpoint's answer stays in the chain")
+			assert.NotEmpty(t, tee.code, "the code is parsed whatever the status")
+
+			// Answered as a refusal, never a server error.
+			status, ok := credential.UpstreamStatus(err)
+			require.True(t, ok)
+			assert.Equal(t, tt.status, status)
+			assert.NotContains(t, err.Error(), testDWDAccount, "what to fix goes to the log, not to the caller")
+		})
+	}
+}
+
+func TestGCPDriver_DelegatedAccessToken_SigningRefused(t *testing.T) {
+	t.Run("refused", func(t *testing.T) {
+		f := newDelegationFakes(t, http.StatusForbidden, http.StatusOK, `{"access_token":"USER-TOKEN"}`)
+
+		_, _, _, _, err := f.driver().MintCredentialWithExchange(context.Background(), delegationSpec(0), delegationInputs("alice@example.com"))
+		require.Error(t, err)
+		assert.Equal(t, "gcp: Google would not sign the domain-wide delegation assertion", err.Error(),
+			"Google's answer quotes the account; the caller is told only that it refused")
+		assert.NotErrorIs(t, err, credential.ErrUserNotAllowed)
+		status, ok := credential.UpstreamStatus(err)
+		require.True(t, ok)
+		assert.Equal(t, http.StatusForbidden, status, "the refusal's status survives the fixed message")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		assert.Nil(t, f.tokenForm, "nothing is traded without a signature")
+	})
+
+	t.Run("unreachable", func(t *testing.T) {
+		f := newDelegationFakes(t, http.StatusOK, http.StatusOK, `{"access_token":"USER-TOKEN"}`)
+		d := f.driver()
+		f.iam.Close() // the dial error quotes the signJwt URL, account and all
+
+		_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), delegationSpec(0), delegationInputs("alice@example.com"))
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), testDWDAccount)
+		var netErr net.Error
+		assert.True(t, errors.As(err, &netErr), "still a network failure underneath, answered as an outage")
+	})
+}
+
+// A static source holds the key Google's guidance says not to have, and cannot
+// receive the user's claims.
+func TestGCPDriver_DelegatedAccessToken_RefusedOnStaticSource(t *testing.T) {
+	d := &GCPDriver{credSource: &credential.CredSource{
+		Type:   credential.SourceTypeGCP,
+		Config: credential.NewConfig(map[string]string{"auth_method": "static"}),
+	}}
+	_, _, _, _, err := d.MintCredential(context.Background(), delegationSpec(0))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auth_method=oidc_federation")
+}
+
+func TestGCPDelegatedAccessSpecError(t *testing.T) {
+	federated := credential.NewConfig(map[string]string{
+		"auth_method":                gcpAuthMethodOIDCFederation,
+		"workload_identity_provider": testWIFProvider,
+	})
+	base := map[string]string{
+		"mint_method":            "delegated_access_token",
+		"target_service_account": testDWDAccount,
+		"scopes":                 "https://www.googleapis.com/auth/gmail.readonly",
+		"delegated_user_claim":   "email",
+		"delegated_user_domains": "example.com",
+		"subject_token_source":   "warden_identity",
+		"assertion_user_claims":  "email",
+	}
+	with := func(changes map[string]string) credential.Config {
+		cfg := map[string]string{}
+		for k, v := range base {
+			cfg[k] = v
+		}
+		for k, v := range changes {
+			if v == "" {
+				delete(cfg, k)
+			} else {
+				cfg[k] = v
+			}
+		}
+		return credential.NewConfig(cfg)
+	}
+
+	require.NoError(t, GCPDelegatedAccessSpecError(with(nil), federated))
+	require.NoError(t, GCPDelegatedAccessSpecError(with(map[string]string{"assertion_profile": "default"}), federated))
+
+	tests := []struct {
+		name    string
+		spec    credential.Config
+		source  credential.Config
+		wantErr string
+	}{
+		{"static source", with(nil), credential.NewConfig(map[string]string{"auth_method": "static"}), "auth_method=oidc_federation"},
+		{"user's raw token as subject", with(map[string]string{"subject_token_source": "user_identity"}), federated, "subject_token_source=warden_identity"},
+		{"no subject", with(map[string]string{"subject_token_source": ""}), federated, "subject_token_source=warden_identity"},
+		{"actor", with(map[string]string{"actor_token_source": "warden_identity"}), federated, "actor_token_source"},
+		{"claim not projected", with(map[string]string{"assertion_user_claims": "sub"}), federated, "must also be listed in assertion_user_claims"},
+		{"own resource", with(map[string]string{"assertion_resource": "anything"}), federated, "the resource is derived"},
+		{"resource suppressed", with(map[string]string{"assertion_resource": "none"}), federated, "the resource is derived"},
+		{"profile without the resource", with(map[string]string{"assertion_profile": "minimal"}), federated, "must be \"default\""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := GCPDelegatedAccessSpecError(tt.spec, tt.source)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }

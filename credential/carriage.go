@@ -138,6 +138,10 @@ var reservedSpecConfigKeys = map[string]struct{}{
 	"secret_version":  {},
 	"credential_type": {},
 	"json_key_map":    {},
+
+	// Domain-wide delegation: which verified user the token acts as.
+	"delegated_user_claim":   {},
+	"delegated_user_domains": {},
 }
 
 // Deliberately absent: `project` and `target_service_account`, the other two keys a

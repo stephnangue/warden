@@ -64,6 +64,7 @@ var specStoredSecretsCases = map[string][]specStoredSecretsCase{
 	credential.TypeKeyValue:          {{name: "locator", config: map[string]string{"secret_id": "prod/key", "secret_path": "p"}, want: nil}},
 	credential.TypeOVHKeys:           {{name: "chained", config: map[string]string{"mint_method": "access_keys", "secret_spec": "ref"}, want: nil}},
 	credential.TypeGCPAccessToken:    {{name: "scopes", config: map[string]string{"scopes": "cloud-platform"}, want: nil}},
+	credential.TypeGCPDelegatedToken: {{name: "account and domains", config: map[string]string{"target_service_account": "dwd@p.iam.gserviceaccount.com", "delegated_user_domains": "example.com"}, want: nil}},
 	credential.TypeGitLabAccessToken: {{name: "scopes", config: map[string]string{"scopes": "api"}, want: nil}},
 	credential.TypeKubernetesToken:   {{name: "service account", config: map[string]string{"service_account": "sa"}, want: nil}},
 	credential.TypeDBAuthToken:       {{name: "role", config: map[string]string{"db_user": "u"}, want: nil}},

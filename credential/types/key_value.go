@@ -290,6 +290,9 @@ func (t *KeyValueCredType) validateGCPConfig(config credential.Config) error {
 	if err := rejectForeignLocators(config, gcpTokenMintFields, "secret_read"); err != nil {
 		return err
 	}
+	if err := rejectForeignLocators(config, gcpDelegatedUserFields, "secret_read"); err != nil {
+		return err
+	}
 	if err := rejectForeignLocators(config, azureKeyValueLocators, "secret_read"); err != nil {
 		return err
 	}
@@ -323,6 +326,9 @@ func (t *KeyValueCredType) validateAzureConfig(config credential.Config) error {
 		return err
 	}
 	if err := rejectForeignLocators(config, gcpTokenMintFields, "secret_read"); err != nil {
+		return err
+	}
+	if err := rejectForeignLocators(config, gcpDelegatedUserFields, "secret_read"); err != nil {
 		return err
 	}
 	if err := rejectForeignLocators(config, azureTokenMintFields, "secret_read"); err != nil {

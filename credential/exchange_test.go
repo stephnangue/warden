@@ -441,6 +441,17 @@ func TestValidateExchangeSpecConfig(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// A workload identity pool lets only this prefix sign as a delegating
+			// account; a spec writing it would sign assertions naming any user.
+			name: "assertion_resource claiming the domain-wide delegation prefix",
+			config: NewConfig(map[string]string{
+				ConfigSubjectTokenSource: SourceWardenIdentity,
+				ConfigAssertionAudience:  "https://sts.example/aud",
+				ConfigAssertionResource:  GCPDelegationResourcePrefix + "dwd@proj.iam.gserviceaccount.com",
+			}),
+			wantErr: true,
+		},
+		{
 			// The valid delegation shape with a Warden-minted actor assertion.
 			name: "actor warden_identity with user_identity subject",
 			config: NewConfig(map[string]string{

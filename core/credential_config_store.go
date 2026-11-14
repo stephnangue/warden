@@ -1731,6 +1731,14 @@ func (s *CredentialConfigStore) validateSpecWithSource(ctx context.Context, spec
 		}
 	}
 
+	// A gcp domain-wide delegation spec acts as the verified user and signs
+	// keylessly, so what it may name depends on the source's auth_method.
+	if source.Type == credential.SourceTypeGCP && drivers.GCPDelegatedAccess(spec.Type, spec.Config) {
+		if err := drivers.GCPDelegatedAccessSpecError(spec.Config, source.Config); err != nil {
+			return logical.ErrBadRequestf("%s", err.Error())
+		}
+	}
+
 	// Any actor token source (agent_identity, warden_identity) is consumed only by
 	// the token_exchange driver, which forwards the actor to an RFC 8693 STS, and by
 	// an azure on_behalf_of spec, which presents it as the app's client assertion;
@@ -2323,6 +2331,13 @@ func (s *CredentialConfigStore) checkBoundSpecsStillCarriedLocked(source *creden
 		// spec (an actor the static source cannot use, or no credential at all).
 		if source.Type == credential.SourceTypeAzure && drivers.AzureOnBehalfOf(spec.Type, spec.Config) {
 			if err := drivers.AzureOnBehalfOfSpecError(spec.Config, source.Config); err != nil {
+				return logical.ErrBadRequestf("spec %q: %s; update the spec first", spec.Name, err.Error())
+			}
+		}
+		// A domain-wide delegation spec signs keylessly, so a source switched to
+		// static strands it.
+		if source.Type == credential.SourceTypeGCP && drivers.GCPDelegatedAccess(spec.Type, spec.Config) {
+			if err := drivers.GCPDelegatedAccessSpecError(spec.Config, source.Config); err != nil {
 				return logical.ErrBadRequestf("spec %q: %s; update the spec first", spec.Name, err.Error())
 			}
 		}

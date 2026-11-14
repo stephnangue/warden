@@ -2320,6 +2320,13 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// config (pure, network-free — no live driver is built here); "none" opts out;
 	// any other value is emitted verbatim. Best-effort: a spec with no single
 	// static resource simply carries no warden_resource claim.
+	//
+	// The gcp-dwd: prefix names the right to sign as a domain-wide delegating
+	// account: a workload identity pool grants it on this claim. Spec writes refuse
+	// the prefix, but a derivation for another source can still produce it (a vault
+	// jwt_role is emitted bare) and a spec stored before the rule existed can still
+	// name it, so it is refused here too, where every assertion's resource is
+	// decided.
 	var resource string
 	switch r := spec.Config.Get(credential.ConfigAssertionResource); r {
 	case credential.AssertionResourceNone:
@@ -2330,8 +2337,17 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 			return nil, err
 		}
 		resource, _ = drivers.DeriveAssertionResource(src.Type, src.Config, spec.Config)
+		if strings.HasPrefix(resource, credential.GCPDelegationResourcePrefix) &&
+			!(src.Type == credential.SourceTypeGCP && drivers.GCPDelegatedAccess(spec.Type, spec.Config)) {
+			return nil, fmt.Errorf("spec %q derives an assertion resource under the prefix %q, which only a gcp domain-wide delegation spec may carry",
+				specName, credential.GCPDelegationResourcePrefix)
+		}
 	default:
 		resource = r
+		if strings.HasPrefix(resource, credential.GCPDelegationResourcePrefix) {
+			return nil, fmt.Errorf("spec %q names an assertion resource under the prefix %q, which only a gcp domain-wide delegation spec may carry, as derived",
+				specName, credential.GCPDelegationResourcePrefix)
+		}
 	}
 
 	// Project only the operator-allowlisted metadata keys into the assertion.
