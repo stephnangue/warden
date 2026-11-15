@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -11,12 +12,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	josejwt "github.com/go-jose/go-jose/v3/jwt"
 	"github.com/stephnangue/warden/credential"
-	"github.com/stephnangue/warden/internal/remotesign"
+	"github.com/stephnangue/warden/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,11 +33,7 @@ func makeUnsignedJWT(claims map[string]interface{}) string {
 }
 
 func newExchangeDriver(config map[string]string, client *http.Client) *TokenExchangeDriver {
-	return &TokenExchangeDriver{
-		credSource: &credential.CredSource{Type: credential.SourceTypeTokenExchange, Config: credential.NewConfig(config)},
-		httpClient: client,
-		capSigners: remotesign.NewCapabilitySigners(nil, remotesign.CapabilityOptions{}),
-	}
+	return newTokenExchangeDriver(credential.NewConfig(config), client, nil)
 }
 
 // subjectInputs builds exchange inputs carrying only a subject token. Every
@@ -453,6 +451,33 @@ func TestTokenExchangeDriverFactory_ValidateConfig(t *testing.T) {
 		c := base()
 		c["grant"] = tokenExchangeGrantIDJAG
 		c["resource_token_url"] = "https://auth.resourceapp.example.com/token"
+		assert.NoError(t, f.ValidateConfig(credential.NewConfig(c)))
+	})
+	// The ID-JAG request's own fields are Warden's to set: the pinned ones say what is
+	// asked for and of whom, the first-class ones have keys of their own.
+	for _, key := range []string{"requested_token_type", "audience", "scope", "resource"} {
+		t.Run("id_jag refuses token_param."+key, func(t *testing.T) {
+			c := base()
+			c["grant"] = tokenExchangeGrantIDJAG
+			c["resource_token_url"] = "https://auth.resourceapp.example.com/token"
+			c["token_param."+key] = "x"
+			err := f.ValidateConfig(credential.NewConfig(c))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "token_param."+key)
+		})
+	}
+	t.Run("id_jag keeps other token_param extras", func(t *testing.T) {
+		c := base()
+		c["grant"] = tokenExchangeGrantIDJAG
+		c["resource_token_url"] = "https://auth.resourceapp.example.com/token"
+		c["token_param.tenant"] = "acme"
+		assert.NoError(t, f.ValidateConfig(credential.NewConfig(c)))
+	})
+	t.Run("jwt_bearer keeps token_param.audience", func(t *testing.T) {
+		// Its documented workaround for an IdP that wants an audience on jwt-bearer.
+		c := base()
+		c["grant"] = tokenExchangeGrantJWTBearer
+		c["token_param.audience"] = "https://api.example.com"
 		assert.NoError(t, f.ValidateConfig(credential.NewConfig(c)))
 	})
 	t.Run("non-https token_url", func(t *testing.T) {
@@ -1081,13 +1106,19 @@ func TestTokenExchangeDriver_ChainedInvalidClientSentinel(t *testing.T) {
 func TestTokenExchangeDriver_IDJAG(t *testing.T) {
 	subject := makeUnsignedJWT(map[string]interface{}{"sub": "user"})
 
-	// Leg 2: resource authorization server redeems the ID-JAG for an access token.
+	// Leg 2: resource authorization server redeems the ID-JAG for an access token. The
+	// request carries the grant, the assertion, the scope the IdP granted (here the one
+	// asked for, since the answer names none) and the client authentication; resources
+	// stay in the ID-JAG.
 	resSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, r.ParseForm())
-		assert.Equal(t, "urn:ietf:params:oauth:grant-type:jwt-bearer", r.Form.Get("grant_type"))
-		assert.Equal(t, "the-id-jag", r.Form.Get("assertion"))
-		assert.Equal(t, "files:read", r.Form.Get("scope"))
-		assertResources(t, r.Form, "https://api.example.com") // RFC 8707 on the final token (leg 2)
+		assert.Equal(t, url.Values{
+			"grant_type":    {"urn:ietf:params:oauth:grant-type:jwt-bearer"},
+			"assertion":     {"the-id-jag"},
+			"scope":         {"files:read"},
+			"client_id":     {"c"},
+			"client_secret": {"s"},
+		}, r.PostForm)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "final-access", "expires_in": 600})
 	}))
@@ -1100,7 +1131,12 @@ func TestTokenExchangeDriver_IDJAG(t *testing.T) {
 		assert.Equal(t, tokenTypeIDJAG, r.Form.Get("requested_token_type"))
 		assert.Equal(t, subject, r.Form.Get("subject_token"))
 		assert.Equal(t, "https://resource-as.example.com", r.Form.Get("audience"))
-		assert.Empty(t, r.Form["resource"], "resources belong on leg 2, not leg 1")
+		// The IdP decides on scope and resources and writes them into the ID-JAG
+		// (draft-ietf-oauth-identity-assertion-authz-grant §4.3). Resources go out
+		// verbatim, trailing slash included: a value from protected resource metadata
+		// must be sent unchanged.
+		assert.Equal(t, "files:read", r.Form.Get("scope"))
+		assertResources(t, r.Form, "https://api.example.com/", "https://files.example.com")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "the-id-jag", "issued_token_type": tokenTypeIDJAG, "expires_in": 300})
 	}))
@@ -1116,13 +1152,235 @@ func TestTokenExchangeDriver_IDJAG(t *testing.T) {
 	spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{
 		"audience":  "https://resource-as.example.com",
 		"scope":     "files:read",
-		"resources": "https://api.example.com",
+		"resources": "https://api.example.com/ https://files.example.com",
 	})}
 
 	rawData, _, ttl, _, err := d.MintCredentialWithExchange(context.Background(), spec, subjectInputs(subject))
 	require.NoError(t, err)
 	assert.Equal(t, "final-access", rawData["api_key"], "the final resource-AS access token is returned, not the ID-JAG")
 	assert.Equal(t, 600*time.Second-exchangedTokenBuffer, ttl)
+}
+
+// A source stored before token_param.* was checked for id_jag reaches the driver
+// without a write. Its extras still meet the rules at mint.
+func TestTokenExchangeDriver_IDJAG_StoredTokenParams(t *testing.T) {
+	ctx := context.Background()
+	subject := subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "user"}))
+
+	for _, key := range []string{"requested_token_type", "audience"} {
+		t.Run("pinned token_param."+key+" is refused before anything is sent or signed", func(t *testing.T) {
+			p := newIDJAGPair(t)
+			// A key that cannot be parsed: if anything tried to sign, the error would say so.
+			d := p.driver(map[string]string{
+				"token_param." + key: "x",
+				"client_auth":        clientAuthPrivateKeyJWT,
+				"client_secret":      "",
+				"private_key":        "not-a-key",
+			})
+			_, _, _, _, err := d.MintCredentialWithExchange(ctx, p.spec(nil), subject)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "token_param."+key)
+			assert.Zero(t, p.idpCalls)
+			assert.Zero(t, p.resCalls)
+		})
+	}
+
+	t.Run("with both pinned fields stored, the refusal always names the first", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		d := p.driver(map[string]string{"token_param.audience": "x", "token_param.requested_token_type": "x"})
+		for range 5 {
+			_, _, _, _, err := d.MintCredentialWithExchange(ctx, p.spec(nil), subject)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "token_param.requested_token_type")
+		}
+	})
+
+	t.Run("token_param.scope stands in only for an empty scope", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		d := p.driver(map[string]string{"token_param.scope": "files:read files:write"})
+
+		_, _, _, _, err := d.MintCredentialWithExchange(ctx, p.spec(nil), subject)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"files:read files:write"}, p.leg1["scope"])
+
+		_, _, _, _, err = d.MintCredentialWithExchange(ctx, p.spec(map[string]string{"scope": "files:read"}), subject)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"files:read"}, p.leg1["scope"], "a spec's narrower scope is never replaced")
+
+		// The source's own scope also wins over the stored extra.
+		d = p.driver(map[string]string{"token_param.scope": "files:read files:write", "scope": "files:list"})
+		_, _, _, _, err = d.MintCredentialWithExchange(ctx, p.spec(nil), subject)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"files:list"}, p.leg1["scope"])
+	})
+
+	t.Run("token_param.resource never collapses repeated resources", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		d := p.driver(map[string]string{"token_param.resource": "https://other.example.com https://more.example.com"})
+
+		_, _, _, _, err := d.MintCredentialWithExchange(ctx,
+			p.spec(map[string]string{"resources": "https://api.example.com https://files.example.com"}), subject)
+		require.NoError(t, err)
+		assertResources(t, p.leg1, "https://api.example.com", "https://files.example.com")
+
+		// As a fallback it is split like resources: one indicator per value.
+		_, _, _, _, err = d.MintCredentialWithExchange(ctx, p.spec(nil), subject)
+		require.NoError(t, err)
+		assertResources(t, p.leg1, "https://other.example.com", "https://more.example.com")
+	})
+
+	t.Run("other extras reach leg 1 only, and leg 2 carries only the granted scope", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		d := p.driver(map[string]string{"token_param.tenant": "acme", "token_param.scope": "files:read"})
+
+		_, _, _, _, err := d.MintCredentialWithExchange(ctx, p.spec(map[string]string{"resources": "https://api.example.com"}), subject)
+		require.NoError(t, err)
+		assert.Equal(t, "acme", p.leg1.Get("tenant"))
+		assert.Equal(t, url.Values{
+			"grant_type":    {"urn:ietf:params:oauth:grant-type:jwt-bearer"},
+			"assertion":     {"the-id-jag"},
+			"scope":         {"files:read"},
+			"client_id":     {"c"},
+			"client_secret": {"s"},
+		}, p.leg2)
+	})
+}
+
+// The redemption asks for the scope the IdP granted: what its answer names, which may
+// be less than was asked for, or nothing when the request named no scope.
+func TestTokenExchangeDriver_IDJAG_RedeemsTheGrantedScope(t *testing.T) {
+	subject := subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "user"}))
+	run := func(t *testing.T, requested, granted string) url.Values {
+		var leg2 url.Values
+		res := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, r.ParseForm())
+			leg2 = r.PostForm
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "final-access", "expires_in": 600})
+		}))
+		t.Cleanup(res.Close)
+		idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			answer := map[string]interface{}{"access_token": "the-id-jag", "issued_token_type": tokenTypeIDJAG, "expires_in": 300}
+			if granted != "" {
+				answer["scope"] = granted
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(answer)
+		}))
+		t.Cleanup(idp.Close)
+		d := newExchangeDriver(map[string]string{
+			"token_url": idp.URL, "resource_token_url": res.URL, "grant": tokenExchangeGrantIDJAG,
+			"client_id": "c", "client_secret": "s",
+		}, &http.Client{})
+		cfg := map[string]string{"audience": "https://resource-as.example.com"}
+		if requested != "" {
+			cfg["scope"] = requested
+		}
+		_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{Config: credential.NewConfig(cfg)}, subject)
+		require.NoError(t, err)
+		return leg2
+	}
+
+	t.Run("less than was asked for", func(t *testing.T) {
+		assert.Equal(t, []string{"files:read"}, run(t, "files:read files:write", "files:read")["scope"])
+	})
+	t.Run("what was asked for, unnamed in the answer", func(t *testing.T) {
+		assert.Equal(t, []string{"files:read files:write"}, run(t, "files:read files:write", "")["scope"])
+	})
+	t.Run("none asked for, none granted", func(t *testing.T) {
+		assert.NotContains(t, run(t, "", ""), "scope")
+	})
+}
+
+// A stored id_jag source that carries a field a write would now refuse is logged each
+// time its driver is built, with the endpoints that identify it.
+func TestTokenExchangeDriver_IDJAG_StoredTokenParamsWarn(t *testing.T) {
+	build := func(cfg map[string]string) string {
+		var buf bytes.Buffer
+		config := logger.DefaultConfig()
+		config.Format = logger.JSONFormat
+		config.Environment = "production"
+		log, _ := logger.NewGatedLogger(config, logger.GatedWriterConfig{Underlying: &buf, InitialState: logger.GateOpen})
+		newTokenExchangeDriver(credential.NewConfig(cfg), &http.Client{}, log)
+		return buf.String()
+	}
+
+	out := build(map[string]string{
+		"grant":                tokenExchangeGrantIDJAG,
+		"token_url":            "https://idp.example.com/token",
+		"resource_token_url":   "https://as.example.com/token",
+		"token_param.audience": "x",
+		"token_param.scope":    "files:read",
+		"token_param.tenant":   "acme",
+	})
+	assert.Equal(t, 2, strings.Count(out, `"level":"warn"`), out)
+	assert.Contains(t, out, "cannot mint")
+	assert.Contains(t, out, `"config_key":"scope"`)
+	assert.Contains(t, out, "https://idp.example.com/token")
+	assert.Contains(t, out, "https://as.example.com/token")
+	assert.NotContains(t, out, `"token_param":"tenant"`, "an ordinary extra is not warned about")
+
+	assert.Empty(t, build(map[string]string{
+		"grant":                tokenExchangeGrantJWTBearer,
+		"token_url":            "https://idp.example.com/token",
+		"token_param.audience": "x",
+	}), "jwt_bearer keeps token_param.audience")
+}
+
+// idJAGPair is an IdP and a resource authorization server for one id_jag test. It
+// records the last form each leg received and how often each was called.
+type idJAGPair struct {
+	idp, res           *httptest.Server
+	leg1, leg2         url.Values
+	idpCalls, resCalls int
+}
+
+func newIDJAGPair(t *testing.T) *idJAGPair {
+	p := &idJAGPair{}
+	p.res = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		p.resCalls++
+		p.leg2 = r.PostForm
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "final-access", "expires_in": 600})
+	}))
+	p.idp = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		p.idpCalls++
+		p.leg1 = r.PostForm
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "the-id-jag", "issued_token_type": tokenTypeIDJAG, "expires_in": 300})
+	}))
+	t.Cleanup(func() { p.idp.Close(); p.res.Close() })
+	return p
+}
+
+// driver builds an id_jag driver for the pair, as a stored source: no write check runs.
+// An empty value in extra removes the key.
+func (p *idJAGPair) driver(extra map[string]string) *TokenExchangeDriver {
+	cfg := map[string]string{
+		"token_url":          p.idp.URL,
+		"resource_token_url": p.res.URL,
+		"grant":              tokenExchangeGrantIDJAG,
+		"client_id":          "c",
+		"client_secret":      "s",
+	}
+	for k, v := range extra {
+		if v == "" {
+			delete(cfg, k)
+			continue
+		}
+		cfg[k] = v
+	}
+	return newExchangeDriver(cfg, &http.Client{})
+}
+
+func (p *idJAGPair) spec(kv map[string]string) *credential.CredSpec {
+	cfg := map[string]string{"audience": "https://resource-as.example.com"}
+	for k, v := range kv {
+		cfg[k] = v
+	}
+	return &credential.CredSpec{Config: credential.NewConfig(cfg)}
 }
 
 func TestTokenExchangeDriverFactory_Basics(t *testing.T) {
