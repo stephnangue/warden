@@ -19,6 +19,7 @@ import (
 	"golang.org/x/oauth2/google"
 
 	"github.com/stephnangue/warden/credential"
+	"github.com/stephnangue/warden/credential/types"
 	"github.com/stephnangue/warden/helper/httputil"
 	"github.com/stephnangue/warden/logger"
 )
@@ -157,6 +158,11 @@ type GCPDriver struct {
 	iamCredentialsHost string
 	iamHost            string
 	secretManagerHost  string
+
+	// oauthTokenURL is where a domain-wide delegation assertion is traded. It is
+	// settable from a federation source's config for tests; the assertion's aud
+	// names Google's endpoint whatever this is.
+	oauthTokenURL string
 }
 
 // Config accessors — single source of truth is credSource.Config. Each takes authMu,
@@ -273,6 +279,11 @@ func (f *GCPDriverFactory) ValidateConfig(config credential.Config) error {
 			Describe("Override where Secret Manager reads are sent (default: the public GCP endpoint)").
 			Example("https://secretmanager.googleapis.com"),
 
+		credential.StringField("oauth_token_endpoint").
+			Custom(validateEndpointURL).
+			Describe("Override where domain-wide delegation assertions are traded for tokens (default: Google's OAuth2 token endpoint). Only applies to auth_method=oidc_federation").
+			Example("https://oauth2.googleapis.com/token"),
+
 		credential.DurationField("activation_delay").
 			Describe("How long to wait after creating a rotated service-account key before activating it, covering IAM propagation").
 			Example("2m"),
@@ -306,6 +317,10 @@ func (f *GCPDriverFactory) ValidateConfig(config credential.Config) error {
 		// read, leaving a source that looks redirected while talking to Google.
 		if credential.GetString(config, "sts_endpoint", "") != "" {
 			return fmt.Errorf("sts_endpoint is only valid for auth_method=oidc_federation: static auth exchanges the service account key's own token_uri and never calls STS")
+		}
+		// Only domain-wide delegation trades there, and it is keyless only.
+		if credential.GetString(config, "oauth_token_endpoint", "") != "" {
+			return fmt.Errorf("oauth_token_endpoint is only valid for auth_method=oidc_federation: only domain-wide delegation, which a static source cannot serve, is traded there")
 		}
 	case gcpAuthMethodOIDCFederation:
 		// A federation source holds no static key. Reject leftover static config so a
@@ -369,6 +384,10 @@ func (f *GCPDriverFactory) InferCredentialType(specConfig credential.Config) (st
 		return credential.TypeKeyValue, nil
 	case "", "access_token", "impersonated_access_token":
 		return credential.TypeGCPAccessToken, nil
+	case types.GCPMintMethodDelegated:
+		// A token acting as a Workspace user: a type of its own, so only a provider
+		// built to carry a user's authority accepts it.
+		return credential.TypeGCPDelegatedToken, nil
 	default:
 		return "", fmt.Errorf("cannot infer credential type for mint_method %q", mintMethod)
 	}
@@ -390,6 +409,7 @@ func (f *GCPDriverFactory) Create(config credential.Config, log *logger.GatedLog
 		iamHost: defaultGCPIAMHost,
 		secretManagerHost: strings.TrimRight(
 			credential.GetString(config, "secretmanager_endpoint", defaultGCPSecretManagerHost), "/"),
+		oauthTokenURL: credential.GetString(config, "oauth_token_endpoint", defaultGCPOAuthTokenURL),
 	}
 
 	httpClient, err := BuildHTTPClient(config, 30*time.Second)
@@ -435,8 +455,13 @@ func (d *GCPDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 		return d.mintImpersonatedAccessToken(ctx, spec)
 	case "secret_read":
 		return d.mintViaSecretRead(ctx, spec)
+	case types.GCPMintMethodDelegated:
+		// Refused at spec write too; a source switched to static after the spec was
+		// stored lands here.
+		return nil, nil, 0, "", fmt.Errorf("gcp: mint_method=%s needs a source with auth_method=%s: Google signs with the delegating account's own key, which a static source would hold",
+			types.GCPMintMethodDelegated, gcpAuthMethodOIDCFederation)
 	default:
-		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for GCP driver; use 'access_token', 'impersonated_access_token' or 'secret_read'", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("unsupported mint_method '%s' for GCP driver; use 'access_token', 'impersonated_access_token', 'secret_read' or '%s'", mintMethod, types.GCPMintMethodDelegated)
 	}
 }
 
@@ -961,8 +986,11 @@ func (d *GCPDriver) MintCredentialWithExchange(ctx context.Context, spec *creden
 
 		return d.fetchSecret(ctx, readToken, spec, inputs.UserClaims, inputs.AgentClaims)
 
+	case types.GCPMintMethodDelegated:
+		return d.mintDelegatedAccessToken(ctx, spec, inputs)
+
 	default:
-		return nil, nil, 0, "", fmt.Errorf("gcp: mint_method %q is not supported over auth_method=oidc_federation (supported: impersonated_access_token, access_token, secret_read)", mintMethod)
+		return nil, nil, 0, "", fmt.Errorf("gcp: mint_method %q is not supported over auth_method=oidc_federation (supported: impersonated_access_token, access_token, secret_read, %s)", mintMethod, types.GCPMintMethodDelegated)
 	}
 }
 
@@ -1090,6 +1118,12 @@ func gcpAssertionResource(sourceCfg, specCfg credential.Config) (string, bool) {
 		// resolved read happens, by the permissions on the identity doing it.
 		if n := credential.GetString(specCfg, "secret_name", ""); n != "" {
 			return "gcp-secretmanager:" + n, true
+		}
+	case types.GCPMintMethodDelegated:
+		// The pool binds the right to sign as the delegating account to this value,
+		// so it is derived only, never written by a spec (ValidateExchangeSpecConfig).
+		if sa := credential.GetString(specCfg, "target_service_account", ""); sa != "" {
+			return credential.GCPDelegationResourcePrefix + sa, true
 		}
 	}
 	return "", false

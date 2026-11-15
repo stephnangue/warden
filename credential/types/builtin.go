@@ -19,6 +19,11 @@ func RegisterBuiltinTypes(registry *credential.TypeRegistry) error {
 		return err
 	}
 
+	// Register GCP domain-wide delegation token type
+	if err := registry.Register(NewGCPDelegatedTokenCredType()); err != nil {
+		return err
+	}
+
 	// Register GCP access token type
 	if err := registry.Register(NewGCPAccessTokenCredType()); err != nil {
 		return err

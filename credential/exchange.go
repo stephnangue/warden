@@ -237,6 +237,13 @@ func RequestedAssertionTTL(config Config) time.Duration {
 // resource name disclosed into the cross-boundary assertion.
 const AssertionResourceNone = "none"
 
+// GCPDelegationResourcePrefix opens the warden_resource Warden derives for a gcp
+// domain-wide delegation spec: "gcp-dwd:<service account>". A workload identity
+// pool lets only assertions carrying it sign as the delegating account, since a
+// token federated for any other spec could otherwise sign assertions naming any
+// user. So no spec may write it: only the derivation produces it.
+const GCPDelegationResourcePrefix = "gcp-dwd:"
+
 // maxExchangeTokenBytes bounds a single subject or actor token. Real JWTs and
 // access tokens are far smaller; the cap guards against a caller pushing an
 // oversized blob through the exchange plumbing.
@@ -503,6 +510,10 @@ func ValidateExchangeSpecConfig(config Config) error {
 	if config.Get(ConfigAssertionResource) != "" && !mintsAssertion {
 		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
 			ConfigAssertionResource, SourceWardenIdentity)
+	}
+	if strings.HasPrefix(config.Get(ConfigAssertionResource), GCPDelegationResourcePrefix) {
+		return fmt.Errorf("field '%s': the prefix %q is reserved for the resource Warden derives for a domain-wide delegation spec",
+			ConfigAssertionResource, GCPDelegationResourcePrefix)
 	}
 	// Selecting the assertion's claim shape only makes sense when Warden mints it.
 	// That the NAMED profile exists, and that a source-pinned profile matches the

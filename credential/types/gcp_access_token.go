@@ -112,6 +112,13 @@ func (t *GCPAccessTokenCredType) ValidateConfig(config credential.Config, source
 	if err := credential.ValidateSchema(config, schema...); err != nil {
 		return err
 	}
+	// A token acting as a Workspace user is a gcp_delegated_token. These keys name
+	// that user, and on this type they would be stored and never read.
+	for _, key := range gcpDelegatedUserFields {
+		if config.Get(key) != "" {
+			return fmt.Errorf("'%s' applies only to mint_method=%s", key, GCPMintMethodDelegated)
+		}
+	}
 
 	// Step 3: Conditional validation based on source type and mint_method
 	switch sourceType {
