@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/middleware"
 	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/stephnangue/warden/core"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/helper/copybuf"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
@@ -518,17 +519,8 @@ func isForwardedGatewayRequest(r *http.Request) bool {
 	if r.Header.Get("X-Warden-Provider") != "" {
 		return true
 	}
-	for rest := r.URL.Path; rest != ""; {
-		i := strings.Index(rest, "/gateway")
-		if i < 0 {
-			return false
-		}
-		rest = rest[i+len("/gateway"):]
-		if rest == "" || rest[0] == '/' {
-			return true
-		}
-	}
-	return false
+	_, ok := framework.AfterGatewaySegment(r.URL.Path)
+	return ok
 }
 
 // restoreClientPath puts back the path req's request line carried, which this

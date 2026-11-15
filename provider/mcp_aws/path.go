@@ -1,6 +1,6 @@
 package mcp_aws
 
-import "strings"
+import "github.com/stephnangue/warden/framework"
 
 // pathAfterGateway returns the substring of reqPath that follows the first
 // "gateway" segment, with that segment dropped. Trailing slashes are
@@ -18,11 +18,6 @@ import "strings"
 // as a programmer error — the path patterns registered with the framework
 // guarantee a gateway segment is present).
 func pathAfterGateway(reqPath string) string {
-	if i := strings.Index(reqPath, "/gateway"); i >= 0 {
-		return reqPath[i+len("/gateway"):]
-	}
-	if strings.HasPrefix(reqPath, "gateway") {
-		return reqPath[len("gateway"):]
-	}
-	return ""
+	rest, _ := framework.AfterGatewaySegment(reqPath)
+	return rest
 }

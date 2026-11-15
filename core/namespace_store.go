@@ -383,6 +383,15 @@ func (ns *NamespaceStore) setNamespaceLocked(ctx context.Context, nsEntry *names
 
 	var exists bool
 	if entry.UUID == "" {
+		// Refused on create only: a namespace stored under one of these names
+		// before they were reserved still loads and can be updated. Every
+		// segment is checked, so no new namespace carries one in its URL, a
+		// child of such a legacy namespace included.
+		for _, segment := range strings.Split(strings.TrimSuffix(entry.Path, "/"), "/") {
+			if isRoutingSegment(segment) {
+				return wlogical.ErrBadRequestf("namespace path %q contains the reserved segment %q: it marks the shape of a gateway path", entry.Path, segment)
+			}
+		}
 		id, err := ns.assignIdentifier(entry.Path)
 		if err != nil {
 			return err

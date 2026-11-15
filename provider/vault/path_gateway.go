@@ -125,14 +125,10 @@ func (b *vaultBackend) buildTargetURL(path, rawQuery string) (*url.URL, error) {
 // path is the decoded request path the request was authorized on; it is
 // escaped once on the wire and never decoded again (see package upstream).
 func targetURLFor(address, path, rawQuery string) (*url.URL, error) {
-	// Find gateway path marker
-	gatewayIdx := strings.Index(path, "/gateway")
-	if gatewayIdx == -1 {
+	vaultPath, ok := framework.AfterGatewaySegment(path)
+	if !ok {
 		return nil, fmt.Errorf("invalid gateway path: %s", path)
 	}
-
-	// Extract path after "/gateway"
-	vaultPath := path[gatewayIdx+8:] // len("/gateway") = 8
 	if vaultPath == "" || vaultPath == "/" {
 		vaultPath = "/v1/"
 	} else if !strings.HasPrefix(vaultPath, "/v1/") {

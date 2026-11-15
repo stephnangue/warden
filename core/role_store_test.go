@@ -318,6 +318,42 @@ func TestRoles_NameCharset(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestRoles_RoutingNamesReserved: "gateway" and "role" mark the shape of a
+// gateway path, role/<role>/gateway, so a new role may take neither name. A role
+// stored under one before they were reserved still loads, updates and deletes.
+func TestRoles_RoutingNamesReserved(t *testing.T) {
+	c := createTestCore(t)
+	ctx := rootCtx()
+
+	for _, name := range []string{"gateway", "role"} {
+		_, err := c.roleStore.Create(ctx, &logical.Role{Name: name})
+		require.Error(t, err, name)
+		assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err), name)
+	}
+	// Whole names only, and as routing reads them: case matters.
+	for _, name := range []string{"gateways", "my-gateway", "gateway.v2", "roles", "Gateway"} {
+		_, err := c.roleStore.Create(ctx, &logical.Role{Name: name})
+		assert.NoError(t, err, name)
+	}
+
+	view := c.roleStore.storage
+	require.NoError(t, view.Put(ctx, &sdklogical.StorageEntry{
+		Key:   roleStorageKey(namespace.RootNamespaceUUID, "gateway"),
+		Value: []byte(`{"version":1,"role":{"name":"gateway"}}`),
+	}))
+	c.teardownRoleStore()
+	require.NoError(t, c.setupRoleStore(ctx, false))
+
+	r, hash, err := c.roleStore.Get(ctx, "gateway")
+	require.NoError(t, err, "a role stored before the rule still loads")
+	r.Description = "renamed soon"
+	_, err = c.roleStore.Update(ctx, r, hash)
+	require.NoError(t, err, "and can be updated")
+	_, hash, err = c.roleStore.Get(ctx, "gateway")
+	require.NoError(t, err)
+	require.NoError(t, c.roleStore.Delete(ctx, "gateway", hash), "and deleted")
+}
+
 // TestRoles_RootPolicyRefused: a role can never hand out the root policy. The
 // non-assignable list is covered by logical.ValidateAssignablePolicies' own
 // tests, and the structural test below pins the role write to that check.

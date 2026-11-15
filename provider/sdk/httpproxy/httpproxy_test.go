@@ -2026,3 +2026,19 @@ func TestHandleGateway_RefuseRequestRendered(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, logical.GatewayFailureBadRequest, got.Class)
 }
+
+// A mount, namespace or role whose name only starts with "gateway" is not the
+// gateway: the upstream gets the path after the real one.
+func TestPathAfterGateway_NameStartingWithGateway(t *testing.T) {
+	for path, want := range map[string]string{
+		"/v1/gateway-prod/gateway/v1.0/me":        "/v1.0/me",
+		"/v1/graph/role/gateways/gateway/v1.0/me": "/v1.0/me",
+		"/v1/gateways/graph/gateway/v1.0/me":      "/v1.0/me",
+	} {
+		got, ok := PathAfterGateway(path)
+		assert.True(t, ok, path)
+		assert.Equal(t, want, got, path)
+	}
+	_, ok := PathAfterGateway("/v1/gateway-prod/config")
+	assert.False(t, ok, "no segment is the gateway")
+}
