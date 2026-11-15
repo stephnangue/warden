@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"maps"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -1187,6 +1188,128 @@ func TestCredentialConfigStore_ValidateSpec_ActorWardenIdentity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCredentialConfigStore_ValidateSpec_IDJAGSubject: the subject of an ID-JAG request
+// is an identity assertion the IdP issued, so a spec on an id_jag source names its type
+// as id_token (the default), saml2 or refresh_token, and never has Warden sign it. Other
+// grants are unaffected, and a source switched to id_jag under a spec that breaks
+// these rules is refused until the spec is fixed.
+func TestCredentialConfigStore_ValidateSpec_IDJAGSubject(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	store.core.credentialDriverRegistry = nil // skip the test-mint block
+	idJAG := map[string]string{
+		"token_url": "https://idp.example/token", "resource_token_url": "https://as.example/token",
+		"grant": "id_jag", "client_id": "c", "client_secret": "s",
+	}
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "xaa", Type: credential.SourceTypeTokenExchange, Config: credential.NewConfig(idJAG),
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
+		Config: credential.NewConfig(map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"}),
+	}))
+
+	spec := func(name, source string, cfg map[string]string) *credential.CredSpec {
+		full := map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
+			"audience":                          "https://as.example",
+		}
+		for k, v := range cfg {
+			full[k] = v
+		}
+		return &credential.CredSpec{Name: name, Type: credential.TypeOAuthBearerToken, Source: source, Config: credential.NewConfig(full)}
+	}
+
+	for _, tt := range []struct {
+		name     string
+		spec     *credential.CredSpec
+		errorMsg string // empty => expect success
+	}{
+		{name: "type left out", spec: spec("xaa-default", "xaa", nil)},
+		{name: "id_token", spec: spec("xaa-id", "xaa", map[string]string{credential.ConfigSubjectTokenType: "id_token"})},
+		{name: "saml2", spec: spec("xaa-saml", "xaa", map[string]string{credential.ConfigSubjectTokenType: "saml2"})},
+		{name: "refresh_token", spec: spec("xaa-refresh", "xaa", map[string]string{credential.ConfigSubjectTokenType: "refresh_token"})},
+		{name: "the URN of an allowed type", spec: spec("xaa-urn", "xaa", map[string]string{credential.ConfigSubjectTokenType: credential.TokenTypeIDToken})},
+		{
+			name:     "jwt",
+			spec:     spec("xaa-jwt", "xaa", map[string]string{credential.ConfigSubjectTokenType: "jwt"}),
+			errorMsg: `subject_token_type "jwt" cannot be used with grant=id_jag`,
+		},
+		{
+			name:     "an access token",
+			spec:     spec("xaa-at", "xaa", map[string]string{credential.ConfigSubjectTokenType: credential.TokenTypeAccessToken}),
+			errorMsg: "cannot be used with grant=id_jag",
+		},
+		{
+			name: "a subject Warden signs",
+			spec: spec("xaa-wid", "xaa", map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity,
+				credential.ConfigAssertionAudience:  "https://idp.example",
+			}),
+			errorMsg: "subject_token_source=warden_identity cannot be used with grant=id_jag",
+		},
+		{name: "another grant is unaffected", spec: spec("sts-jwt", "sts-src", map[string]string{credential.ConfigSubjectTokenType: credential.TokenTypeJWT})},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := store.CreateSpec(ctx, tt.spec)
+			if tt.errorMsg == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errorMsg)
+		})
+	}
+
+	t.Run("a delegation with a Warden-signed actor stays allowed", func(t *testing.T) {
+		require.NoError(t, store.CreateSpec(ctx, spec("xaa-obo", "xaa", map[string]string{
+			credential.ConfigActorTokenSource:  credential.SourceWardenIdentity,
+			credential.ConfigAssertionAudience: "https://idp.example",
+		})))
+	})
+
+	t.Run("a spec updated to a jwt subject", func(t *testing.T) {
+		err := store.UpdateSpec(ctx, spec("xaa-id", "xaa", map[string]string{credential.ConfigSubjectTokenType: "jwt"}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot be used with grant=id_jag")
+	})
+
+	t.Run("a conforming id_jag source updates", func(t *testing.T) {
+		updated := maps.Clone(idJAG)
+		updated["client_secret"] = "s2"
+		require.NoError(t, store.UpdateSource(ctx, &credential.CredSource{
+			Name: "xaa", Type: credential.SourceTypeTokenExchange, Config: credential.NewConfig(updated),
+		}))
+	})
+
+	t.Run("a source switched to id_jag under a jwt subject", func(t *testing.T) {
+		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+			Name: "to-id-jag", Type: credential.SourceTypeTokenExchange,
+			Config: credential.NewConfig(map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"}),
+		}))
+		require.NoError(t, store.CreateSpec(ctx, spec("to-id-jag-jwt", "to-id-jag", map[string]string{credential.ConfigSubjectTokenType: "jwt"})))
+
+		err := store.UpdateSource(ctx, &credential.CredSource{
+			Name: "to-id-jag", Type: credential.SourceTypeTokenExchange, Config: credential.NewConfig(idJAG),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `spec "to-id-jag-jwt"`)
+		assert.Contains(t, err.Error(), "cannot be used with grant=id_jag")
+		assert.Contains(t, err.Error(), "update the spec first")
+	})
+
+	t.Run("a source switched from id_jag keeps its specs", func(t *testing.T) {
+		// A short name means the same type under every grant, so nothing is stranded.
+		require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+			Name: "from-id-jag", Type: credential.SourceTypeTokenExchange, Config: credential.NewConfig(idJAG),
+		}))
+		require.NoError(t, store.CreateSpec(ctx, spec("from-id-jag-spec", "from-id-jag", map[string]string{credential.ConfigSubjectTokenType: "id_token"})))
+		require.NoError(t, store.UpdateSource(ctx, &credential.CredSource{
+			Name: "from-id-jag", Type: credential.SourceTypeTokenExchange,
+			Config: credential.NewConfig(map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"}),
+		}))
+	})
 }
 
 // TestCredentialConfigStore_ValidateSpec_UserIdentitySubjectRequiresTokenExchange

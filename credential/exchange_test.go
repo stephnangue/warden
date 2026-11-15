@@ -13,6 +13,35 @@ import (
 // stubResolve is a no-op lazy subject-token provider for tests.
 func stubResolve(context.Context) (string, error) { return "lazy-token", nil }
 
+// A token type is named by its short name or its URN; anything else names none.
+func TestTokenTypeURN(t *testing.T) {
+	for in, want := range map[string]string{
+		"id_token":            TokenTypeIDToken,
+		"saml2":               TokenTypeSAML2,
+		"refresh_token":       TokenTypeRefreshToken,
+		"access_token":        TokenTypeAccessToken,
+		"jwt":                 TokenTypeJWT,
+		TokenTypeIDToken:      TokenTypeIDToken,
+		TokenTypeSAML2:        TokenTypeSAML2,
+		TokenTypeAccessToken:  TokenTypeAccessToken,
+		TokenTypeRefreshToken: TokenTypeRefreshToken,
+		TokenTypeJWT:          TokenTypeJWT,
+	} {
+		got, ok := TokenTypeURN(in)
+		assert.True(t, ok, in)
+		assert.Equal(t, want, got, in)
+	}
+	for _, in := range []string{
+		"", "ID_TOKEN", "id-token",
+		"urn:ietf:params:oauth:token-type:id-jag", // a type Warden requests, never names a subject by
+		"urn:ietf:params:oauth:token-type:saml1",
+		"urn:example:id_token", // a short name behind someone else's prefix
+	} {
+		_, ok := TokenTypeURN(in)
+		assert.False(t, ok, in)
+	}
+}
+
 func TestExchangeInputs_Validate(t *testing.T) {
 	tests := []struct {
 		name    string

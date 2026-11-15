@@ -2,6 +2,8 @@ package drivers
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -348,6 +350,75 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) er
 		if own, ok := idJAGFirstClassParams[key]; ok {
 			return fmt.Errorf("token_param.%s is not used with grant=id_jag: set %s instead, which is sent to the IdP in the ID-JAG request", key, own)
 		}
+	}
+	return nil
+}
+
+// idJAGSubjectTokenTypes are the subject token types an ID-JAG request may carry
+// (draft-ietf-oauth-identity-assertion-authz-grant §4.3): an identity assertion, as an
+// ID token or a SAML 2.0 assertion, or a refresh token where the IdP accepts one. The
+// subject sources Warden has today supply JWTs, so only an ID token reaches an IdP as
+// itself; the other two are named for a subject source that can supply them.
+var idJAGSubjectTokenTypes = []string{credential.TokenTypeIDToken, credential.TokenTypeSAML2, credential.TokenTypeRefreshToken}
+
+// IDJAGSpecError checks a spec against its source when the source asks for ID-JAGs, and
+// is nil for any other source. It is applied when the spec is written, when the source
+// changes, and at mint. Pure: reads the two configs only.
+func IDJAGSpecError(specCfg, sourceCfg credential.Config) error {
+	if credential.GetString(sourceCfg, "grant", tokenExchangeGrantRFC8693) != tokenExchangeGrantIDJAG {
+		return nil
+	}
+	_, err := idJAGSubjectTokenType(specCfg)
+	return err
+}
+
+// idJAGSubjectTokenType is the subject_token_type URN an id_jag spec sends, or why the
+// spec cannot be the subject of an ID-JAG request. That subject is an identity
+// assertion the IdP issued, so the spec may not have Warden sign one, and its type is
+// one of idJAGSubjectTokenTypes, named by short name or URN; id_token when none is named.
+func idJAGSubjectTokenType(specCfg credential.Config) (string, error) {
+	if specCfg.Get(credential.ConfigSubjectTokenSource) == credential.SourceWardenIdentity {
+		return "", fmt.Errorf("%s=%s cannot be used with grant=id_jag: the subject of an ID-JAG request is an identity assertion the IdP issued, not one Warden signs; use %s or %s",
+			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity, credential.SourceUserIdentity, credential.SourceAgentIdentity)
+	}
+	name := specCfg.Get(credential.ConfigSubjectTokenType)
+	if name == "" {
+		return credential.TokenTypeIDToken, nil
+	}
+	if urn, ok := credential.TokenTypeURN(name); ok && slices.Contains(idJAGSubjectTokenTypes, urn) {
+		return urn, nil
+	}
+	return "", fmt.Errorf("%s %q cannot be used with grant=id_jag: use id_token (the default), saml2 or refresh_token",
+		credential.ConfigSubjectTokenType, name)
+}
+
+// idTokenShapeError refuses a subject that cannot be the ID token it is sent as: one
+// that is not a JWT, signed (three segments) or encrypted (five), or one whose header
+// says it is an access token or an ID-JAG. The IdP must refuse either
+// (draft-ietf-oauth-identity-assertion-authz-grant §4.3.3); refusing it here saves the
+// round trip and says what the caller must present instead. It reads the header only
+// and verifies nothing.
+func idTokenShapeError(token string) error {
+	const want = "the caller must present an ID token issued to this source's client"
+	segments := strings.Split(token, ".")
+	if len(segments) != 3 && len(segments) != 5 {
+		return fmt.Errorf("id_jag: the subject is not a JWT; %s", want)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(segments[0])
+	if err != nil {
+		return fmt.Errorf("id_jag: the subject's JWT header cannot be read; %s", want)
+	}
+	var header map[string]any
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return fmt.Errorf("id_jag: the subject's JWT header cannot be read; %s", want)
+	}
+	// A typ is a media type, matched without case or parameters, with or without
+	// "application/" (RFC 7515 §4.1.9).
+	typ, _ := header["typ"].(string)
+	media, _, _ := strings.Cut(typ, ";")
+	switch strings.TrimPrefix(strings.ToLower(strings.TrimSpace(media)), "application/") {
+	case "at+jwt", "oauth-id-jag+jwt":
+		return fmt.Errorf("id_jag: the subject is a JWT of type %q, not an ID token; %s", typ, want)
 	}
 	return nil
 }
@@ -786,10 +857,25 @@ func (d *TokenExchangeDriver) idJAGRequestForm(spec *credential.CredSpec, inputs
 	if audience == "" {
 		return nil, fmt.Errorf("id_jag: audience (the resource authorization server) is required")
 	}
+	// The subject's type comes from the spec, whatever the request path defaulted it
+	// to: a spec stored before the write check existed meets the same rules here.
+	var specCfg credential.Config
+	if spec != nil {
+		specCfg = spec.Config
+	}
+	subjectType, err := idJAGSubjectTokenType(specCfg)
+	if err != nil {
+		return nil, err
+	}
+	if subjectType == credential.TokenTypeIDToken {
+		if err := idTokenShapeError(inputs.SubjectToken); err != nil {
+			return nil, err
+		}
+	}
 	leg1 := url.Values{}
 	leg1.Set("grant_type", grantTypeTokenExchange)
 	leg1.Set("subject_token", inputs.SubjectToken)
-	leg1.Set("subject_token_type", subjectTokenType(inputs))
+	leg1.Set("subject_token_type", subjectType)
 	leg1.Set("requested_token_type", tokenTypeIDJAG)
 	leg1.Set("audience", audience)
 	if inputs.ActorToken != "" {
@@ -1071,18 +1157,25 @@ func (d *TokenExchangeDriver) Cleanup(_ context.Context) error {
 
 // subjectTokenType returns the RFC 8693 subject_token_type, defaulting to jwt.
 func subjectTokenType(inputs *credential.ExchangeInputs) string {
-	if inputs.SubjectTokenType != "" {
-		return inputs.SubjectTokenType
-	}
-	return credential.TokenTypeJWT
+	return tokenTypeOnTheWire(inputs.SubjectTokenType)
 }
 
 // actorTokenType returns the RFC 8693 actor_token_type, defaulting to jwt.
 func actorTokenType(inputs *credential.ExchangeInputs) string {
-	if inputs.ActorTokenType != "" {
-		return inputs.ActorTokenType
+	return tokenTypeOnTheWire(inputs.ActorTokenType)
+}
+
+// tokenTypeOnTheWire is the token-type URN a request carries for a type a spec names:
+// the URN of a short name, a URN as it is, jwt when none is named. A value that names
+// no type Warden knows is sent as written, for an STS that defines its own.
+func tokenTypeOnTheWire(named string) string {
+	if named == "" {
+		return credential.TokenTypeJWT
 	}
-	return credential.TokenTypeJWT
+	if urn, ok := credential.TokenTypeURN(named); ok {
+		return urn
+	}
+	return named
 }
 
 // unverifiedJWTClaims decodes a JWT's claims without verifying its signature,
