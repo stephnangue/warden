@@ -287,6 +287,26 @@ func TestPlanKeylessSource_Blockers(t *testing.T) {
 		assert.Contains(t, strings.Join(plan.Blockers, "\n"), "already stores no secret")
 	})
 
+	t.Run("a public id_jag source", func(t *testing.T) {
+		// Stored before a write refused it: a public client cannot ask for an ID-JAG. The
+		// plan does not call it keyless, says the fix is a source update, and a target
+		// that keeps it public is refused with the reason.
+		backend, ctx, c := setupTestSystemBackend(t)
+		seedSource(t, c, ctx, &credential.CredSource{
+			Name: "okta-xaa", Type: credential.SourceTypeTokenExchange,
+			Config: credential.NewConfig(map[string]string{
+				"token_url": "https://idp.example.com/token", "resource_token_url": "https://as.example.com/token",
+				"grant": "id_jag", "client_auth": "none", "client_id": "warden",
+			}),
+		})
+
+		plan := planFromResponse(t, keylessPlanRequest(t, backend, ctx, "source", "okta-xaa", nil))
+		assert.Contains(t, strings.Join(plan.Blockers, "\n"), "already stores no secret")
+		assert.Contains(t, strings.Join(plan.Blockers, "\n"), "client_auth=none cannot be used with grant=id_jag")
+		assert.Contains(t, strings.Join(plan.Notes, "\n"), "Update the source to a client_auth first")
+		assert.NotContains(t, strings.Join(plan.Notes, "\n"), "already keyless")
+	})
+
 	t.Run("not found", func(t *testing.T) {
 		backend, ctx, _ := setupTestSystemBackend(t)
 		resp := keylessPlanRequest(t, backend, ctx, "source", "missing", nil)

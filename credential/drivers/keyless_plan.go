@@ -267,10 +267,21 @@ func (f *TokenExchangeDriverFactory) PlanKeyless(current credential.Config, inpu
 	// A public client stores no client credential: there is nothing to move to
 	// chaining, and secret_spec is refused for it. Planning the secret-based migration
 	// would clear the client_id it may need and ask for an input it cannot take.
+	//
+	// With grant=id_jag a public client is not keyless but refused, since the IdP must
+	// authenticate the client it issues an ID-JAG to. That is fixed by updating the
+	// source to a client authentication, not by moving a credential it does not hold,
+	// so the plan says so and plans nothing; given inputs, the core's validation of the
+	// proposed source names what is still wrong.
 	if credential.GetString(current, "client_auth", "") == clientAuthNone {
+		note := "client_auth=none is already keyless: a public client stores no client credential"
+		if inputOr(inputs, current, "grant") == tokenExchangeGrantIDJAG {
+			note = "client_auth=none stores no client credential, but grant=id_jag cannot use it: the IdP must authenticate the client. " +
+				"Update the source to a client_auth first; a secret-based one can then be planned keyless"
+		}
 		return &credential.KeylessSourcePlan{
 			Delta: withInputs(map[string]string{}, inputs),
-			Notes: []string{"client_auth=none is already keyless: a public client stores no client credential"},
+			Notes: []string{note},
 		}, nil
 	}
 	clear := []string{"client_id", "client_secret"}

@@ -265,39 +265,58 @@ func TestTokenExchangeDriver_PublicClient_OtherGrants(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("id_jag, both legs", func(t *testing.T) {
-		var legs int
-		resSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			require.NoError(t, r.ParseForm())
-			legs++
-			noClientCredential(t, r)
-			assert.Equal(t, "warden", r.Form.Get("client_id"))
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "final-access", "expires_in": 600})
-		}))
-		defer resSrv.Close()
-		idpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			require.NoError(t, r.ParseForm())
-			legs++
-			noClientCredential(t, r)
-			assert.Equal(t, "warden", r.Form.Get("client_id"))
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "the-id-jag", "issued_token_type": tokenTypeIDJAG, "expires_in": 300})
-		}))
-		defer idpSrv.Close()
-
-		d := newExchangeDriver(map[string]string{
-			"token_url":          idpSrv.URL,
-			"resource_token_url": resSrv.URL,
+	// The IdP must authenticate the client it issues an ID-JAG to
+	// (draft-ietf-oauth-identity-assertion-authz-grant §4.3.3), so id_jag never runs as a
+	// public client: refused on a write, and before anything is sent for a source stored
+	// before that check existed.
+	t.Run("id_jag is refused", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		cfg := map[string]string{
+			"token_url":          "https://idp.example.com/token",
+			"resource_token_url": "https://as.example.com/token",
 			"grant":              tokenExchangeGrantIDJAG,
 			"client_auth":        clientAuthNone,
 			"client_id":          "warden",
-		}, &http.Client{})
-		spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{"audience": "https://resource-as.example.com"})}
-		rawData, _, _, _, err := d.MintCredentialWithExchange(context.Background(), spec, subjectInputs(subject))
-		require.NoError(t, err)
-		assert.Equal(t, "final-access", rawData["api_key"])
-		assert.Equal(t, 2, legs)
+		}
+		err := (&TokenExchangeDriverFactory{}).ValidateConfig(credential.NewConfig(cfg))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "client_auth=none cannot be used with grant=id_jag")
+
+		d := p.driver(map[string]string{"client_auth": clientAuthNone, "client_id": "warden", "client_secret": ""})
+		_, _, _, _, err = d.MintCredentialWithExchange(context.Background(), p.spec(nil), subjectInputs(subject))
+		require.Error(t, err)
+		assert.True(t, strings.HasPrefix(err.Error(), "this id_jag source cannot mint until it is updated: client_auth=none cannot be used with grant=id_jag"), err.Error())
+		assert.Zero(t, p.idpCalls)
+		assert.Zero(t, p.resCalls)
+
+		// A stored source that is public and also overrides the request names the client
+		// first: no override matters until a client can authenticate.
+		d = p.driver(map[string]string{"client_auth": clientAuthNone, "client_secret": "", "token_param.audience": "x"})
+		_, _, _, _, err = d.MintCredentialWithExchange(context.Background(), p.spec(nil), subjectInputs(subject))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "client_auth=none")
+		assert.NotContains(t, err.Error(), "token_param.audience")
+	})
+
+	t.Run("a public source switched to id_jag is refused on the write", func(t *testing.T) {
+		// What an update validates: the stored config with the sent keys merged in.
+		merged := map[string]string{
+			"token_url": "https://idp.example.com/token", "client_auth": clientAuthNone, "client_id": "warden",
+			"grant": tokenExchangeGrantIDJAG, "resource_token_url": "https://as.example.com/token",
+		}
+		err := (&TokenExchangeDriverFactory{}).ValidateConfig(credential.NewConfig(merged))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "client_auth=none cannot be used with grant=id_jag")
+	})
+
+	t.Run("other grants keep client_auth=none", func(t *testing.T) {
+		for _, grant := range []string{tokenExchangeGrantRFC8693, tokenExchangeGrantJWTBearer} {
+			cfg := credential.NewConfig(map[string]string{
+				"token_url": "https://idp.example.com/token", "client_auth": clientAuthNone, "grant": grant,
+			})
+			assert.NoError(t, (&TokenExchangeDriverFactory{}).ValidateConfig(cfg), grant)
+			assert.NoError(t, storedIDJAGRefusal(cfg), grant)
+		}
 	})
 }
 
@@ -1455,16 +1474,29 @@ func TestTokenExchangeDriver_IDJAG_StoredTokenParamsWarn(t *testing.T) {
 	})
 	assert.Equal(t, 2, strings.Count(out, `"level":"warn"`), out)
 	assert.Contains(t, out, "cannot mint")
+	assert.Contains(t, out, "token_param.audience")
 	assert.Contains(t, out, `"config_key":"scope"`)
 	assert.Contains(t, out, "https://idp.example.com/token")
 	assert.Contains(t, out, "https://as.example.com/token")
 	assert.NotContains(t, out, `"token_param":"tenant"`, "an ordinary extra is not warned about")
+
+	out = build(map[string]string{
+		"grant":              tokenExchangeGrantIDJAG,
+		"token_url":          "https://idp.example.com/token",
+		"resource_token_url": "https://as.example.com/token",
+		"client_auth":        clientAuthNone,
+	})
+	assert.Equal(t, 1, strings.Count(out, `"level":"warn"`), out)
+	assert.Contains(t, out, "client_auth=none cannot be used with grant=id_jag")
 
 	assert.Empty(t, build(map[string]string{
 		"grant":                tokenExchangeGrantJWTBearer,
 		"token_url":            "https://idp.example.com/token",
 		"token_param.audience": "x",
 	}), "jwt_bearer keeps token_param.audience")
+	assert.Empty(t, build(map[string]string{
+		"token_url": "https://idp.example.com/token", "client_auth": clientAuthNone,
+	}), "rfc8693 keeps client_auth=none")
 }
 
 // idJAGPair is an IdP and a resource authorization server for one id_jag test. It
