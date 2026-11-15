@@ -293,7 +293,7 @@ func TestKMSAssertion_MaterialExtraction(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := tokenExchangeChainedAuthFromMaterial(
+			_, err := chainedClients(
 				credential.NewConfig(map[string]string{"client_auth": clientAuthKMSPrivateKeyJWT}),
 				capabilityMaterial("http://kms.example", tc.over))
 			require.Error(t, err)
@@ -316,9 +316,10 @@ func TestKMSAssertion_IgnoresSecretField(t *testing.T) {
 	material := capabilityMaterial("http://kms.example", nil)
 	material.Field = "transit_key"
 
-	auth, err := tokenExchangeChainedAuthFromMaterial(
+	clients, err := chainedClients(
 		credential.NewConfig(map[string]string{"client_auth": clientAuthKMSPrivateKeyJWT}), material)
 	require.NoError(t, err)
+	auth := clients.idp
 	require.NotNil(t, auth.kms)
 	assert.Equal(t, "client-assertion", auth.kms.Ref.KeyName)
 	assert.Empty(t, auth.secret, "no key material travels with a capability")
@@ -467,7 +468,7 @@ func TestKMSAssertion_ConcurrentSigningKeepsCapabilitiesApart(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			auth, err := tokenExchangeChainedAuthFromMaterial(
+			clients, err := chainedClients(
 				credential.NewConfig(map[string]string{"client_auth": clientAuthKMSPrivateKeyJWT}),
 				capabilityMaterial(url, map[string]string{
 					"transit_key":         keyNames[i],
@@ -480,7 +481,7 @@ func TestKMSAssertion_ConcurrentSigningKeepsCapabilitiesApart(t *testing.T) {
 			}
 			<-start // release them together, so the clones genuinely overlap
 			assertions[i], errs[i] = d.signAssertionWithCapability(
-				context.Background(), auth.kms, map[string]interface{}{"iss": "c", "sub": "c"})
+				context.Background(), clients.idp.kms, map[string]interface{}{"iss": "c", "sub": "c"})
 		}(i)
 	}
 	close(start)
@@ -669,4 +670,63 @@ func TestKMSAssertion_IDJAGSignsBothLegs(t *testing.T) {
 	assert.Contains(t, byAud, resSrv.URL, "leg 2's assertion is bound to the resource endpoint")
 	assert.NotEqual(t, byAud[idpSrv.URL], byAud[resSrv.URL], "an assertion must not be replayed across legs")
 	assert.Equal(t, []string{"warden-gateway", "warden-gateway"}, clients, "both legs name the client the payload carries")
+}
+
+// TestKMSAssertion_IDJAGResourceClient: one signing capability serves both clients; the
+// resource client's id reaches it through the signer spec's payload passthrough, and leg
+// 2's assertion names that client.
+func TestKMSAssertion_IDJAGResourceClient(t *testing.T) {
+	kms, kmsURL := newFakeSigningBackend(t)
+	var issuers, clients []string
+	var mu sync.Mutex
+	record := func(r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		claims := unverifiedJWTClaims(r.Form.Get("client_assertion"))
+		mu.Lock()
+		defer mu.Unlock()
+		issuers = append(issuers, fmt.Sprint(claims["iss"]))
+		clients = append(clients, r.Form.Get("client_id"))
+	}
+	resSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "final-access", "expires_in": 600})
+	}))
+	defer resSrv.Close()
+	idpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "the-id-jag", "issued_token_type": tokenTypeIDJAG, "expires_in": 300})
+	}))
+	defer idpSrv.Close()
+
+	d := newExchangeDriver(map[string]string{
+		"token_url":            idpSrv.URL,
+		"resource_token_url":   resSrv.URL,
+		"grant":                tokenExchangeGrantIDJAG,
+		"client_auth":          clientAuthKMSPrivateKeyJWT,
+		"resource_client_auth": clientAuthKMSPrivateKeyJWT,
+		"secret_spec":          "idp-client-signer",
+	}, &http.Client{})
+	_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(context.Background(),
+		&credential.CredSpec{Config: credential.NewConfig(map[string]string{"audience": "https://resource-as.example.com"})},
+		subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u1"})),
+		capabilityMaterial(kmsURL, map[string]string{"resource_client_id": "warden-at-resource"}))
+	require.NoError(t, err)
+	assert.Equal(t, 2, kms.signCalls)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"warden-gateway", "warden-at-resource"}, clients)
+	assert.Equal(t, []string{"warden-gateway", "warden-at-resource"}, issuers, "each assertion is issued by the client it authenticates")
+
+	// A capability whose payload names no resource client cannot serve one.
+	_, _, _, _, err = d.MintCredentialWithExchangeFromSecret(context.Background(),
+		&credential.CredSpec{Config: credential.NewConfig(map[string]string{"audience": "https://resource-as.example.com"})},
+		subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u1"})),
+		capabilityMaterial(kmsURL, nil))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete)
+	assert.Contains(t, err.Error(), "resource_client_id")
 }

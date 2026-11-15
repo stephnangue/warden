@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -466,19 +467,25 @@ func TestTokenExchangeDriverFactory_ValidateConfig(t *testing.T) {
 		c["grant"] = tokenExchangeGrantIDJAG
 		assert.Error(t, f.ValidateConfig(credential.NewConfig(c)))
 	})
-	t.Run("id_jag with resource_token_url", func(t *testing.T) {
+	// idJAG is base as an id_jag source with a resource client of its own, which a
+	// secret-based IdP client needs.
+	idJAG := func() map[string]string {
 		c := base()
 		c["grant"] = tokenExchangeGrantIDJAG
 		c["resource_token_url"] = "https://auth.resourceapp.example.com/token"
-		assert.NoError(t, f.ValidateConfig(credential.NewConfig(c)))
+		c["resource_client_auth"] = clientAuthSecretPost
+		c["resource_client_id"] = "c-at-resource"
+		c["resource_client_secret"] = "rs"
+		return c
+	}
+	t.Run("id_jag with resource_token_url", func(t *testing.T) {
+		assert.NoError(t, f.ValidateConfig(credential.NewConfig(idJAG())))
 	})
 	// The ID-JAG request's own fields are Warden's to set: the pinned ones say what is
 	// asked for and of whom, the first-class ones have keys of their own.
 	for _, key := range []string{"requested_token_type", "audience", "scope", "resource"} {
 		t.Run("id_jag refuses token_param."+key, func(t *testing.T) {
-			c := base()
-			c["grant"] = tokenExchangeGrantIDJAG
-			c["resource_token_url"] = "https://auth.resourceapp.example.com/token"
+			c := idJAG()
 			c["token_param."+key] = "x"
 			err := f.ValidateConfig(credential.NewConfig(c))
 			require.Error(t, err)
@@ -486,9 +493,7 @@ func TestTokenExchangeDriverFactory_ValidateConfig(t *testing.T) {
 		})
 	}
 	t.Run("id_jag keeps other token_param extras", func(t *testing.T) {
-		c := base()
-		c["grant"] = tokenExchangeGrantIDJAG
-		c["resource_token_url"] = "https://auth.resourceapp.example.com/token"
+		c := idJAG()
 		c["token_param.tenant"] = "acme"
 		assert.NoError(t, f.ValidateConfig(credential.NewConfig(c)))
 	})
@@ -1094,6 +1099,347 @@ func TestTokenExchangeDriver_ChainedIDJAG_PairOnBothLegs(t *testing.T) {
 	assert.Equal(t, "jag-secret", leg2Secret)
 }
 
+// A source that names a resource client authenticates leg 2 as that client, the one the
+// ID-JAG's client_id names, and leg 1 as the IdP client — from its own config or from
+// one chained payload, with each client's method and audience its own.
+func TestTokenExchangeDriver_IDJAG_ResourceClient(t *testing.T) {
+	ctx := context.Background()
+	subject := subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "user"}))
+	assertionOf := func(t *testing.T, form url.Values) (header, claims map[string]interface{}) {
+		t.Helper()
+		parts := strings.Split(form.Get("client_assertion"), ".")
+		require.Len(t, parts, 3)
+		raw, err := base64.RawURLEncoding.DecodeString(parts[0])
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(raw, &header))
+		return header, unverifiedJWTClaims(form.Get("client_assertion"))
+	}
+	resourceSecret := map[string]string{
+		"resource_client_auth": clientAuthSecretPost, "resource_client_id": "c-at-resource", "resource_client_secret": "rs",
+	}
+
+	t.Run("inline: each leg authenticates as its own client", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		_, meta, _, _, err := p.driver(resourceSecret).MintCredentialWithExchange(ctx, p.spec(nil), subject)
+		require.NoError(t, err)
+		assert.Equal(t, "c", p.leg1.Get("client_id"))
+		assert.Equal(t, "s", p.leg1.Get("client_secret"))
+		assert.Equal(t, "c-at-resource", p.leg2.Get("client_id"))
+		assert.Equal(t, "rs", p.leg2.Get("client_secret"))
+		assert.Equal(t, "c", meta["client_id"], "audit names the IdP client")
+		assert.Equal(t, "c-at-resource", meta["resource_client_id"], "and the client that redeemed the ID-JAG")
+	})
+
+	t.Run("inline: a secret at the IdP, an assertion naming the resource issuer", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		_, _, _, _, err := p.driver(map[string]string{
+			"resource_client_auth": clientAuthPrivateKeyJWT, "resource_client_id": "c-at-resource",
+			"resource_private_key": testRSAPrivateKeyPEM(t), "resource_client_assertion_kid": "res-key-1",
+			"resource_client_assertion_aud": clientAssertionAudIssuer, "resource_issuer": "https://res.example.com",
+		}).MintCredentialWithExchange(ctx, p.spec(nil), subject)
+		require.NoError(t, err)
+		assert.Equal(t, "s", p.leg1.Get("client_secret"))
+		assert.Empty(t, p.leg1.Get("client_assertion"))
+
+		assert.Empty(t, p.leg2.Get("client_secret"), "the IdP's secret never reaches the resource server")
+		header, claims := assertionOf(t, p.leg2)
+		assert.Equal(t, "res-key-1", header["kid"])
+		assert.Equal(t, "c-at-resource", claims["iss"])
+		assert.Equal(t, "c-at-resource", claims["sub"])
+		assert.Equal(t, "https://res.example.com", claims["aud"])
+	})
+
+	t.Run("chained: one payload carries a pair per leg", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		d := p.driver(map[string]string{
+			"client_id": "", "client_secret": "", "secret_spec": "xaa-clients", "resource_client_auth": clientAuthSecretBasic,
+		})
+		_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(ctx, p.spec(nil), subject, credential.SecretMaterial{Data: map[string]string{
+			"client_id": "idp-app", "client_secret": "idp-secret",
+			"resource_client_id": "xaa-app", "resource_client_secret": "xaa-secret",
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, "idp-app", p.leg1.Get("client_id"))
+		assert.Equal(t, "idp-secret", p.leg1.Get("client_secret"))
+		assert.Empty(t, p.leg1Auth, "leg 1 sends no Authorization header")
+		assert.Equal(t, basicClientAuthHeader("xaa-app", "xaa-secret"), p.leg2Auth, "leg 2 authenticates with basic, as its own client")
+		assert.Empty(t, p.leg2.Get("client_secret"))
+	})
+
+	t.Run("inline: basic at the resource server, post at the IdP", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		_, _, _, _, err := p.driver(map[string]string{
+			"resource_client_auth": clientAuthSecretBasic, "resource_client_id": "c-at-resource", "resource_client_secret": "rs",
+		}).MintCredentialWithExchange(ctx, p.spec(nil), subject)
+		require.NoError(t, err)
+		assert.Empty(t, p.leg1Auth)
+		assert.Equal(t, "s", p.leg1.Get("client_secret"))
+		assert.Equal(t, basicClientAuthHeader("c-at-resource", "rs"), p.leg2Auth)
+		assert.Empty(t, p.leg2.Get("client_id"), "basic carries the client in the header only")
+	})
+
+	t.Run("chained: each client's key id is its own", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		d := p.driver(map[string]string{
+			"client_auth": clientAuthPrivateKeyJWT, "client_id": "", "client_secret": "", "secret_spec": "xaa-clients",
+			"resource_client_auth": clientAuthPrivateKeyJWT,
+		})
+		_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(ctx, p.spec(nil), subject, credential.SecretMaterial{Data: map[string]string{
+			"client_id": "idp-app", "private_key": testRSAPrivateKeyPEM(t), "kid": "idp-key",
+			"resource_client_id": "xaa-app", "resource_private_key": testRSAPrivateKeyPEM(t),
+			"resource_client_assertion_kid": "xaa-key", "resource_kid": "ignored",
+		}})
+		require.NoError(t, err)
+		leg1Header, _ := assertionOf(t, p.leg1)
+		leg2Header, leg2Claims := assertionOf(t, p.leg2)
+		assert.Equal(t, "idp-key", leg1Header["kid"])
+		assert.Equal(t, "xaa-key", leg2Header["kid"], "resource_client_assertion_kid comes before resource_kid; the IdP's kid never reaches leg 2")
+		assert.Equal(t, "xaa-app", leg2Claims["iss"])
+	})
+
+	t.Run("chained: secret_field cannot select the resource client's secret", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		d := p.driver(map[string]string{
+			"client_id": "", "client_secret": "", "secret_spec": "xaa-clients", "resource_client_auth": clientAuthSecretPost,
+		})
+		_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(ctx, p.spec(nil), subject, credential.SecretMaterial{
+			Field: "resource_client_secret",
+			Data: map[string]string{
+				"client_id": "idp-app", "client_secret": "idp-secret",
+				"resource_client_id": "xaa-app", "resource_client_secret": "xaa-secret",
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "names the resource client's credential")
+		assert.NotErrorIs(t, err, credential.ErrChainedSecretIncomplete, "refetching cannot change a field selector")
+		assert.Zero(t, p.idpCalls, "the resource secret never reaches the IdP")
+	})
+
+	t.Run("a cleared client_auth reads as unset", func(t *testing.T) {
+		// An update clears a field by storing it empty, which the pair's driver helper
+		// would drop; these configs keep it.
+		p := newIDJAGPair(t)
+		_, meta, _, _, err := newExchangeDriver(map[string]string{
+			"token_url": p.idp.URL, "resource_token_url": p.res.URL, "grant": tokenExchangeGrantIDJAG,
+			"client_auth": "", "client_id": "c", "client_secret": "s",
+			"resource_client_auth": clientAuthSecretPost, "resource_client_id": "r", "resource_client_secret": "rs",
+		}, &http.Client{}).MintCredentialWithExchange(ctx, p.spec(nil), subject)
+		require.NoError(t, err)
+		assert.Equal(t, "s", p.leg1.Get("client_secret"), "client_secret_post, the default")
+		assert.Equal(t, "c", meta["client_id"])
+
+		p = newIDJAGPair(t)
+		_, _, _, _, err = newExchangeDriver(map[string]string{
+			"token_url": p.idp.URL, "resource_token_url": p.res.URL, "grant": tokenExchangeGrantIDJAG,
+			"client_auth": "", "secret_spec": "xaa-clients", "resource_client_auth": clientAuthSecretPost,
+		}, &http.Client{}).MintCredentialWithExchangeFromSecret(ctx, p.spec(nil), subject, credential.SecretMaterial{Data: map[string]string{
+			"client_id": "idp-app", "client_secret": "idp-secret", "resource_client_id": "xaa-app", "resource_client_secret": "xaa-secret",
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, "idp-secret", p.leg1.Get("client_secret"))
+
+		// The other grants read it the same way.
+		var got url.Values
+		sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, r.ParseForm())
+			got = r.PostForm
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+		}))
+		t.Cleanup(sts.Close)
+		_, _, _, _, err = newExchangeDriver(map[string]string{"token_url": sts.URL, "client_auth": "", "client_id": "c", "client_secret": "s"}, &http.Client{}).
+			MintCredentialWithExchange(ctx, &credential.CredSpec{}, subject)
+		require.NoError(t, err)
+		assert.Equal(t, "s", got.Get("client_secret"))
+	})
+
+	t.Run("chained: a key at the IdP and a secret at the resource server", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		d := p.driver(map[string]string{
+			"client_auth": clientAuthPrivateKeyJWT, "client_id": "", "client_secret": "", "secret_spec": "xaa-clients",
+			"resource_client_auth": clientAuthSecretPost,
+		})
+		_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(ctx, p.spec(nil), subject, credential.SecretMaterial{Data: map[string]string{
+			"client_id": "idp-app", "private_key": testRSAPrivateKeyPEM(t), "kid": "idp-key",
+			"resource_client_id": "xaa-app", "resource_client_secret": "xaa-secret",
+		}})
+		require.NoError(t, err)
+		header, claims := assertionOf(t, p.leg1)
+		assert.Equal(t, "idp-key", header["kid"])
+		assert.Equal(t, "idp-app", claims["iss"])
+		assert.Equal(t, "xaa-app", p.leg2.Get("client_id"))
+		assert.Equal(t, "xaa-secret", p.leg2.Get("client_secret"))
+	})
+
+	t.Run("chained: a payload without the resource client is incomplete", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		d := p.driver(map[string]string{
+			"client_id": "", "client_secret": "", "secret_spec": "xaa-clients", "resource_client_auth": clientAuthSecretPost,
+		})
+		_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(ctx, p.spec(nil), subject, credential.SecretMaterial{Data: map[string]string{
+			"client_id": "idp-app", "client_secret": "idp-secret", "resource_client_id": "xaa-app",
+		}})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, credential.ErrChainedSecretIncomplete, "a cached payload that predates the resource client is refetched")
+		assert.Contains(t, err.Error(), "resource client")
+		assert.Contains(t, err.Error(), "resource_client_secret")
+		assert.Zero(t, p.idpCalls, "nothing is sent")
+	})
+
+	t.Run("chained: a resource client the resource server rejects is evicted", func(t *testing.T) {
+		var leg2 url.Values
+		idp := newTokenStub(t, issuesIDJAGs)
+		res := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, r.ParseForm())
+			leg2 = r.PostForm
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_client"})
+		}))
+		t.Cleanup(res.Close)
+		d := newExchangeDriver(map[string]string{
+			"token_url": idp.srv.URL, "resource_token_url": res.URL, "grant": tokenExchangeGrantIDJAG,
+			"secret_spec": "xaa-clients", "resource_client_auth": clientAuthSecretPost,
+		}, &http.Client{})
+		_, _, _, _, err := d.MintCredentialWithExchangeFromSecret(ctx, &credential.CredSpec{Config: credential.NewConfig(map[string]string{
+			"audience": "https://resource-as.example.com",
+		})}, subject, credential.SecretMaterial{Data: map[string]string{
+			"client_id": "idp-app", "client_secret": "idp-secret",
+			"resource_client_id": "xaa-app", "resource_client_secret": "rotated-away",
+		}})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, credential.ErrChainedSecretRejected, "the refetch replaces both pairs")
+		assert.True(t, strings.HasPrefix(err.Error(), "id_jag: the resource authorization server rejected the chained client credential"), err.Error())
+		assert.Equal(t, "xaa-app", leg2.Get("client_id"), "what was rejected is the resource client")
+		assert.Equal(t, "rotated-away", leg2.Get("client_secret"))
+	})
+
+	t.Run("a stored resource key that does not parse fails the mint, not the build", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		d := p.driver(map[string]string{
+			"resource_client_auth": clientAuthPrivateKeyJWT, "resource_client_id": "c-at-resource", "resource_private_key": "not-a-key",
+		})
+		_, _, _, _, err := d.MintCredentialWithExchange(ctx, p.spec(nil), subject)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid resource_private_key")
+		assert.Zero(t, p.idpCalls, "no ID-JAG is asked for that could not be redeemed")
+		assert.Zero(t, p.resCalls)
+	})
+
+	t.Run("other grants record no client ids", func(t *testing.T) {
+		var got url.Values
+		sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, r.ParseForm())
+			got = r.PostForm
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+		}))
+		t.Cleanup(sts.Close)
+		_, meta, _, _, err := newExchangeDriver(map[string]string{"token_url": sts.URL, "client_id": "c", "client_secret": "s"}, &http.Client{}).
+			MintCredentialWithExchange(ctx, &credential.CredSpec{}, subject)
+		require.NoError(t, err)
+		assert.Equal(t, "c", got.Get("client_id"))
+		assert.NotContains(t, meta, "client_id")
+		assert.NotContains(t, meta, "resource_client_id")
+	})
+}
+
+// A resource client is configured whole or not at all, only for id_jag, and its rules
+// are its own; a secret-based IdP client needs one, since leg 2 would otherwise present
+// the IdP's secret to another authorization server.
+func TestTokenExchangeDriverFactory_ValidateConfig_ResourceClient(t *testing.T) {
+	f := &TokenExchangeDriverFactory{}
+	key := testRSAPrivateKeyPEM(t)
+	cfg := func(over map[string]string) credential.Config {
+		c := map[string]string{
+			"token_url": "https://idp.example.com/token", "grant": tokenExchangeGrantIDJAG,
+			"resource_token_url": "https://res.example.com/token",
+			"client_id":          "c", "client_secret": "s",
+			"resource_client_auth": clientAuthSecretPost, "resource_client_id": "r", "resource_client_secret": "rs",
+		}
+		for k, v := range over {
+			if v == "" {
+				delete(c, k)
+				continue
+			}
+			c[k] = v
+		}
+		return credential.NewConfig(c)
+	}
+	chained := map[string]string{"client_id": "", "client_secret": "", "resource_client_id": "", "resource_client_secret": "", "secret_spec": "xaa-clients"}
+	with := func(a, b map[string]string) map[string]string {
+		out := maps.Clone(a)
+		maps.Copy(out, b)
+		return out
+	}
+
+	for _, tc := range []struct {
+		name   string
+		config credential.Config
+		errMsg string
+	}{
+		{"a secret per leg", cfg(nil), ""},
+		{"a key at the IdP and no resource client", cfg(map[string]string{
+			"client_auth": clientAuthPrivateKeyJWT, "client_secret": "", "private_key": key,
+			"resource_client_auth": "", "resource_client_id": "", "resource_client_secret": ""}), ""},
+		{"both chained", cfg(chained), ""},
+		{"both chained through KMS", cfg(with(chained, map[string]string{
+			"client_auth": clientAuthKMSPrivateKeyJWT, "resource_client_auth": clientAuthKMSPrivateKeyJWT})), ""},
+		{"a resource assertion naming its issuer", cfg(map[string]string{
+			"resource_client_auth": clientAuthPrivateKeyJWT, "resource_client_secret": "", "resource_private_key": key,
+			"resource_client_assertion_aud": clientAssertionAudIssuer, "resource_issuer": "https://res.example.com"}), ""},
+
+		{"a secret at the IdP and no resource client", cfg(map[string]string{
+			"resource_client_auth": "", "resource_client_id": "", "resource_client_secret": ""}),
+			"leg 2 would otherwise send the IdP's client secret to the resource authorization server"},
+		{"a chained secret at the IdP and no resource client", cfg(with(chained, map[string]string{"resource_client_auth": ""})),
+			"leg 2 would otherwise send the IdP's client secret"},
+		{"half a resource client", cfg(map[string]string{"resource_client_auth": ""}), "resource_client_id needs resource_client_auth"},
+		{"a resource client off id_jag", cfg(map[string]string{"grant": tokenExchangeGrantRFC8693, "resource_token_url": ""}),
+			"resource_client_auth applies only to grant=id_jag"},
+		{"a resource client without its secret", cfg(map[string]string{"resource_client_secret": ""}),
+			"resource_client_secret (or secret_spec) is required for a secret-based resource_client_auth"},
+		{"a public resource client", cfg(map[string]string{"resource_client_auth": clientAuthNone}), "resource_client_auth"},
+		{"an inline resource client on a chained source", cfg(with(chained, map[string]string{"resource_client_id": "r"})),
+			"resource_client_id must be omitted when secret_spec is set"},
+		{"KMS on one leg only", cfg(with(chained, map[string]string{"client_auth": clientAuthKMSPrivateKeyJWT})),
+			"must both be kms_private_key_jwt or neither"},
+		{"KMS on the other leg only", cfg(with(chained, map[string]string{"resource_client_auth": clientAuthKMSPrivateKeyJWT})),
+			"must both be kms_private_key_jwt or neither"},
+		{"secret_field naming the resource client's secret", cfg(with(chained, map[string]string{credential.ConfigSecretField: "resource_client_secret"})),
+			"names the resource client's credential"},
+		// An update clears a field by storing it empty; a cleared client_auth is unset.
+		{"a cleared client_auth on a secret source with no resource client", credential.NewConfig(map[string]string{
+			"token_url": "https://idp.example.com/token", "grant": tokenExchangeGrantIDJAG, "resource_token_url": "https://res.example.com/token",
+			"client_auth": "", "client_id": "c", "client_secret": "s"}),
+			"leg 2 would otherwise send the IdP's client secret"},
+		{"a cleared client_auth still needs its secret", credential.NewConfig(map[string]string{
+			"token_url": "https://idp.example.com/token", "client_auth": "", "client_id": "c"}),
+			"client_secret (or secret_spec) is required for a secret-based client_auth"},
+		{"a cleared client_auth on a chained source keeps no inline id", credential.NewConfig(map[string]string{
+			"token_url": "https://idp.example.com/token", "client_auth": "", "client_id": "c", "secret_spec": "s"}),
+			"client_id must be omitted when secret_spec is set"},
+		{"an audience for a secret", cfg(map[string]string{"resource_client_assertion_aud": clientAssertionAudTokenURL}),
+			"resource_client_assertion_aud must be omitted for resource_client_auth=client_secret_post"},
+		{"the issuer audience without the issuer", cfg(map[string]string{
+			"resource_client_auth": clientAuthPrivateKeyJWT, "resource_client_secret": "", "resource_private_key": key,
+			"resource_client_assertion_aud": clientAssertionAudIssuer}),
+			"resource_client_assertion_aud=issuer requires resource_issuer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := f.ValidateConfig(tc.config)
+			if tc.errMsg == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.errMsg)
+		})
+	}
+
+	assert.ElementsMatch(t, []string{"client_secret", "resource_client_secret"}, f.StoredSecrets(cfg(nil)))
+}
+
 // An upstream invalid_client on the CHAINED path maps to ErrChainedSecretRejected (so the
 // manager evicts + retries); the non-chained path does NOT wrap the sentinel.
 func TestTokenExchangeDriver_ChainedInvalidClientSentinel(t *testing.T) {
@@ -1607,6 +1953,7 @@ func TestTokenExchangeDriver_IDJAG_StoredTokenParamsWarn(t *testing.T) {
 		"grant":                tokenExchangeGrantIDJAG,
 		"token_url":            "https://idp.example.com/token",
 		"resource_token_url":   "https://as.example.com/token",
+		"client_auth":          clientAuthPrivateKeyJWT,
 		"token_param.audience": "x",
 		"token_param.scope":    "files:read",
 		"token_param.tenant":   "acme",
@@ -1628,6 +1975,24 @@ func TestTokenExchangeDriver_IDJAG_StoredTokenParamsWarn(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(out, `"level":"warn"`), out)
 	assert.Contains(t, out, "client_auth=none cannot be used with grant=id_jag")
 
+	// A secret-based source with no resource client keeps minting, sending the IdP's
+	// secret to the resource authorization server, and says so.
+	out = build(map[string]string{
+		"grant":              tokenExchangeGrantIDJAG,
+		"token_url":          "https://idp.example.com/token",
+		"resource_token_url": "https://as.example.com/token",
+		"client_id":          "c", "client_secret": "s",
+	})
+	assert.Equal(t, 1, strings.Count(out, `"level":"warn"`), out)
+	assert.Contains(t, out, "sends the IdP's client secret to the resource authorization server")
+	assert.Empty(t, build(map[string]string{
+		"grant":              tokenExchangeGrantIDJAG,
+		"token_url":          "https://idp.example.com/token",
+		"resource_token_url": "https://as.example.com/token",
+		"client_id":          "c", "client_secret": "s",
+		"resource_client_auth": clientAuthSecretPost, "resource_client_id": "r", "resource_client_secret": "rs",
+	}), "a resource client of its own")
+
 	assert.Empty(t, build(map[string]string{
 		"grant":                tokenExchangeGrantJWTBearer,
 		"token_url":            "https://idp.example.com/token",
@@ -1643,6 +2008,7 @@ func TestTokenExchangeDriver_IDJAG_StoredTokenParamsWarn(t *testing.T) {
 type idJAGPair struct {
 	idp, res           *httptest.Server
 	leg1, leg2         url.Values
+	leg1Auth, leg2Auth string // each leg's Authorization header
 	idpCalls, resCalls int
 }
 
@@ -1652,6 +2018,7 @@ func newIDJAGPair(t *testing.T) *idJAGPair {
 		require.NoError(t, r.ParseForm())
 		p.resCalls++
 		p.leg2 = r.PostForm
+		p.leg2Auth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "final-access", "expires_in": 600})
 	}))
@@ -1659,6 +2026,7 @@ func newIDJAGPair(t *testing.T) *idJAGPair {
 		require.NoError(t, r.ParseForm())
 		p.idpCalls++
 		p.leg1 = r.PostForm
+		p.leg1Auth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "the-id-jag", "issued_token_type": tokenTypeIDJAG, "expires_in": 300})
 	}))
@@ -1700,5 +2068,5 @@ func TestTokenExchangeDriverFactory_Basics(t *testing.T) {
 	ct, err := f.InferCredentialType(credential.NewConfig(nil))
 	require.NoError(t, err)
 	assert.Equal(t, credential.TypeOAuthBearerToken, ct)
-	assert.ElementsMatch(t, []string{"client_secret", "private_key", "ca_data"}, f.SensitiveConfigFields())
+	assert.ElementsMatch(t, []string{"client_secret", "private_key", "resource_client_secret", "resource_private_key", "ca_data"}, f.SensitiveConfigFields())
 }

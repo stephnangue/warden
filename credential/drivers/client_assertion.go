@@ -91,6 +91,25 @@ type chainedClientAuth struct {
 	kms *remotesign.Capability
 }
 
+// payloadFields names where one client's credential sits in a chained payload.
+type payloadFields struct {
+	// id, secret and key name the client id, its client secret and its PEM private key.
+	id, secret, key string
+	// kids name the fields the key's id may travel under, in the order they are read.
+	kids []string
+	// selected marks the client whose secret or key the source's secret_field selects,
+	// and whose secret a single-key payload is. Any other client is read by its field
+	// names alone.
+	selected bool
+}
+
+// clientPayloadFields are the fields of a client's credential in a chained payload, for
+// a source that authenticates as one client.
+var clientPayloadFields = payloadFields{
+	id: "client_id", secret: "client_secret", key: "private_key",
+	kids: []string{"client_assertion_kid", "kid"}, selected: true,
+}
+
 // chainedClientAuthFromMaterial reads a whole client credential out of fetched secret
 // material. clientAuth decides which half the secret is — a client secret or a PEM
 // private key — and so which conventional key names apply.
@@ -106,16 +125,28 @@ type chainedClientAuth struct {
 // cached payload that predates a key it now has to hold is refetched once rather than
 // failing for the rest of its secret_cache_ttl.
 func chainedClientAuthFromMaterial(clientAuth string, material credential.SecretMaterial) (*chainedClientAuth, error) {
+	return chainedClientAuthFromPayload(clientAuth, material, clientPayloadFields)
+}
+
+// chainedClientAuthFromPayload is chainedClientAuthFromMaterial for a client whose
+// credential sits under the given fields, so one payload can carry more than one
+// client.
+func chainedClientAuthFromPayload(clientAuth string, material credential.SecretMaterial, fields payloadFields) (*chainedClientAuth, error) {
 	// The id is never the secret. A payload holding nothing but an id resolves that
 	// lone key as the secret field — the single-key shortcut has no way to know
 	// better — and without this the same value would be spent as both halves of the
 	// pair, which the endpoint answers with invalid_client and the chained path then
 	// misreads as a rotated secret.
-	if material.Field == "client_id" {
-		return nil, fmt.Errorf("the fetched secret material holds a client id but no secret (secret_field resolved to 'client_id', which names the id and never the secret): %w", credential.ErrChainedSecretIncomplete)
+	if fields.selected && material.Field == fields.id {
+		return nil, fmt.Errorf("the fetched secret material holds a client id but no secret (secret_field resolved to '%s', which names the id and never the secret): %w", fields.id, credential.ErrChainedSecretIncomplete)
 	}
 
-	secret := material.Secret()
+	// Only the selected client's secret comes through the field selector; any other is
+	// read by name, as is the selected one when nothing was selected.
+	secret, field := "", ""
+	if fields.selected {
+		secret, field = material.Secret(), material.Field
+	}
 	var kid string
 	var kms *remotesign.Capability
 
@@ -131,32 +162,33 @@ func chainedClientAuthFromMaterial(clientAuth string, material credential.Secret
 			return nil, capabilityError(err)
 		}
 	case clientAuthSecretPost, clientAuthSecretBasic, "":
-		if secret == "" && material.Field == "" {
-			secret = material.Data["client_secret"]
+		if secret == "" && field == "" {
+			secret = material.Data[fields.secret]
 		}
 		if secret == "" {
-			if material.Field != "" {
-				return nil, fmt.Errorf("secret_field %q is empty or absent in the fetched secret material: %w", material.Field, credential.ErrChainedSecretIncomplete)
+			if field != "" {
+				return nil, fmt.Errorf("secret_field %q is empty or absent in the fetched secret material: %w", field, credential.ErrChainedSecretIncomplete)
 			}
-			return nil, fmt.Errorf("no client secret in fetched secret material (set secret_field, or store it under 'client_secret'): %w", credential.ErrChainedSecretIncomplete)
+			return nil, fmt.Errorf("no client secret in fetched secret material (%sstore it under '%s'): %w", setSecretField(fields), fields.secret, credential.ErrChainedSecretIncomplete)
 		}
 	case clientAuthPrivateKeyJWT:
-		if secret == "" && material.Field == "" {
-			secret = material.Data["private_key"]
+		if secret == "" && field == "" {
+			secret = material.Data[fields.key]
 		}
 		if secret == "" {
-			if material.Field != "" {
-				return nil, fmt.Errorf("secret_field %q is empty or absent in the fetched secret material: %w", material.Field, credential.ErrChainedSecretIncomplete)
+			if field != "" {
+				return nil, fmt.Errorf("secret_field %q is empty or absent in the fetched secret material: %w", field, credential.ErrChainedSecretIncomplete)
 			}
-			return nil, fmt.Errorf("no private key in fetched secret material (set secret_field, or store it under 'private_key'): %w", credential.ErrChainedSecretIncomplete)
+			return nil, fmt.Errorf("no private key in fetched secret material (%sstore it under '%s'): %w", setSecretField(fields), fields.key, credential.ErrChainedSecretIncomplete)
 		}
 		// Optional, and read by convention like the id: an authorization server that
 		// resolves the key from the client id alone needs none. When it is present it
 		// has to be the one stored beside this key, which is why a chained source is
 		// refused an inline client_assertion_kid rather than falling back to it.
-		kid = material.Data["client_assertion_kid"]
-		if kid == "" {
-			kid = material.Data["kid"]
+		for _, name := range fields.kids {
+			if kid = material.Data[name]; kid != "" {
+				break
+			}
 		}
 	default:
 		// A source-config error, not a payload one: refetching cannot change the answer,
@@ -165,12 +197,21 @@ func chainedClientAuthFromMaterial(clientAuth string, material credential.Secret
 			clientAuthSecretPost, clientAuthSecretBasic, clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT, clientAuth)
 	}
 
-	clientID := material.Data["client_id"]
+	clientID := material.Data[fields.id]
 	if clientID == "" {
-		return nil, fmt.Errorf("no client id in fetched secret material (store it under 'client_id' alongside the secret): %w", credential.ErrChainedSecretIncomplete)
+		return nil, fmt.Errorf("no client id in fetched secret material (store it under '%s' alongside the secret): %w", fields.id, credential.ErrChainedSecretIncomplete)
 	}
 
 	return &chainedClientAuth{clientID: clientID, secret: secret, kid: kid, kms: kms}, nil
+}
+
+// setSecretField is the hint that secret_field could name a missing secret, for the
+// client it selects; for another client it is empty.
+func setSecretField(fields payloadFields) string {
+	if fields.selected {
+		return "set secret_field, or "
+	}
+	return ""
 }
 
 // basicClientAuthHeader is the client_secret_basic Authorization header: per RFC 6749
