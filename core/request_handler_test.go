@@ -943,6 +943,120 @@ func TestParseRequestBody_MediaTypeSpellings(t *testing.T) {
 	})
 }
 
+// encoding/json keeps the last of a repeated key; an upstream may keep the first.
+// A body that repeats one is refused, so policy and upstream read the same values.
+func TestParseRequestBody_DuplicateKeys(t *testing.T) {
+	core := createTestCore(t)
+	post := func(body string) *logical.Request {
+		httpReq := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		return &logical.Request{HTTPRequest: httpReq}
+	}
+
+	for name, body := range map[string]string{
+		"at the top":                  `{"to":"ok@corp.example","to":"evil@x.example"}`,
+		"in a child":                  `{"message":{"to":"ok@corp.example","to":"evil@x.example"}}`,
+		"in an array of objects":      `{"recipients":[{"address":"a","address":"b"}]}`,
+		"in a top-level array":        `[{"id":1,"id":2}]`,
+		"spelled with an escape":      "{\"to\":\"ok\",\"\\u0074o\":\"evil\"}",
+		"invalid UTF-8 decoded alike": "{\"a\xff\":1,\"a\xfe\":2}",
+	} {
+		t.Run(name+" is refused", func(t *testing.T) {
+			err := core.parseRequestBody(post(body))
+			require.Error(t, err)
+			assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
+			assert.Contains(t, err.Error(), "repeats a key")
+		})
+	}
+
+	t.Run("the same key in sibling objects is fine", func(t *testing.T) {
+		req := post(`{"a":{"id":1},"b":{"id":2},"list":[{"id":3},{"id":4}]}`)
+		require.NoError(t, core.parseRequestBody(req))
+		assert.Contains(t, req.Data, "list")
+	})
+	t.Run("keys differing in case are distinct", func(t *testing.T) {
+		req := post(`{"Name":"a","name":"b"}`)
+		require.NoError(t, core.parseRequestBody(req))
+		assert.Equal(t, "a", req.Data["Name"])
+		assert.Equal(t, "b", req.Data["name"])
+	})
+}
+
+// Core reads the first Content-Type, and the media type before ';' lowercased and
+// trimmed; an upstream sees the header as sent. A label the two could read apart is
+// refused before the body is parsed.
+func TestParseRequestBody_ContentTypeLabels(t *testing.T) {
+	core := createTestCore(t)
+	send := func(method, body string, labels ...string) *logical.Request {
+		httpReq := httptest.NewRequest(method, "/v1/test", strings.NewReader(body))
+		if labels != nil {
+			httpReq.Header["Content-Type"] = labels
+		}
+		return &logical.Request{HTTPRequest: httpReq}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		labels []string
+	}{
+		{"a second label", []string{"application/json", "application/x-www-form-urlencoded"}},
+		{"a list in one label", []string{"application/x-www-form-urlencoded, application/x+json"}},
+		{"a list after a parameter", []string{"application/x-www-form-urlencoded; a=b, application/json"}},
+		{"a list after an empty parameter", []string{"application/x-www-form-urlencoded;, application/json"}},
+		{"a list after a json parameter", []string{"application/json; a=b, application/x-www-form-urlencoded"}},
+		{"a parameter with no value", []string{"application/json; charset"}},
+		{"a parameter with an empty value", []string{"application/json; charset="}},
+		{"an unclosed quoted value", []string{`application/json; charset="utf-8`}},
+		{"a word after a quoted value", []string{`application/json; charset="utf-8" x`}},
+		{"a no-break space trimming drops", []string{" application/json"}},
+		{"a letter lowercasing folds into ASCII", []string{"applİcation/json"}},
+		{"an empty label", []string{""}},
+		{"no subtype", []string{"json"}},
+		{"an empty subtype", []string{"application/"}},
+	} {
+		t.Run(tc.name+" is refused", func(t *testing.T) {
+			err := core.parseRequestBody(send(http.MethodPost, `"&amount=500&"`, tc.labels...))
+			require.Error(t, err)
+			assert.Equal(t, http.StatusBadRequest, logical.GetErrorCode(err))
+		})
+	}
+
+	t.Run("no label is still JSON", func(t *testing.T) {
+		req := send(http.MethodPost, `{"amount":500}`)
+		require.NoError(t, core.parseRequestBody(req))
+		assert.Equal(t, float64(500), req.Data["amount"])
+	})
+	for _, label := range []string{
+		"application/json; charset=utf-8",
+		"application/json;charset=UTF-8",
+		"application/json ;charset=utf-8",
+		"application/json; charset = utf-8", // spaces mime.ParseMediaType accepts
+		"application/json;",
+		"application/json;; charset=utf-8;",
+		`application/json; charset="utf-8"`,
+		`application/json; x="a \"quoted\"; value, with a comma"`,
+	} {
+		t.Run(label+" is a media type", func(t *testing.T) {
+			req := send(http.MethodPost, `{"amount":500}`, label)
+			require.NoError(t, core.parseRequestBody(req))
+			assert.Equal(t, float64(500), req.Data["amount"])
+		})
+	}
+	t.Run("a body core does not parse may carry any one label", func(t *testing.T) {
+		require.NoError(t, core.parseRequestBody(send(http.MethodPost, "--b--", "multipart/form-data; boundary=b")))
+	})
+	t.Run("no body, no refusal", func(t *testing.T) {
+		require.NoError(t, core.parseRequestBody(send(http.MethodPost, "", "application/json", "text/plain")))
+	})
+	t.Run("a read is not parsed", func(t *testing.T) {
+		require.NoError(t, core.parseRequestBody(send(http.MethodGet, "{}", "application/json", "text/plain")))
+	})
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader("{}"))
+	r.Header.Set("Content-Type", "application/json; charset=utf-8")
+	assert.Zero(t, testing.AllocsPerRun(100, func() { _ = checkBodyLabel(r) }), "checking a label allocates nothing")
+}
+
 // limitedBackend is a backend that reports a body cap, as a streaming backend does.
 type limitedBackend struct {
 	logical.Backend
