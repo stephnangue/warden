@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/go-multierror"
@@ -27,10 +28,12 @@ import (
 	"github.com/stephnangue/warden/credential/profiles"
 	"github.com/stephnangue/warden/helper/flight"
 	"github.com/stephnangue/warden/helper/selector"
+	"github.com/stephnangue/warden/internal/jsonstrict"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/listener"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
+	"golang.org/x/net/http/httpguts"
 )
 
 const (
@@ -1642,6 +1645,10 @@ func (c *Core) parseRequestBodyLimit(req *logical.Request, limit int64) error {
 		return nil
 	}
 
+	if err := checkBodyLabel(req.HTTPRequest); err != nil {
+		return err
+	}
+
 	// Parse body based on Content-Type (overwrites query params with same keys)
 	return c.parseBody(req, limit)
 }
@@ -1756,6 +1763,16 @@ func (c *Core) parseJSONBody(req *logical.Request, limit int64) error {
 		return logical.ErrBadRequest("request body is not valid JSON")
 	}
 
+	// The decode above keeps the last of a repeated key; an upstream may keep the
+	// first, so policy would read one value and the upstream act on another.
+	if key, dup := jsonstrict.DuplicateKey(body); dup {
+		c.logger.Debug("request body repeats a key",
+			logger.String("key", logPrefix(key, 64)),
+			logger.String("path", req.Path),
+		)
+		return logical.ErrBadRequest("request body repeats a key")
+	}
+
 	obj, ok := root.(map[string]any)
 	if !ok {
 		return nil
@@ -1801,6 +1818,138 @@ func (c *Core) parseFormBody(req *logical.Request, limit int64) error {
 	}
 
 	return nil
+}
+
+// checkBodyLabel refuses a body whose Content-Type core and an upstream could read
+// apart. Core reads the first label, and of it the media type before ';',
+// lowercased and trimmed. An upstream sees the header as sent, so a second label, a
+// list in one ("…form-urlencoded, application/x+json" ends in +json), or a byte
+// lowercasing folds into ASCII or trimming drops (U+0130, U+00A0) would have
+// policy read the body as one type while the upstream reads another. A body with no
+// label keeps the reading core has always given it: JSON. Allocates nothing.
+func checkBodyLabel(r *http.Request) error {
+	if r.ContentLength == 0 {
+		return nil
+	}
+	labels := r.Header["Content-Type"]
+	switch {
+	case len(labels) == 0:
+		return nil
+	case len(labels) > 1:
+		return logical.ErrBadRequest("request carries more than one Content-Type")
+	case !isMediaTypeLabel(labels[0]):
+		return logical.ErrBadRequest("request Content-Type is not a single media type")
+	}
+	return nil
+}
+
+// isMediaTypeLabel reports whether a Content-Type value is ASCII and one RFC 9110
+// media type: type/subtype, both tokens, then parameters each a token=token or
+// token="quoted string". Anything else after the type — a comma starting a second
+// one, a stray word — is where core and an upstream could part ways.
+func isMediaTypeLabel(label string) bool {
+	for i := 0; i < len(label); i++ {
+		if label[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	base, params, _ := strings.Cut(label, ";")
+	typ, sub, ok := strings.Cut(strings.TrimSpace(base), "/")
+	return ok && isHTTPToken(typ) && isHTTPToken(sub) && isMediaTypeParams(params)
+}
+
+// isMediaTypeParams reports whether s, what follows a media type's first ';', is
+// RFC 9110 parameters: *( OWS ";" OWS [ token "=" ( token / quoted-string ) ] ),
+// empty ones allowed as the grammar allows them. Spaces around '=', which the
+// grammar forbids but mime.ParseMediaType accepts, are accepted: they leave
+// nothing to read two ways.
+func isMediaTypeParams(s string) bool {
+	for {
+		s = strings.Trim(s, " \t")
+		if s == "" {
+			return true
+		}
+		if s[0] == ';' {
+			s = s[1:]
+			continue
+		}
+		name := tokenPrefix(s)
+		if name == 0 {
+			return false
+		}
+		s = strings.TrimLeft(s[name:], " \t")
+		if s == "" || s[0] != '=' {
+			return false
+		}
+		s = strings.TrimLeft(s[1:], " \t")
+		var value int
+		if s != "" && s[0] == '"' {
+			value = quotedStringPrefix(s)
+		} else {
+			value = tokenPrefix(s)
+		}
+		if value == 0 {
+			return false
+		}
+		s = strings.TrimLeft(s[value:], " \t")
+		if s != "" && s[0] != ';' {
+			return false
+		}
+	}
+}
+
+// tokenPrefix returns how many leading bytes of s are token characters.
+func tokenPrefix(s string) int {
+	i := 0
+	for i < len(s) && httpguts.IsTokenRune(rune(s[i])) {
+		i++
+	}
+	return i
+}
+
+// quotedStringPrefix returns the length of the RFC 9110 quoted-string s opens with,
+// or 0 when it does not close. s is ASCII.
+func quotedStringPrefix(s string) int {
+	for i := 1; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '"':
+			return i + 1
+		case c == '\\':
+			// quoted-pair: a backslash and one HTAB, SP or visible character.
+			i++
+			if i == len(s) || (s[i] != '\t' && (s[i] < 0x20 || s[i] == 0x7f)) {
+				return 0
+			}
+		case c != '\t' && (c < 0x20 || c == 0x7f):
+			return 0
+		}
+	}
+	return 0
+}
+
+// isHTTPToken reports whether s is an RFC 9110 token.
+func isHTTPToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !httpguts.IsTokenRune(rune(s[i])) {
+			return false
+		}
+	}
+	return true
+}
+
+// logPrefix returns at most n bytes of a caller-supplied string, cut at a rune
+// boundary, so a log line does not carry a value as large as the body.
+func logPrefix(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
 
 // maxAssertionMetadataBytes bounds the JSON size of the metadata projected into a
