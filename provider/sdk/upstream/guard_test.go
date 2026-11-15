@@ -19,6 +19,7 @@ import (
 var parseAllowed = map[string]string{
 	"ovh/provider.go:s3Host":                      "operator-configured URL, only its host is used",
 	"msgraph/provider.go:checkGraphURL":           "operator-configured URL, validated",
+	"gws/config.go:checkOverrideURL":              "operator-configured URL, end-to-end builds only, validated",
 	"mcp_aws/provider.go:resolveConfig":           "operator-configured URL",
 	"aws/path_gateway.go:processRequest":          "only scheme and host are taken; the path is the request's own or TransformedPath with its encoding",
 	"sdk/sigv4/sigv4.go:ForwardDirectOpts":        "re-serializes an already-built *url.URL, which round-trips",

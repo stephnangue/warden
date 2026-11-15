@@ -888,36 +888,6 @@ func TestParseRequestBody_ErrorsAreCodedAndOpaque(t *testing.T) {
 	})
 }
 
-// Media types are case-insensitive and +json types are JSON, so a caller cannot
-// relabel a JSON body to keep policy from reading it.
-func TestBodyMediaType(t *testing.T) {
-	tests := []struct {
-		contentType string
-		mediaType   string
-		json        bool
-	}{
-		{"", "", true},
-		{"application/json", "application/json", true},
-		{"Application/JSON", "application/json", true},
-		{"application/json; charset=utf-8", "application/json", true},
-		{"application/json;;", "application/json", true}, // malformed parameter
-		{"text/json", "text/json", true},
-		{"application/vnd.api+json", "application/vnd.api+json", true},
-		{"application/merge-patch+json", "application/merge-patch+json", true},
-		{"application/x-www-form-urlencoded", "application/x-www-form-urlencoded", false},
-		{"text/plain", "text/plain", false},
-		{"application/jsonl", "application/jsonl", false}, // a stream of documents, not one
-		{"multipart/form-data; boundary=x", "multipart/form-data", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.contentType, func(t *testing.T) {
-			got := bodyMediaType(tt.contentType)
-			assert.Equal(t, tt.mediaType, got)
-			assert.Equal(t, tt.json, isJSONMediaType(got))
-		})
-	}
-}
-
 func TestParseRequestBody_MediaTypeSpellings(t *testing.T) {
 	core := createTestCore(t)
 	post := func(contentType, body string) *logical.Request {

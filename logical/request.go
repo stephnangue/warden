@@ -2,7 +2,11 @@ package logical
 
 import (
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/net/http/httpguts"
 
 	"github.com/stephnangue/warden/credential"
 )
@@ -299,4 +303,118 @@ type UserPrincipal struct {
 	// subject_token. It is a bearer secret: kept off audit serialization and
 	// stripped from every upstream-forwarding header list.
 	RawToken string
+}
+
+// BodyMediaType returns the media type of a Content-Type value: lowercased, with
+// its parameters dropped, and "" for an absent header. Media types are
+// case-insensitive (RFC 9110 §8.3.1). It is the media type mime.ParseMediaType
+// returns, computed without parsing the parameters, so a malformed parameter
+// cannot turn a JSON body into one policy never sees, and a lowercase value
+// costs no allocation.
+func BodyMediaType(contentType string) string {
+	base, _, _ := strings.Cut(contentType, ";")
+	return strings.TrimSpace(strings.ToLower(base))
+}
+
+// IsJSONMediaType reports whether a gateway request body labelled mediaType is
+// parsed as JSON for policy. That is any spelling an upstream may decode as JSON, so
+// a caller cannot relabel a body to slip it past a condition: application/json,
+// text/json, any structured-syntax +json type (RFC 6839, e.g.
+// application/vnd.api+json or application/merge-patch+json), and an absent type,
+// which core has always read as JSON. A body that then fails to parse is refused.
+//
+// Core parses bodies by this rule; a provider that must refuse what policy cannot
+// read uses the same one, so the two never disagree.
+func IsJSONMediaType(mediaType string) bool {
+	return mediaType == "" ||
+		mediaType == "application/json" ||
+		mediaType == "text/json" ||
+		strings.HasSuffix(mediaType, "+json")
+}
+
+// IsMediaTypeLabel reports whether a Content-Type value is ASCII and one RFC 9110
+// media type: type/subtype, both tokens, then parameters each a token=token or
+// token="quoted string". BodyMediaType reads only the part before ';', lowercased
+// and trimmed, while an upstream sees the value as sent; a value this refuses — a
+// list ("…form-urlencoded; a=b, application/json"), a byte lowercasing folds into
+// ASCII or trimming drops — is one the two could read apart. Allocates nothing.
+func IsMediaTypeLabel(label string) bool {
+	for i := 0; i < len(label); i++ {
+		if label[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	base, params, _ := strings.Cut(label, ";")
+	typ, sub, ok := strings.Cut(strings.TrimSpace(base), "/")
+	return ok && tokenPrefix(typ) == len(typ) && typ != "" &&
+		tokenPrefix(sub) == len(sub) && sub != "" && isMediaTypeParams(params)
+}
+
+// isMediaTypeParams reports whether s, what follows a media type's first ';', is
+// RFC 9110 parameters: *( OWS ";" OWS [ token "=" ( token / quoted-string ) ] ),
+// empty ones allowed as the grammar allows them. Spaces around '=', which the
+// grammar forbids but mime.ParseMediaType accepts, are accepted: they leave
+// nothing to read two ways.
+func isMediaTypeParams(s string) bool {
+	for {
+		s = strings.Trim(s, " \t")
+		if s == "" {
+			return true
+		}
+		if s[0] == ';' {
+			s = s[1:]
+			continue
+		}
+		name := tokenPrefix(s)
+		if name == 0 {
+			return false
+		}
+		s = strings.TrimLeft(s[name:], " \t")
+		if s == "" || s[0] != '=' {
+			return false
+		}
+		s = strings.TrimLeft(s[1:], " \t")
+		var value int
+		if s != "" && s[0] == '"' {
+			value = quotedStringPrefix(s)
+		} else {
+			value = tokenPrefix(s)
+		}
+		if value == 0 {
+			return false
+		}
+		s = strings.TrimLeft(s[value:], " \t")
+		if s != "" && s[0] != ';' {
+			return false
+		}
+	}
+}
+
+// tokenPrefix returns how many leading bytes of s are RFC 9110 token characters.
+func tokenPrefix(s string) int {
+	i := 0
+	for i < len(s) && httpguts.IsTokenRune(rune(s[i])) {
+		i++
+	}
+	return i
+}
+
+// quotedStringPrefix returns the length of the RFC 9110 quoted-string s opens with,
+// or 0 when it does not close. s is ASCII.
+func quotedStringPrefix(s string) int {
+	for i := 1; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '"':
+			return i + 1
+		case c == '\\':
+			// quoted-pair: a backslash and one HTAB, SP or visible character.
+			i++
+			if i == len(s) || (s[i] != '\t' && (s[i] < 0x20 || s[i] == 0x7f)) {
+				return 0
+			}
+		case c != '\t' && (c < 0x20 || c == 0x7f):
+			return 0
+		}
+	}
+	return 0
 }
