@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/logger"
@@ -227,12 +226,11 @@ func buildTargetURL(providerURL, path, rawQuery string) (*url.URL, error) {
 // "/gateway" segment is present in the path. Exposed so providers
 // implementing ResolveUpstream can extract the API-shaped path slice from
 // req.URL.Path without re-implementing the strip rule.
+//
+// Only a whole segment matches (see framework.AfterGatewaySegment): a mount,
+// namespace or role named "gateway-prod" or "gateways" is not the gateway.
 func PathAfterGateway(path string) (string, bool) {
-	idx := strings.Index(path, "/gateway")
-	if idx == -1 {
-		return "", false
-	}
-	return path[idx+len("/gateway"):], true
+	return framework.AfterGatewaySegment(path)
 }
 
 // resolveAcceptDefault returns the Accept value to inject when the client did

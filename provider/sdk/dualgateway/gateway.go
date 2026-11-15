@@ -12,6 +12,7 @@ import (
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/helper/copybuf"
 	"github.com/stephnangue/warden/logger"
 	"github.com/stephnangue/warden/logical"
@@ -82,11 +83,10 @@ func (b *dualgatewayBackend) snapshotState() requestSnapshot {
 // extractAPIPath strips the Warden gateway prefix from the request URL path,
 // returning only the upstream API path (e.g., "/me", "/instance/v1/zones/fr-par-1/servers").
 func extractAPIPath(fullPath string) string {
-	idx := strings.Index(fullPath, "/gateway")
-	if idx == -1 {
+	apiPath, ok := framework.AfterGatewaySegment(fullPath)
+	if !ok {
 		return fullPath
 	}
-	apiPath := fullPath[idx+len("/gateway"):]
 	if apiPath == "" {
 		return "/"
 	}

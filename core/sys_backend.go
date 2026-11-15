@@ -161,6 +161,17 @@ func (b *SystemBackend) respondCreated(data map[string]any) *logical.Response {
 	}
 }
 
+// isRoutingSegment reports whether a name is one of the words that mark a
+// gateway request's shape, <namespace>/<mount>/role/<role>/gateway/<api>. A
+// namespace, mount or role may not be named either: "gateway" is found by
+// searching the path for its first whole segment, so one named that earlier in
+// the path would be taken for the gateway, and the upstream would be sent the
+// wrong path. "role" is read at a fixed position and is reserved for one rule
+// everywhere.
+func isRoutingSegment(name string) bool {
+	return name == "role" || name == "gateway"
+}
+
 // ValidateMountPath performs custom validation for mount paths
 func ValidateMountPath(path string) error {
 	// Strip trailing slash for validation (paths typically end with /)
@@ -174,16 +185,10 @@ func ValidateMountPath(path string) error {
 		}
 	}
 
-	// Validate path doesn't contain transparent mode reserved words
-	// These paths are used for loginless/JWT-based authentication: role/{role}/gateway/...
-	// We check for path segments to avoid false positives (e.g., "myrole" should be allowed)
-	transparentReservedWords := []string{"role", "gateway"}
-	pathSegments := strings.Split(path, "/")
-	for _, segment := range pathSegments {
-		for _, reserved := range transparentReservedWords {
-			if segment == reserved {
-				return fmt.Errorf("path cannot contain reserved transparent mode segment: %s", reserved)
-			}
+	// Whole segments only: "myrole" is fine.
+	for _, segment := range strings.Split(path, "/") {
+		if isRoutingSegment(segment) {
+			return fmt.Errorf("path cannot contain reserved transparent mode segment: %s", segment)
 		}
 	}
 

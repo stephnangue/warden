@@ -886,7 +886,34 @@ func (b *StreamingBackend) initUnauthPaths() {
 // For streaming backends, this matches gateway paths: "gateway", "gateway/...",
 // "role/X/gateway", "role/X/gateway/...".
 func (b *StreamingBackend) IsTransparentPath(path string) bool {
-	return strings.HasPrefix(path, "gateway") || strings.Contains(path, "/gateway")
+	_, ok := AfterGatewaySegment(path)
+	return ok
+}
+
+// AfterGatewaySegment returns what follows the first segment of path that is
+// exactly "gateway", for an absolute request path
+// (/v1/<namespace>/<mount>/role/<role>/gateway/<api>) or a mount-relative one
+// (gateway/<api>, role/<role>/gateway/<api>). ok is false when no segment is
+// exactly "gateway": a mount, namespace or role named "gateways" or
+// "gateway-prod" is not the gateway, and a prefix match would forward the rest
+// of its name to the upstream. Mounts, namespaces and roles may not be named
+// "gateway" itself, so the first whole segment is the routed one. Allocates
+// nothing.
+func AfterGatewaySegment(path string) (string, bool) {
+	if path == "gateway" || strings.HasPrefix(path, "gateway/") {
+		return path[len("gateway"):], true
+	}
+	for from := 0; ; {
+		i := strings.Index(path[from:], "/gateway")
+		if i < 0 {
+			return "", false
+		}
+		end := from + i + len("/gateway")
+		if end == len(path) || path[end] == '/' {
+			return path[end:], true
+		}
+		from = end
+	}
 }
 
 // IsUnauthenticatedPath checks if the path matches an unauthenticated pattern.
@@ -910,11 +937,11 @@ func (b *StreamingBackend) IsUnauthenticatedPath(_ *http.Request, path string) b
 	// Normalize path: remove role/X/gateway prefix to get the actual Vault path
 	// Input: "role/provisionner/gateway/v1/pki/issuer/abc/pem"
 	// Output: "v1/pki/issuer/abc/pem"
-	if idx := strings.Index(path, "/gateway/"); idx >= 0 {
-		path = path[idx+9:] // len("/gateway/") = 9
-	} else {
-		path = strings.TrimPrefix(path, "gateway/")
-		path = strings.TrimPrefix(path, "gateway")
+	// The routed gateway segment, as the upstream path is cut: in
+	// "gateway/v1/secret/x/gateway/v1/sys/health" it is the first, not a later
+	// "/gateway/" inside the API path.
+	if rest, ok := AfterGatewaySegment(path); ok {
+		path = rest
 	}
 	path = strings.TrimPrefix(path, "/")
 

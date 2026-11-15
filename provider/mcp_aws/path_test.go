@@ -31,6 +31,12 @@ func TestPathAfterGateway(t *testing.T) {
 		// Deep tails (the AgentCore /agents/.../invocations shape).
 		{"agentcore_invocations", "role/s3-reader/gateway/agents/my-mcp/invocations", "/agents/my-mcp/invocations"},
 
+		// Only a whole segment is the gateway.
+		{"role_named_gateways", "role/gateways/gateway/tools/call", "/tools/call"},
+		{"absolute_mount_gateway_prod", "/v1/gateway-prod/role/r/gateway/tools/call", "/tools/call"},
+		{"mount_relative_gateways_prefix", "gateways/x", ""},
+		{"gateway_in_the_api_path", "gateway/x/gateway/y", "/x/gateway/y"},
+
 		// Defensive: nothing to find.
 		{"no_gateway_segment", "config", ""},
 		{"empty", "", ""},

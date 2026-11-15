@@ -245,6 +245,11 @@ func (s *RoleStore) Create(ctx context.Context, role *logical.Role) ([]string, e
 	if err != nil {
 		return nil, err
 	}
+	// Refused on create only: a role stored under one of these names before
+	// they were reserved can still be read, updated and deleted.
+	if isRoutingSegment(role.Name) {
+		return nil, logical.ErrBadRequestf("role name %q is reserved: it marks the shape of a gateway path", role.Name)
+	}
 
 	err = func() error {
 		s.mu.Lock()

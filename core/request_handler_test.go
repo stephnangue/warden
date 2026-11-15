@@ -380,6 +380,15 @@ func TestApplyRoleHeader(t *testing.T) {
 		{"empty role is a no-op", "vault/role/old/gateway/v1/secret", "", "vault/role/old/gateway/v1/secret"},
 		{"only the leftmost segment is rewritten", "vault/role/old/gateway/role/embedded/gateway/api", "new", "vault/role/new/gateway/role/embedded/gateway/api"},
 		{"role without /gateway/ suffix is a no-op", "vault/role/whatever/other", "new", "vault/role/whatever/other"},
+		// "role/a/gateway/" inside the mount name "myrole/a" is not a role
+		// segment: rewriting it would send the request to mount "myrole/new".
+		{"a mount name ending in role is not a role segment", "myrole/a/gateway/v1/secret", "new", "myrole/a/gateway/v1/secret"},
+		{"a role segment after such a mount is", "myrole/a/role/old/gateway/v1/secret", "new", "myrole/a/role/new/gateway/v1/secret"},
+		{"a role segment at the start", "role/old/gateway/v1/secret", "new", "role/new/gateway/v1/secret"},
+		// With no role segment, the first gateway is the mount's; a
+		// role/x/gateway/ after it is the upstream's API path, not Warden's.
+		{"a role segment inside the API path is left alone", "vault/gateway/v1/auth/role/old/gateway/x", "new", "vault/gateway/v1/auth/role/old/gateway/x"},
+		{"a gateway with nothing after it is left alone", "vault/role/old/gateway", "new", "vault/role/old/gateway"},
 	}
 	for _, tc := range cases {
 		tc := tc

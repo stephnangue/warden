@@ -14,7 +14,6 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -25,6 +24,7 @@ import (
 	"github.com/stephnangue/warden/credential"
 	"github.com/stephnangue/warden/credential/drivers"
 	"github.com/stephnangue/warden/credential/profiles"
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/helper/flight"
 	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/internal/namespace"
@@ -566,26 +566,32 @@ func isSigV4Authorization(authz string) bool {
 	return false
 }
 
-// roleSegmentPattern matches the canonical role/<role>/gateway/ segment that
-// appears between the mount prefix and the upstream API path in path-routed
-// requests. Only the leftmost occurrence is rewritten by applyRoleHeader.
-var roleSegmentPattern = regexp.MustCompile(`role/[^/]+/gateway/`)
-
-// applyRoleHeader rewrites the leftmost role/<role>/gateway/ segment in the
-// path to match the given role. Idempotent for paths that don't carry such a
-// segment (returned unchanged). Mount prefixes cannot contain a "role" or
-// "gateway" segment (rejected at mount-create time), so the leftmost match
-// is guaranteed to be the gateway-role segment, not part of the upstream API
-// path.
+// applyRoleHeader rewrites the role/<role>/gateway/ segments in front of the
+// routed gateway to name the given role. The routed gateway is the first
+// segment that is exactly "gateway" (mounts, namespaces and roles may not be
+// named so), and the two segments before it must be "role" and a name: the
+// "role/a/gateway/" inside a mount named "myrole/a", or a role/x/gateway/ in
+// the API path of a request with no role segment, is left alone. A path with no
+// such segment is returned unchanged.
 func applyRoleHeader(path, role string) string {
 	if role == "" {
 		return path
 	}
-	loc := roleSegmentPattern.FindStringIndex(path)
-	if loc == nil {
+	rest, ok := framework.AfterGatewaySegment(path)
+	if !ok || !strings.HasPrefix(rest, "/") {
 		return path
 	}
-	return path[:loc[0]] + "role/" + role + "/gateway/" + path[loc[1]:]
+	// before is everything ahead of the gateway segment: ".../role/<name>".
+	before := strings.TrimSuffix(path[:len(path)-len(rest)-len("gateway")], "/")
+	slash := strings.LastIndexByte(before, '/')
+	if slash < 0 || slash == len(before)-1 {
+		return path
+	}
+	head := before[:slash]
+	if head != "role" && !strings.HasSuffix(head, "/role") {
+		return path
+	}
+	return head + "/" + role + "/gateway" + rest
 }
 
 // synthesizeGatewayPath builds the canonical gateway path from a provider

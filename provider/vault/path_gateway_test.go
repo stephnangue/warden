@@ -54,6 +54,23 @@ func TestBuildTargetURL(t *testing.T) {
 			expectError:  false,
 		},
 		{
+			// Only a whole segment is the gateway: the mount's own name is not.
+			name:         "mount named gateway-prod",
+			vaultAddress: "https://vault.example.com:8200",
+			path:         "/v1/gateway-prod/role/r/gateway/secret/data/myapp",
+			rawQuery:     "",
+			expected:     "https://vault.example.com:8200/v1/secret/data/myapp",
+			expectError:  false,
+		},
+		{
+			// Its name only starts with gateway: there is no gateway segment.
+			name:         "mount named gateway-prod without a gateway segment",
+			vaultAddress: "https://vault.example.com:8200",
+			path:         "/v1/gateway-prod/config",
+			rawQuery:     "",
+			expectError:  true,
+		},
+		{
 			name:         "gateway root path",
 			vaultAddress: "https://vault.example.com:8200",
 			path:         "/v1/vault/gateway",

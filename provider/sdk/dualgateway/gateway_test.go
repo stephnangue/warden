@@ -25,6 +25,9 @@ func TestExtractAPIPath(t *testing.T) {
 		{"/provider/role/admin/gateway/cloud/project", "/cloud/project"},
 		{"/provider/gateway", "/"},
 		{"/no-gateway-here", "/no-gateway-here"},
+		// Only a whole segment is the gateway.
+		{"/gateway-prod/gateway/me", "/me"},
+		{"/provider/role/gateways/gateway/me", "/me"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {

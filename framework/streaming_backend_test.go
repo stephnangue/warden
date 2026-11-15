@@ -260,6 +260,13 @@ func TestIsUnauthenticatedPath_PathsContainingKeywords(t *testing.T) {
 			path:     "gateway/v1/gateway-internal/ca/pem",
 			expected: true,
 		},
+		{
+			// The routed gateway is the first segment: the upstream is sent
+			// /v1/secret/data/gateway/v1/pki/ca/pem, not an unauthenticated path.
+			name:     "a later gateway segment in the API path is not the routed one",
+			path:     "gateway/v1/secret/data/gateway/v1/pki/ca/pem",
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -468,6 +475,54 @@ func BenchmarkIsUnauthenticatedPath_NoMatch(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		backend.IsUnauthenticatedPath(nil, "role/provisionner/gateway/v1/secret/data/mykey")
 	}
+}
+
+// Only a segment that is exactly "gateway" is the gateway, in an absolute or a
+// mount-relative path; a mount, namespace or role whose name starts with it is
+// not, and a prefix match would forward the rest of that name upstream.
+func TestAfterGatewaySegment(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		rest string
+		ok   bool
+	}{
+		{"gateway", "", true},
+		{"gateway/", "/", true},
+		{"gateway/v1/x", "/v1/x", true},
+		{"role/r/gateway/v1/x", "/v1/x", true},
+		{"/v1/aws/gateway", "", true},
+		{"/v1/aws/role/r/gateway/v1/x", "/v1/x", true},
+		{"/v1/team/aws/role/r/gateway/v1/x", "/v1/x", true},
+		{"/v1/gateway-prod/role/r/gateway/v1/x", "/v1/x", true},
+		{"/v1/aws/role/gateways/gateway/v1/x", "/v1/x", true},
+		{"/v1/gateways/aws/gateway/v1/x", "/v1/x", true},
+		{"role/gateway.v2/gateway/v1/x", "/v1/x", true},
+		{"/v1/aws/gateway/v1/gateway/y", "/v1/gateway/y", true},
+		{"gateway/x/gateway/y", "/x/gateway/y", true},
+		{"gatewayx/gateway/y", "/y", true},
+		{"/v1/aws/gateway/", "/", true},
+		{"/gateway", "", true},
+		{"x/gatewayfoo/gateway", "", true},
+		{"gateways", "", false},
+		{"gateway-prod/x", "", false},
+		{"/v1/aws/gatewayx", "", false},
+		{"/v1/aws/config", "", false},
+		{"", "", false},
+	} {
+		rest, ok := AfterGatewaySegment(tc.path)
+		assert.Equal(t, tc.ok, ok, tc.path)
+		assert.Equal(t, tc.rest, rest, tc.path)
+	}
+
+	b := &StreamingBackend{Backend: &Backend{BackendType: "test"}}
+	assert.True(t, b.IsTransparentPath("role/r/gateway/v1/x"))
+	assert.True(t, b.IsTransparentPath("gateway"))
+	assert.False(t, b.IsTransparentPath("gateways/x"), "a name starting with gateway is not a gateway path")
+	assert.False(t, b.IsTransparentPath("config/gateway_settings"))
+
+	assert.Zero(t, testing.AllocsPerRun(100, func() {
+		_, _ = AfterGatewaySegment("/v1/gateway-prod/role/r/gateway/v1/x")
+	}))
 }
 
 func TestStreamingBackend_StreamBodyLimit(t *testing.T) {

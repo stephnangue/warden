@@ -67,6 +67,41 @@ func TestNamespaceStore_SetNamespace_InvalidPath(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestNamespaceStore_RoutingSegmentsReserved: "gateway" and "role" mark the shape
+// of a gateway path, and a namespace in the URL comes before it, so a new
+// namespace may use neither as a segment. One stored under such a path before
+// they were reserved still loads and can be updated.
+func TestNamespaceStore_RoutingSegmentsReserved(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	nsModify(t, core, ctx, "team", nil)
+
+	for _, path := range []string{"gateway/", "role/", "team/gateway/", "team/role/"} {
+		err := core.namespaceStore.SetNamespace(ctx, &namespace.Namespace{Path: path})
+		require.Error(t, err, path)
+		assert.Equal(t, http.StatusBadRequest, wlogical.GetErrorCode(err), path)
+	}
+	for _, path := range []string{"gateways/", "my-gateway/", "roles/", "team/gateway-x/"} {
+		assert.NoError(t, core.namespaceStore.SetNamespace(ctx, &namespace.Namespace{Path: path}), path)
+	}
+
+	legacy := &namespace.Namespace{Path: "gateway/", ID: "Lgcy01", UUID: "00000000-0000-4000-8000-0000000000a1"}
+	require.NoError(t, core.namespaceStore.writeNamespace(ctx, core.barrier, namespace.RootNamespace, legacy))
+	reloaded := nsReload(t, core)
+	got, err := reloaded.GetNamespaceByPath(ctx, "gateway/")
+	require.NoError(t, err)
+	require.NotNil(t, got, "a namespace stored before the rule still loads")
+	_, err = reloaded.ModifyNamespaceByPath(ctx, "gateway", func(ctx context.Context, ns *namespace.Namespace) (*namespace.Namespace, error) {
+		ns.CustomMetadata = map[string]string{"env": "legacy"}
+		return ns, nil
+	})
+	require.NoError(t, err, "and can be updated")
+	_, err = reloaded.ModifyNamespaceByPath(ctx, "gateway/team", func(ctx context.Context, ns *namespace.Namespace) (*namespace.Namespace, error) {
+		return ns, nil
+	})
+	assert.Equal(t, http.StatusBadRequest, wlogical.GetErrorCode(err), "but gains no child: its URL would carry the segment too")
+}
+
 // TestNamespaceStore_GetNamespace tests getting namespace by UUID
 func TestNamespaceStore_GetNamespace(t *testing.T) {
 	core := createTestCore(t)
