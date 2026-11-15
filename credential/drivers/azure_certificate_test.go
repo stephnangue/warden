@@ -449,7 +449,7 @@ func TestAzureCertificate_OnBehalfOf(t *testing.T) {
 	assert.NotContains(t, fmt.Sprint(data, meta), "RT-must-not-leak")
 
 	form := entra.lastForm(t)
-	assert.Equal(t, oboGrantType, form.Get("grant_type"))
+	assert.Equal(t, "urn:ietf:params:oauth:grant-type:jwt-bearer", form.Get("grant_type"))
 	assert.Equal(t, user, form.Get("assertion"), "the user's token is only ever the assertion")
 	assert.Equal(t, oboRequestedTokenUse, form.Get("requested_token_use"))
 	assert.Empty(t, form.Get("client_secret"))

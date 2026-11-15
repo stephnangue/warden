@@ -31,7 +31,6 @@ import (
 const (
 	azureMintMethodOnBehalfOf = "on_behalf_of"
 
-	oboGrantType         = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 	oboRequestedTokenUse = "on_behalf_of"
 	oboOperation         = "acquireOnBehalfOf"
 	oboRefreshBuffer     = 2 * time.Minute
@@ -163,7 +162,7 @@ func (d *AzureDriver) mintOnBehalfOfWith(ctx context.Context, spec *credential.C
 	scope := azureScope(resourceURI)
 
 	form := url.Values{}
-	form.Set("grant_type", oboGrantType)
+	form.Set("grant_type", grantTypeJWTBearer)
 	form.Set("client_id", clientID)
 	form.Set("assertion", inputs.SubjectToken)
 	form.Set("requested_token_use", oboRequestedTokenUse)

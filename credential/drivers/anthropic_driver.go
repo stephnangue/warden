@@ -31,10 +31,6 @@ const defaultAnthropicURL = "https://api.anthropic.com"
 // anthropicTokenPath is the token endpoint, relative to the API base URL.
 const anthropicTokenPath = "/v1/oauth/token"
 
-// anthropicJWTBearerGrant is the RFC 7523 grant: the assertion is itself the
-// authorization grant, so the request carries no client authentication.
-const anthropicJWTBearerGrant = "urn:ietf:params:oauth:grant-type:jwt-bearer"
-
 // anthropicRefreshBuffer is how long before a token's expiry its lease ends. The
 // credential cache serves an entry until the lease elapses and only then mints
 // again, so without this a request arriving in a token's last second would go
@@ -283,12 +279,13 @@ func (d *AnthropicDriver) target(spec *credential.CredSpec) (anthropicTarget, er
 	return t, nil
 }
 
-// grant builds the RFC 7523 token request. workspace_id is sent only when set:
-// Anthropic requires it only for a federation rule covering more than one
-// workspace, and otherwise acts in the rule's own.
+// grant builds the RFC 7523 token request. The assertion is itself the
+// authorization grant, so the request carries no client authentication.
+// workspace_id is sent only when set: Anthropic requires it only for a federation
+// rule covering more than one workspace, and otherwise acts in the rule's own.
 func (t anthropicTarget) grant(assertion string) map[string]string {
 	g := map[string]string{
-		"grant_type":         anthropicJWTBearerGrant,
+		"grant_type":         grantTypeJWTBearer,
 		"assertion":          assertion,
 		"organization_id":    t.organizationID,
 		"federation_rule_id": t.federationRuleID,

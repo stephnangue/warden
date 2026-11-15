@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,4 +205,117 @@ func TestExchangedTokenLease_DefaultTokenTTL(t *testing.T) {
 		assert.Error(t, err, "default_token_ttl=%s", bad)
 	}
 	assert.NoError(t, credential.ValidateSchema(credential.NewConfig(map[string]string{defaultTokenTTLKey: "90s"}), defaultTokenTTLField()))
+}
+
+// fakeAssertionSigner signs by spelling out the claim it was handed, so a test can
+// tell one attempt's assertion from the next.
+type fakeAssertionSigner struct {
+	mu    sync.Mutex
+	calls int
+	err   error
+}
+
+func (s *fakeAssertionSigner) SignJWT(_ context.Context, claims map[string]interface{}) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	if s.err != nil {
+		return "", s.err
+	}
+	return fmt.Sprintf("signed.%v", claims["attempt"]), nil
+}
+
+// attemptClaims numbers each claim set it builds, as a fresh iat would differ.
+func attemptClaims() func() map[string]interface{} {
+	n := 0
+	return func() map[string]interface{} {
+		n++
+		return map[string]interface{}{"attempt": n}
+	}
+}
+
+func TestPostJWTBearerGrant_SendsAssertionGrant(t *testing.T) {
+	server, req, body := oauthTokenCapture(t, http.StatusOK, `{"access_token":"tok","expires_in":3600}`)
+	signer := &fakeAssertionSigner{}
+
+	resp, err := postJWTBearerGrant(context.Background(), server.Client(), server.URL, signer, attemptClaims())
+	require.NoError(t, err)
+	assert.Equal(t, "tok", resp.AccessToken)
+	assert.Equal(t, 3600, resp.ExpiresIn)
+
+	assert.Equal(t, "application/x-www-form-urlencoded", req.Header.Get("Content-Type"))
+	form, err := url.ParseQuery(string(*body))
+	require.NoError(t, err)
+	assert.Equal(t, url.Values{
+		"grant_type": {"urn:ietf:params:oauth:grant-type:jwt-bearer"},
+		"assertion":  {"signed.1"},
+	}, form, "the grant carries the assertion and nothing else")
+}
+
+func TestPostJWTBearerGrant_SignsAfreshForEachAttempt(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		mu.Lock()
+		seen = append(seen, r.PostForm.Get("assertion"))
+		first := len(seen) == 1
+		mu.Unlock()
+		if first {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"access_token":"tok"}`))
+	}))
+	t.Cleanup(server.Close)
+	signer := &fakeAssertionSigner{}
+
+	_, err := postJWTBearerGrant(context.Background(), server.Client(), server.URL, signer, attemptClaims())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"signed.1", "signed.2"}, seen,
+		"a retry presents a newly signed assertion, never the one the server may have recorded")
+	assert.Equal(t, 2, signer.calls)
+}
+
+func TestPostJWTBearerGrant_ReadsTheErrorCodeOnA403(t *testing.T) {
+	body := `{"error":"access_denied","error_description":"Requested client not authorized."}`
+	server, _, _ := oauthTokenCapture(t, http.StatusForbidden, body)
+
+	_, err := postJWTBearerGrant(context.Background(), server.Client(), server.URL, &fakeAssertionSigner{}, attemptClaims())
+	var tee *tokenEndpointError
+	require.True(t, errors.As(err, &tee), "want a classified tokenEndpointError, got %T", err)
+	assert.Equal(t, http.StatusForbidden, tee.status)
+	assert.Equal(t, "access_denied", tee.code, "a 403 refusal keeps the code an operator acts on")
+	status, ok := credential.UpstreamStatus(fmt.Errorf("mint: %w", err))
+	assert.True(t, ok)
+	assert.Equal(t, http.StatusForbidden, status)
+
+	// The other token posters still read only the RFC 6749 statuses: a 403 stays
+	// a status-only failure for them, exactly as before.
+	_, err = postOAuthTokenForm(context.Background(), server.Client(), server.URL, url.Values{}, nil)
+	require.True(t, errors.As(err, &tee))
+	assert.Equal(t, http.StatusForbidden, tee.status)
+	assert.Empty(t, tee.code)
+}
+
+func TestPostJWTBearerGrant_SigningFailureSendsNothing(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+	}))
+	t.Cleanup(server.Close)
+	signer := &fakeAssertionSigner{err: fmt.Errorf("signing key gone: %w", credential.ErrChainedSecretRejected)}
+
+	_, err := postJWTBearerGrant(context.Background(), server.Client(), server.URL, signer, attemptClaims())
+	require.ErrorIs(t, err, credential.ErrChainedSecretRejected, "the signer's sentinel survives")
+	var tee *tokenEndpointError
+	assert.False(t, errors.As(err, &tee), "nothing was sent, so it is not a token-endpoint failure")
+	assert.Zero(t, hits.Load())
+}
+
+func TestPostJWTBearerGrant_RefusesAnAnswerWithoutAToken(t *testing.T) {
+	server, _, _ := oauthTokenCapture(t, http.StatusOK, `{"token_type":"Bearer","expires_in":3600}`)
+
+	_, err := postJWTBearerGrant(context.Background(), server.Client(), server.URL, &fakeAssertionSigner{}, attemptClaims())
+	assert.ErrorIs(t, err, errNoAccessToken)
 }

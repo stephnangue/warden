@@ -164,6 +164,11 @@ func GetErrorCode(err error) int {
 	// 400 a 403 that no client acts on; core pairs this with the challenge.
 	case errors.Is(err, credential.ErrUserChallenge):
 		return http.StatusUnauthorized
+	// A verified user the spec may not act for. Checked before the
+	// credential-issue rule below so a refusal decided locally, which carries
+	// no upstream status, is the 403 it is rather than a 500.
+	case errors.Is(err, credential.ErrUserNotAllowed):
+		return http.StatusForbidden
 	}
 	// A credential that could not be issued answers with the status its
 	// cause calls for: a refusal by the upstream is not the server error it
