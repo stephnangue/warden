@@ -30,6 +30,16 @@ type Dispatch struct {
 	// UpstreamURL overrides providerURL for this request.
 	UpstreamURL string
 
+	// DropSegments is how many leading segments of the path after "/gateway"
+	// address the upstream rather than belong to it — a host named in the path,
+	// say — and are not forwarded. The rest of the authorized path is forwarded
+	// as it is, so a provider can shorten it but never forward another. A path
+	// with fewer segments fails the request, and so does a gateway path whose
+	// "/gateway" cut is ambiguous (a namespace, mount or role named "gateway"
+	// before it), since the dropped segments might then not be the ones the
+	// provider read. UpstreamURL should be built from the dropped segments.
+	DropSegments int
+
 	// ExtractCredentials overrides Spec.ExtractCredentials for this request.
 	ExtractCredentials CredentialExtractor
 
@@ -182,15 +192,26 @@ type ProviderSpec struct {
 	// gateway. RewriteResponse decides per request (state as for ResolveUpstream:
 	// read, never mutate); when it returns true and Warden knows its external base
 	// URL, the gateway asks the upstream for an uncompressed body and hands the
-	// response to ModifyResponse with a RewriteContext. Both must be set for
-	// either to take effect; a provider that sets neither pays nothing.
+	// response to ModifyResponse with a RewriteContext (see RewriteWithoutPrefix
+	// for when it does not). Both must be set for either to take effect; a
+	// provider that sets neither pays nothing.
 	//
 	// ModifyResponse runs on the proxy's response path for every rewritten
-	// request, concurrently, so it must be safe for concurrent use and should fail
-	// open: a body it cannot rewrite is better passed through than refused. An
-	// error it returns is answered by the proxy as a 502.
+	// request, concurrently, so it must be safe for concurrent use. A body it
+	// cannot rewrite is usually better passed through than refused; an error it
+	// returns is answered by the proxy as a 502. It is not called on a response
+	// an MCP list filter handles, so it is no enforcement point for MCP lists.
 	RewriteResponse func(r *http.Request, state map[string]any) bool
 	ModifyResponse  func(resp *http.Response, rc RewriteContext) error
+
+	// RewriteWithoutPrefix has ModifyResponse run even when Warden's external
+	// address cannot be determined, with an empty RewriteContext.Prefix, so the
+	// provider decides what an unrewritable response means — refusing one that
+	// would hand the client an upstream URL it reaches around Warden, say. Off,
+	// such a response passes through untouched and costs nothing. With an empty
+	// prefix the body is not asked for uncompressed: only the status and headers
+	// can be relied on.
+	RewriteWithoutPrefix bool
 
 	// GetAuthRoleFromRequest optionally extracts the auth role from request
 	// context. The shared httpproxy backend wires this into the core's
@@ -316,6 +337,11 @@ func ValidateSpec(spec *ProviderSpec) error {
 	}
 	if spec.ExtractCredentials == nil {
 		return fmt.Errorf("provider spec ExtractCredentials is required")
+	}
+	// A spec relying on it to refuse what it cannot rewrite would otherwise
+	// refuse nothing.
+	if spec.RewriteWithoutPrefix && (spec.RewriteResponse == nil || spec.ModifyResponse == nil) {
+		return fmt.Errorf("provider spec RewriteWithoutPrefix needs RewriteResponse and ModifyResponse")
 	}
 	return nil
 }

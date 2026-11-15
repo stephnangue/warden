@@ -14,6 +14,11 @@ type RewriteContext struct {
 	// it, through "/gateway" and without a trailing slash — for example
 	// https://warden.example.com/v1/team-a/msgraph/role/m365/gateway. An upstream
 	// URL rewritten onto it routes back through Warden under the same role.
+	//
+	// It is empty only for a spec that set RewriteWithoutPrefix, when the
+	// external address cannot be determined: none is configured, it could not be
+	// read, or the request path is not in a gateway shape. The body may then be
+	// compressed; only the status and headers can be relied on.
 	Prefix string
 
 	// MaxBodySize bounds how much of a response the hook may buffer.
