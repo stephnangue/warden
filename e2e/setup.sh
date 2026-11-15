@@ -166,8 +166,10 @@ echo "[3/10] Building Warden..."
 cd "$PROJECT_ROOT"
 mkdir -p "$BIN_DIR"
 # warden_e2e_graph_hosts lets the msgraph provider's graph_url name a local stub
-# (provider/msgraph/hosts_e2e.go), so Graph link rewriting runs end to end.
-go build -tags warden_e2e_graph_hosts -o "$BIN_DIR/warden" .
+# (provider/msgraph/hosts_e2e.go), so Graph link rewriting runs end to end;
+# warden_e2e_gws_hosts does the same for the gws provider's gws_url
+# (provider/gws/hosts_e2e.go).
+go build -tags "warden_e2e_graph_hosts warden_e2e_gws_hosts" -o "$BIN_DIR/warden" .
 echo "Warden built at $BIN_DIR/warden"
 
 # Generate seal key (32 bytes for AES-256-GCM-96) if it doesn't exist
@@ -574,6 +576,18 @@ curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
   -H "Content-Type: application/json" \
   -d '{"client_id":"wid:root:e2e:impersonated-agent","client_name":"E2E Agent-Shaped User","client_secret":"agent-shaped-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post"}' \
   >/dev/null 2>&1 && echo "  [OK] wid:root:e2e:impersonated-agent" || echo "  [SKIP] wid:root:e2e:impersonated-agent (already exists?)"
+
+# Users addressed by email, for the gws (Google Workspace) rows. A
+# client_credentials token's sub is its client_id, so naming a client after an
+# address gives the user leg a verified address the delegation acts as. alice
+# and bob are in the delegated domain; ghost is in it but unknown to the fake
+# Google; eve is outside it.
+for gws_user in alice@gws.e2e.test bob@gws.e2e.test ghost@gws.e2e.test eve@other.e2e.test; do
+  curl -s -X POST "$HYDRA_ADMIN/admin/clients" \
+    -H "Content-Type: application/json" \
+    -d '{"client_id":"'"$gws_user"'","client_name":"E2E GWS User","client_secret":"gws-user-secret","grant_types":["client_credentials"],"response_types":[],"scope":"api:read api:write","audience":["warden-e2e"],"token_endpoint_auth_method":"client_secret_post"}' \
+    >/dev/null 2>&1 && echo "  [OK] $gws_user" || echo "  [SKIP] $gws_user (already exists?)"
+done
 
 # Verify JWT issuance works
 echo "  Verifying JWT issuance..."
