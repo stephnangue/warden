@@ -623,7 +623,8 @@ func setupIDJAG(t *testing.T, s *idjagServers, sourceConfig, specConfig map[stri
 // The IdP is asked for an ID-JAG with the scope and resource it decides on, as the
 // client the subject token was issued to; the resource authorization server is sent
 // that ID-JAG and nothing else, by the client the ID-JAG names; the upstream receives
-// what the redemption returned; and the audit names the agent and both clients.
+// what the redemption returned; and the audit names the agent, both clients, the
+// scope issued and the ID-JAG redeemed.
 //
 // The subject here is the e2e agent's Hydra token, labelled id_token: what the row
 // proves is the shape of the two requests, not that Hydra issues ID tokens.
@@ -673,8 +674,9 @@ func TestIDJAG_EachLegAsTheDraftAsks(t *testing.T) {
 		t.Errorf("the upstream received %v, want [%s]", injected, want)
 	}
 
-	// The credential's audit names whom it was minted for and the client each leg
-	// authenticated as. Audit writes trail the response, so the entry is waited for.
+	// The credential's audit names whom it was minted for, the client each leg
+	// authenticated as, the scope issued and the ID-JAG redeemed. Audit writes trail
+	// the response, so the entry is waited for.
 	node := h.NodeNumberForPort(leaderPort)
 	var md map[string]string
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline) && md == nil; {
@@ -690,7 +692,14 @@ func TestIDJAG_EachLegAsTheDraftAsks(t *testing.T) {
 	if md == nil {
 		t.Fatal("no audited credential for the request")
 	}
-	for key, want := range map[string]string{"subject": txAgentA, "client_id": idjagIdPClient, "resource_client_id": idjagResourceClient} {
+	redeemedJTI, _ := jwtPart(ras[0].Get("assertion"), 1)["jti"].(string)
+	if redeemedJTI == "" {
+		t.Fatal("the redeemed ID-JAG carries no jti")
+	}
+	for key, want := range map[string]string{
+		"subject": txAgentA, "client_id": idjagIdPClient, "resource_client_id": idjagResourceClient,
+		"scope": idjagScope, "id_jag_jti": redeemedJTI,
+	} {
 		if md[key] != want {
 			t.Errorf("audited %s = %q, want %q", key, md[key], want)
 		}

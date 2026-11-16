@@ -777,11 +777,12 @@ func (d *TokenExchangeDriver) mintExchange(ctx context.Context, spec *credential
 	}
 
 	var (
-		resp *oauth2TokenResponse
-		err  error
+		resp     *oauth2TokenResponse
+		redeemed idJAGRedemption
+		err      error
 	)
 	if credential.GetString(d.credSource.Config, "grant", tokenExchangeGrantRFC8693) == tokenExchangeGrantIDJAG {
-		resp, err = d.mintIDJAG(ctx, spec, inputs, clients)
+		resp, redeemed, err = d.mintIDJAG(ctx, spec, inputs, clients)
 	} else {
 		resp, err = d.exchangeOnce(ctx, spec, inputs, clients.idp)
 	}
@@ -792,7 +793,7 @@ func (d *TokenExchangeDriver) mintExchange(ctx context.Context, spec *credential
 		return nil, nil, 0, "", fmt.Errorf("token_exchange: token response missing access_token")
 	}
 
-	return accessTokenRawData(resp), d.subjectMetadata(resp, inputs, clients), exchangedTokenLease(resp.ExpiresIn, d.credSource.Config, spec), "", nil
+	return accessTokenRawData(resp), d.subjectMetadata(resp, inputs, clients, redeemed), exchangedTokenLease(resp.ExpiresIn, d.credSource.Config, spec), "", nil
 }
 
 // exchangeOnce performs a single-hop exchange (rfc8693 or jwt_bearer), authenticating
@@ -912,18 +913,18 @@ func (d *TokenExchangeDriver) postWithClientAuth(ctx context.Context, call token
 // retries already cover a failing IdP, and trying it again inside each of them would
 // multiply the calls. A retry the resource authorization server asked for with a 429
 // costs a new ID-JAG too, since an attempt cannot tell that answer from a lost one.
-func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, clients tokenClients) (*oauth2TokenResponse, error) {
+func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, clients tokenClients) (*oauth2TokenResponse, idJAGRedemption, error) {
 	cfg := d.credSource.Config
 	// A client that cannot authenticate at all fails the mint before an ID-JAG is asked
 	// for, rather than after one is issued and wasted.
 	for _, c := range []*tokenClient{clients.idp, clients.redeemer()} {
 		if err := c.unusable(); err != nil {
-			return nil, err
+			return nil, idJAGRedemption{}, err
 		}
 	}
 	leg1, err := d.idJAGRequestForm(spec, inputs)
 	if err != nil {
-		return nil, err
+		return nil, idJAGRedemption{}, err
 	}
 	// A refused subject asks the user to sign in again only when the user's token is the
 	// one thing the request could be refused for: a request that also carries an actor
@@ -933,7 +934,7 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 		!leg1.Has("actor_token") && len(credential.GetPrefixed(cfg, "token_param.")) == 0
 	jag, scope, err := d.requestIDJAG(ctx, leg1, challenge, clients.idp, oauth2MaxRetryAttempts)
 	if err != nil {
-		return nil, err
+		return nil, idJAGRedemption{}, err
 	}
 
 	// Leg 2: redeem the ID-JAG at the resource authorization server, for the scope the
@@ -947,7 +948,8 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 		classify: classifyIDJAGRedeemError,
 		rejected: "id_jag: the resource authorization server rejected the chained client credential",
 	}
-	return d.postWithClientAuth(ctx, redeem, func() (url.Values, error) {
+	var jti string
+	resp, err := d.postWithClientAuth(ctx, redeem, func() (url.Values, error) {
 		if jag == "" {
 			if d.logger != nil {
 				d.logger.Debug("requesting a new ID-JAG for a retried redemption",
@@ -969,9 +971,39 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 		if scope != "" {
 			form.Set("scope", scope)
 		}
+		// Attempts run one after another, so once the mint succeeds this names the
+		// ID-JAG the last attempt redeemed.
+		jti = idJAGID(jag)
 		jag = ""
 		return form, nil
 	}, clients.redeemer())
+	if err != nil {
+		return nil, idJAGRedemption{}, err
+	}
+	// An answer may leave out a scope identical to the one requested (RFC 6749 §5.1).
+	if resp.Scope != "" {
+		scope = resp.Scope
+	}
+	return resp, idJAGRedemption{jti: jti, scope: scope}, nil
+}
+
+// idJAGRedemption is what a mint's audit records of the ID-JAG it redeemed.
+type idJAGRedemption struct {
+	// jti is the redeemed ID-JAG's jti, empty when it carries none. The IdP and the
+	// resource authorization server log the ID-JAG under it, so it ties the audit
+	// entry to theirs.
+	jti string
+	// scope is the scope of the issued token, empty when neither the request nor
+	// the answer named one.
+	scope string
+}
+
+// idJAGID returns an ID-JAG's jti, or "" when it carries none. The ID-JAG is not
+// verified here: the resource authorization server verifies it, and the audit
+// only names what Warden sent.
+func idJAGID(jag string) string {
+	jti, _ := scalarClaim(unverifiedJWTClaims(jag)["jti"])
+	return jti
 }
 
 // requestIDJAG asks the IdP for an ID-JAG (leg 1) with form, as client, trying at most
@@ -1380,12 +1412,21 @@ func (d *TokenExchangeDriver) resolve(spec *credential.CredSpec, key string) str
 // like the subject it is a claim read, never a raw token byte, so no secret is
 // recorded. An id_jag exchange also records the client each leg authenticated as —
 // client_id at the IdP, resource_client_id at the resource authorization server —
-// since the ID-JAG names the latter and a mismatch is the first thing to look for.
-func (d *TokenExchangeDriver) subjectMetadata(resp *oauth2TokenResponse, inputs *credential.ExchangeInputs, clients tokenClients) map[string]interface{} {
+// since the ID-JAG names the latter and a mismatch is the first thing to look for;
+// the scope of the issued token, since the IdP may grant less than was asked for;
+// and the redeemed ID-JAG's jti, the one identifier the IdP's and the resource
+// authorization server's logs share with this one.
+func (d *TokenExchangeDriver) subjectMetadata(resp *oauth2TokenResponse, inputs *credential.ExchangeInputs, clients tokenClients, redeemed idJAGRedemption) map[string]interface{} {
 	meta := map[string]interface{}{}
 	if credential.GetString(d.credSource.Config, "grant", tokenExchangeGrantRFC8693) == tokenExchangeGrantIDJAG {
 		meta["client_id"] = clients.idp.id
 		meta["resource_client_id"] = clients.redeemer().id
+		if redeemed.scope != "" {
+			meta["scope"] = redeemed.scope
+		}
+		if redeemed.jti != "" {
+			meta["id_jag_jti"] = redeemed.jti
+		}
 	}
 	claims := unverifiedJWTClaims(resp.AccessToken)
 	if claims == nil {

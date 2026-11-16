@@ -210,11 +210,12 @@ func TestTokenExchange_IDJAGRetriesPresentFreshAssertions(t *testing.T) {
 			}, &http.Client{})
 			spec := &credential.CredSpec{Config: credential.NewConfig(map[string]string{"audience": "https://resource-as.example.com"})}
 
-			rawData, _, _, _, err := d.MintCredentialWithExchangeFromSecret(context.Background(), spec,
+			rawData, meta, _, _, err := d.MintCredentialWithExchangeFromSecret(context.Background(), spec,
 				subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "u"})),
 				capabilityMaterial(kmsURL, nil))
 			require.NoError(t, err)
 			assert.Equal(t, "final", rawData["api_key"])
+			assert.Equal(t, "id-jag-2", meta["id_jag_jti"], "the audit names the ID-JAG the retry redeemed, not the one lost")
 
 			// Leg 1: a lost answer and its retry, then the ID-JAG asked for by leg 2's retry.
 			idpJTIs := idp.received()
