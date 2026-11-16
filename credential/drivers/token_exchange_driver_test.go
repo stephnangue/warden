@@ -1451,6 +1451,145 @@ func TestTokenExchangeDriver_IDJAG_ErrorsOnTheWire(t *testing.T) {
 	})
 }
 
+// The subject of an ID-JAG request is an identity assertion: the spec names its type in
+// plain words, the request carries the URN, and anything else is refused before a
+// request is sent.
+func TestTokenExchangeDriver_IDJAG_SubjectTokenType(t *testing.T) {
+	ctx := context.Background()
+	idToken := makeUnsignedJWT(map[string]interface{}{"sub": "user"})
+	jwtTyped := func(typ string) string {
+		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"` + typ + `"}`))
+		return header + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user"}`)) + ".sig"
+	}
+
+	for _, tc := range []struct{ name, set, want string }{
+		{"left out", "", credential.TokenTypeIDToken},
+		{"id_token", "id_token", credential.TokenTypeIDToken},
+		{"saml2", "saml2", credential.TokenTypeSAML2},
+		{"refresh_token", "refresh_token", credential.TokenTypeRefreshToken},
+		{"a stored URN", credential.TokenTypeIDToken, credential.TokenTypeIDToken},
+	} {
+		t.Run("sends "+tc.name, func(t *testing.T) {
+			p := newIDJAGPair(t)
+			_, _, _, _, err := p.driver(nil).MintCredentialWithExchange(ctx,
+				p.spec(map[string]string{credential.ConfigSubjectTokenType: tc.set}), subjectInputs(idToken))
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, p.leg1.Get("subject_token_type"))
+		})
+	}
+
+	for _, set := range []string{"jwt", "access_token", credential.TokenTypeJWT, credential.TokenTypeAccessToken, tokenTypeIDJAG, "id-token"} {
+		t.Run("refuses "+set, func(t *testing.T) {
+			p := newIDJAGPair(t)
+			_, _, _, _, err := p.driver(nil).MintCredentialWithExchange(ctx,
+				p.spec(map[string]string{credential.ConfigSubjectTokenType: set}), subjectInputs(idToken))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cannot be used with grant=id_jag")
+			assert.Zero(t, p.idpCalls)
+		})
+	}
+
+	t.Run("refuses a subject Warden signs", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		_, _, _, _, err := p.driver(nil).MintCredentialWithExchange(ctx,
+			p.spec(map[string]string{credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity}), subjectInputs(idToken))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "subject_token_source=warden_identity cannot be used with grant=id_jag")
+		assert.Zero(t, p.idpCalls)
+	})
+
+	header := func(json string) string {
+		return base64.RawURLEncoding.EncodeToString([]byte(json)) + ".e30.sig"
+	}
+	for name, subject := range map[string]string{
+		"not a JWT":                               "opaque-token",
+		"two segments":                            "a.b",
+		"four segments":                           "a.b.c.d",
+		"a header that does not decode":           "!!!.e30.sig",
+		"a header that is not JSON":               header("not json"),
+		"an access token":                         jwtTyped("at+jwt"),
+		"an access token, by its full media type": jwtTyped("application/AT+JWT"),
+		"an access token, with a parameter":       jwtTyped("at+jwt; v=1"),
+		"an ID-JAG":                               jwtTyped("oauth-id-jag+jwt"),
+	} {
+		t.Run("refuses an ID token that is "+name, func(t *testing.T) {
+			p := newIDJAGPair(t)
+			_, _, _, _, err := p.driver(nil).MintCredentialWithExchange(ctx, p.spec(nil), subjectInputs(subject))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "the caller must present an ID token issued to this source's client")
+			assert.Zero(t, p.idpCalls)
+		})
+	}
+
+	for name, subject := range map[string]string{
+		"typ left out":      header(`{"alg":"RS256"}`),
+		"typ not a string":  header(`{"alg":"RS256","typ":1}`),
+		"typ in lowercase":  jwtTyped("jwt"),
+		"an encrypted one":  base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RSA-OAEP","enc":"A256GCM","typ":"JWT"}`)) + ".k.iv.ct.tag",
+		"a vendor's typ":    jwtTyped("id_token+jwt"),
+		"the plain JWT typ": idToken,
+	} {
+		t.Run("sends an ID token with "+name, func(t *testing.T) {
+			p := newIDJAGPair(t)
+			_, _, _, _, err := p.driver(nil).MintCredentialWithExchange(ctx, p.spec(nil), subjectInputs(subject))
+			require.NoError(t, err)
+			assert.Equal(t, credential.TokenTypeIDToken, p.leg1.Get("subject_token_type"))
+		})
+	}
+
+	t.Run("a refresh token is not read as a JWT", func(t *testing.T) {
+		p := newIDJAGPair(t)
+		_, _, _, _, err := p.driver(nil).MintCredentialWithExchange(ctx,
+			p.spec(map[string]string{credential.ConfigSubjectTokenType: "refresh_token"}), subjectInputs("opaque-refresh-token"))
+		require.NoError(t, err)
+		assert.Equal(t, credential.TokenTypeRefreshToken, p.leg1.Get("subject_token_type"))
+	})
+
+	t.Run("a spec-less mint sends an ID token", func(t *testing.T) {
+		// The audience then comes from the source, as for any key resolve reads.
+		p := newIDJAGPair(t)
+		_, _, _, _, err := p.driver(map[string]string{"audience": "https://resource-as.example.com"}).
+			MintCredentialWithExchange(ctx, nil, subjectInputs(idToken))
+		require.NoError(t, err)
+		assert.Equal(t, credential.TokenTypeIDToken, p.leg1.Get("subject_token_type"))
+	})
+}
+
+// A spec may name its subject and actor token types by short name under every grant;
+// the request carries the URN, and a type Warden does not know goes out as written.
+func TestTokenExchangeDriver_TokenTypeShortNames(t *testing.T) {
+	var got url.Values
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		got = r.PostForm
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "t", "expires_in": 60})
+	}))
+	defer sts.Close()
+	d := newExchangeDriver(map[string]string{"token_url": sts.URL, "client_id": "c", "client_secret": "s"}, &http.Client{})
+	mint := func(subjectType, actorType string) {
+		t.Helper()
+		inputs := &credential.ExchangeInputs{
+			SubjectToken: "subject", SubjectTokenType: subjectType,
+			ActorToken: "actor", ActorTokenType: actorType,
+		}
+		_, _, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{}, inputs)
+		require.NoError(t, err)
+	}
+
+	mint("id_token", "jwt")
+	assert.Equal(t, credential.TokenTypeIDToken, got.Get("subject_token_type"))
+	assert.Equal(t, credential.TokenTypeJWT, got.Get("actor_token_type"))
+
+	mint(credential.TokenTypeAccessToken, credential.TokenTypeJWT)
+	assert.Equal(t, credential.TokenTypeAccessToken, got.Get("subject_token_type"), "a URN goes out as it is")
+	assert.Equal(t, credential.TokenTypeJWT, got.Get("actor_token_type"))
+
+	mint("urn:example:token-type:custom", "urn:example:token-type:agent")
+	assert.Equal(t, "urn:example:token-type:custom", got.Get("subject_token_type"), "an STS-defined type goes out as written")
+	assert.Equal(t, "urn:example:token-type:agent", got.Get("actor_token_type"))
+}
+
 // A stored id_jag source that carries a field a write would now refuse is logged each
 // time its driver is built, with the endpoints that identify it.
 func TestTokenExchangeDriver_IDJAG_StoredTokenParamsWarn(t *testing.T) {

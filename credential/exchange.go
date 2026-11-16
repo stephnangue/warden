@@ -22,6 +22,30 @@ const (
 	TokenTypeSAML2        = "urn:ietf:params:oauth:token-type:saml2"
 )
 
+// tokenTypeURNPrefix opens every RFC 8693 §3 token-type URN; what follows it is the
+// type's short name.
+const tokenTypeURNPrefix = "urn:ietf:params:oauth:token-type:"
+
+// tokenTypeShortNames maps the short name of each token type above to its URN.
+var tokenTypeShortNames = map[string]string{
+	"access_token":  TokenTypeAccessToken,
+	"refresh_token": TokenTypeRefreshToken,
+	"id_token":      TokenTypeIDToken,
+	"jwt":           TokenTypeJWT,
+	"saml2":         TokenTypeSAML2,
+}
+
+// TokenTypeURN returns the RFC 8693 URN of a token type named by its short name
+// ("id_token") or by the URN itself, and false for anything else. A spec may name a
+// token type either way; the request carries the URN.
+func TokenTypeURN(name string) (string, bool) {
+	urn, ok := tokenTypeShortNames[strings.TrimPrefix(name, tokenTypeURNPrefix)]
+	if !ok || (strings.HasPrefix(name, "urn:") && name != urn) {
+		return "", false
+	}
+	return urn, true
+}
+
 // Spec-config keys that opt a credential spec into token exchange and describe
 // where the subject and actor tokens come from.
 const (
@@ -31,15 +55,16 @@ const (
 	// only), "warden_identity" mints a Warden-signed assertion of the agent, "none"
 	// (or absent) disables exchange.
 	ConfigSubjectTokenSource = "subject_token_source"
-	// ConfigSubjectTokenType overrides the subject token's RFC 8693 type
-	// (default TokenTypeJWT).
+	// ConfigSubjectTokenType overrides the subject token's RFC 8693 type, named by its
+	// short name ("id_token") or its URN (TokenTypeURN). The default is TokenTypeJWT,
+	// except for an ID-JAG request, whose subject is an ID token unless named otherwise.
 	ConfigSubjectTokenType = "subject_token_type"
 	// ConfigActorTokenSource selects the actor-token source for the delegation shape
 	// (subject_token_source=user_identity): "agent_identity" (the agent's inbound
 	// JWT), "warden_identity" (a Warden-signed assertion of the agent), or "none".
 	ConfigActorTokenSource = "actor_token_source"
-	// ConfigActorTokenType overrides the actor token's RFC 8693 type
-	// (default TokenTypeJWT).
+	// ConfigActorTokenType overrides the actor token's RFC 8693 type, named by its
+	// short name or its URN (TokenTypeURN; default TokenTypeJWT).
 	ConfigActorTokenType = "actor_token_type"
 )
 
@@ -262,13 +287,16 @@ type ExchangeInputs struct {
 	// exchanged. It may be empty until the Manager populates it when
 	// ResolveSubjectToken is set (a subject minted lazily on a cache miss).
 	SubjectToken string
-	// SubjectTokenType is the RFC 8693 §2.1 subject_token_type.
+	// SubjectTokenType is the RFC 8693 §2.1 subject_token_type as the spec names it, by
+	// short name or URN; a driver sends the URN. An ID-JAG request derives its own from
+	// the spec, since its default differs.
 	SubjectTokenType string
 	// ActorToken is the optional RFC 8693 §2.1 actor_token — the party acting
 	// on behalf of the subject (delegation).
 	ActorToken string
-	// ActorTokenType is the RFC 8693 §2.1 actor_token_type. Required when
-	// ActorToken is set, empty otherwise.
+	// ActorTokenType is the RFC 8693 §2.1 actor_token_type as the spec names it, by
+	// short name or URN; a driver sends the URN. Required when ActorToken is set, empty
+	// otherwise.
 	ActorTokenType string
 
 	// SubjectCacheIdentity, when non-empty, is the value Fingerprint() keys the
