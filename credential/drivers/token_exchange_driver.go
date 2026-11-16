@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,6 +33,27 @@ var tokenExchangeGrants = []string{tokenExchangeGrantRFC8693, tokenExchangeGrant
 // tokenTypeIDJAG is the requested_token_type for an ID-JAG assertion (leg 1 of
 // the cross-app-access flow).
 const tokenTypeIDJAG = "urn:ietf:params:oauth:token-type:id-jag"
+
+// idJAGPinnedParams are the leg-1 fields of an id_jag exchange that token_param.* may
+// not set, each with what to do instead. Together they say what the request asks for
+// and which resource authorization server the ID-JAG is for; overriding either turns it
+// into a different request. The order is the order a stored source's refusal names
+// them in.
+var idJAGPinnedParams = []struct{ key, instead string }{
+	{"requested_token_type", "Warden always asks for an ID-JAG"},
+	{"audience", "set audience instead, which names the resource authorization server"},
+}
+
+// idJAGPinned reports whether key is one of idJAGPinnedParams.
+func idJAGPinned(key string) bool {
+	return slices.ContainsFunc(idJAGPinnedParams, func(p struct{ key, instead string }) bool { return p.key == key })
+}
+
+// idJAGFirstClassParams maps a leg-1 form field to the config key that sets it.
+// token_param.* may not set these fields on a write. A stored source may still carry
+// one; it is sent only when the config key left the field empty, so it never replaces a
+// narrower value a spec sets.
+var idJAGFirstClassParams = map[string]string{"scope": "scope", "resource": "resources"}
 
 // TokenExchangeSupportsActor reports whether a token_exchange source's grant has
 // an RFC 8693 actor slot. jwt_bearer (an assertion grant) has none — the driver
@@ -64,6 +86,9 @@ type TokenExchangeDriver struct {
 	httpClient *http.Client
 	// capSigners signs with fetched signing capabilities over pooled connections.
 	capSigners *remotesign.CapabilitySigners
+	// refusal, when set, is why this source cannot mint at all. It is decided once,
+	// when the driver is built, and returned before a mint sends or signs anything.
+	refusal error
 }
 
 // TokenExchangeDriverFactory creates TokenExchangeDriver instances.
@@ -311,6 +336,26 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) er
 		if protected[key] {
 			return fmt.Errorf("token_param.%s cannot override a core token-exchange field", key)
 		}
+		if !idJAG {
+			continue
+		}
+		if err := idJAGPinnedParamError(key); err != nil {
+			return err
+		}
+		if own, ok := idJAGFirstClassParams[key]; ok {
+			return fmt.Errorf("token_param.%s is not used with grant=id_jag: set %s instead, which is sent to the IdP in the ID-JAG request", key, own)
+		}
+	}
+	return nil
+}
+
+// idJAGPinnedParamError refuses token_param.<key> on an id_jag source when key is one of
+// the fields that make the request an ID-JAG request, saying what to do instead.
+func idJAGPinnedParamError(key string) error {
+	for _, p := range idJAGPinnedParams {
+		if p.key == key {
+			return fmt.Errorf("token_param.%s cannot override the ID-JAG request with grant=id_jag: %s", key, p.instead)
+		}
 	}
 	return nil
 }
@@ -364,15 +409,68 @@ func (f *TokenExchangeDriverFactory) Create(config credential.Config, log *logge
 	if err != nil {
 		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 	}
-	driverLog := log.WithSubsystem(credential.SourceTypeTokenExchange)
-	return &TokenExchangeDriver{
+	return newTokenExchangeDriver(config, client, log.WithSubsystem(credential.SourceTypeTokenExchange)), nil
+}
+
+// newTokenExchangeDriver assembles a driver for a source's config. It is the one place a
+// driver is built, and it is rebuilt whenever its source changes, so what a stored
+// source's config decides once, rather than on every mint, is decided here.
+func newTokenExchangeDriver(config credential.Config, client *http.Client, log *logger.GatedLogger) *TokenExchangeDriver {
+	d := &TokenExchangeDriver{
 		credSource: &credential.CredSource{Type: credential.SourceTypeTokenExchange, Config: config},
-		logger:     driverLog,
+		logger:     log,
 		httpClient: client,
 		// The source's TLS settings describe its token endpoint, not the signing
 		// store, so they are not handed to the signers.
-		capSigners: remotesign.NewCapabilitySigners(driverLog, remotesign.CapabilityOptions{}),
-	}, nil
+		capSigners: remotesign.NewCapabilitySigners(log, remotesign.CapabilityOptions{}),
+		refusal:    storedIDJAGParamRefusal(config),
+	}
+	d.warnStoredIDJAGParams()
+	return d
+}
+
+// storedIDJAGParamRefusal is why an id_jag source cannot mint when it carries a pinned
+// token_param.* field, or nil. Only a source stored before the write check existed can
+// carry one. Dropping it would change what the IdP is sent without a word, and sending
+// it would make the request something other than an ID-JAG request, so the source is
+// refused until it is fixed. The first pinned field in idJAGPinnedParams order is named.
+func storedIDJAGParamRefusal(cfg credential.Config) error {
+	if credential.GetString(cfg, "grant", tokenExchangeGrantRFC8693) != tokenExchangeGrantIDJAG {
+		return nil
+	}
+	params := credential.GetPrefixed(cfg, "token_param.")
+	for _, p := range idJAGPinnedParams {
+		if _, ok := params[p.key]; ok {
+			return fmt.Errorf("id_jag: %w; remove it from the source", idJAGPinnedParamError(p.key))
+		}
+	}
+	return nil
+}
+
+// warnStoredIDJAGParams logs the token_param.* fields a stored id_jag source carries that
+// a write would now refuse, each time the driver is built: a pinned one stops every
+// mint, and a first-class one is sent only when its config key is empty. The endpoints
+// identify the source, whose name the driver is not given.
+func (d *TokenExchangeDriver) warnStoredIDJAGParams() {
+	cfg := d.credSource.Config
+	if d.logger == nil || credential.GetString(cfg, "grant", tokenExchangeGrantRFC8693) != tokenExchangeGrantIDJAG {
+		return
+	}
+	params := credential.GetPrefixed(cfg, "token_param.")
+	keys := slices.Sorted(maps.Keys(params))
+	for _, key := range keys {
+		source := []logger.TypedField{
+			logger.String("token_param", key),
+			logger.String("token_url", credential.GetString(cfg, "token_url", "")),
+			logger.String("resource_token_url", credential.GetString(cfg, "resource_token_url", "")),
+		}
+		if idJAGPinned(key) {
+			d.logger.Warn("id_jag source cannot mint: a token_param overrides the ID-JAG request; remove it from the source", source...)
+		} else if own, ok := idJAGFirstClassParams[key]; ok {
+			d.logger.Warn("id_jag source carries a token_param that is sent only when its config key is empty; set the config key instead",
+				append(source, logger.String("config_key", own))...)
+		}
+	}
 }
 
 // Type returns the driver type.
@@ -423,6 +521,9 @@ func tokenExchangeChainedAuthFromMaterial(cfg credential.Config, material creden
 // mintExchange runs the exchange for the configured grant. chained, when non-nil,
 // supplies the client credential (from credential chaining) in place of source config.
 func (d *TokenExchangeDriver) mintExchange(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, chained *chainedClientAuth) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
+	if d.refusal != nil {
+		return nil, nil, 0, "", d.refusal
+	}
 	if inputs == nil || inputs.SubjectToken == "" {
 		return nil, nil, 0, "", fmt.Errorf("token_exchange: no subject token in exchange inputs")
 	}
@@ -504,12 +605,22 @@ func (d *TokenExchangeDriver) postWithClientAuth(ctx context.Context, tokenEndpo
 // mintIDJAG runs the two-leg ID-JAG cross-app-access flow inside one mint:
 //
 //	leg 1 → token_url (home IdP): RFC 8693 token-exchange with
-//	        requested_token_type=id-jag → an ID-JAG assertion bound to the resource AS
+//	        requested_token_type=id-jag, the audience, scope and resource
+//	        indicators → an ID-JAG assertion bound to the resource AS, carrying what
+//	        the IdP granted
 //	leg 2 → resource_token_url (resource AS): RFC 7523 jwt-bearer with the ID-JAG
-//	        as the assertion → the downstream access token
+//	        as the assertion, and the scope the IdP granted → the downstream access
+//	        token
 //
-// Client auth runs on both legs (each with its own endpoint as the assertion
-// audience). Only the final access token is returned; the ID-JAG is single-use.
+// The draft has the resource authorization server read scope and resources from the
+// ID-JAG. Resources are left there, but the scope is named again: a server that
+// issues only the scope a redemption asks for, as the xaa.dev reference
+// implementation does, would otherwise issue a token with none. It is the scope the
+// IdP granted — its answer's scope, or the one asked for when the answer leaves it
+// out, which says they are the same (§4.3.4) — so it is never more than the ID-JAG
+// carries, and cannot be refused for asking more. Client auth runs on both legs
+// (each with its own endpoint as the assertion audience). Only the final access
+// token is returned; the ID-JAG is single-use.
 func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, chained *chainedClientAuth) (*oauth2TokenResponse, error) {
 	cfg := d.credSource.Config
 
@@ -530,10 +641,14 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 		leg1.Set("actor_token", inputs.ActorToken)
 		leg1.Set("actor_token_type", actorTokenType(inputs))
 	}
-	// Vendor-specific extras apply to the exchange (leg 1) at the home IdP.
-	for k, v := range credential.GetPrefixed(cfg, "token_param.") {
-		leg1.Set(k, v)
+	// The IdP decides on scope and resource indicators and writes what it grants into
+	// the ID-JAG.
+	if scope := d.resolve(spec, "scope"); scope != "" {
+		leg1.Set("scope", scope)
 	}
+	d.addResources(leg1, spec)
+	// Vendor-specific extras apply to the exchange (leg 1) at the home IdP.
+	addIDJAGExtras(leg1, cfg)
 	jag, err := d.postWithClientAuth(ctx, idpURL, credential.GetString(cfg, "issuer", ""), leg1, chained)
 	if err != nil {
 		return nil, err
@@ -546,18 +661,49 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 		return nil, fmt.Errorf("id_jag: leg 1 returned issued_token_type %q, expected %q", jag.IssuedTokenType, tokenTypeIDJAG)
 	}
 
-	// Leg 2: redeem the ID-JAG at the resource authorization server.
+	// Leg 2: redeem the ID-JAG at the resource authorization server, for the scope the
+	// IdP granted.
 	resURL := credential.GetString(cfg, "resource_token_url", "")
 	leg2 := url.Values{}
 	leg2.Set("grant_type", grantTypeJWTBearer)
 	leg2.Set("assertion", jag.AccessToken)
-	if scope := d.resolve(spec, "scope"); scope != "" {
+	if scope := grantedScope(jag, leg1); scope != "" {
 		leg2.Set("scope", scope)
 	}
-	// RFC 8707 resource indicators scope the final access token, so they belong on
-	// leg 2 (the resource-AS redemption), not leg 1 (which mints the ID-JAG).
-	d.addResources(leg2, spec)
 	return d.postWithClientAuth(ctx, resURL, credential.GetString(cfg, "resource_issuer", ""), leg2, chained)
+}
+
+// grantedScope is the scope the IdP granted an ID-JAG request: its answer's scope, or
+// the scope asked for when the answer leaves it out, which says the two are the same
+// (draft-ietf-oauth-identity-assertion-authz-grant §4.3.4).
+func grantedScope(answer *oauth2TokenResponse, request url.Values) string {
+	if answer.Scope != "" {
+		return answer.Scope
+	}
+	return request.Get("scope")
+}
+
+// addIDJAGExtras adds a source's token_param.* extras to an ID-JAG request (leg 1).
+//
+// A pinned field is never added: a source that carries one is refused before any
+// request is built (storedIDJAGParamRefusal). A first-class field is added only when its
+// config key left it empty, so it never replaces a narrower value a spec sets nor
+// collapses repeated resource indicators. A resource fallback is split like resources,
+// one indicator per value.
+func addIDJAGExtras(form url.Values, cfg credential.Config) {
+	for k, v := range credential.GetPrefixed(cfg, "token_param.") {
+		_, firstClass := idJAGFirstClassParams[k]
+		switch {
+		case idJAGPinned(k), firstClass && form.Has(k):
+			// Not sent: refused when the driver was built, or set by its config key.
+		case k == "resource":
+			for _, r := range strings.Fields(v) {
+				form.Add(k, r)
+			}
+		default:
+			form.Set(k, v)
+		}
+	}
 }
 
 // buildExchangeForm assembles the token-endpoint form for the configured grant.
@@ -713,7 +859,7 @@ func (d *TokenExchangeDriver) signAssertionWithCapability(ctx context.Context, c
 // addResources appends the source/spec's RFC 8707 resource indicators as repeated
 // `resource` form parameters. `resources` is a space-separated list of absolute
 // URIs; RFC 8707 §2 allows the parameter to appear multiple times. It is
-// grant-agnostic, so it applies to rfc8693, jwt_bearer, and the id_jag legs alike.
+// grant-agnostic, so it applies to rfc8693, jwt_bearer, and leg 1 of id_jag alike.
 func (d *TokenExchangeDriver) addResources(form url.Values, spec *credential.CredSpec) {
 	for _, r := range strings.Fields(d.resolve(spec, "resources")) {
 		form.Add("resource", r)
