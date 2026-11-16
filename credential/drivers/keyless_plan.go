@@ -291,7 +291,41 @@ func (f *TokenExchangeDriverFactory) PlanKeyless(current credential.Config, inpu
 		kind = "client assertion signing key"
 	}
 	leftovers := []credential.Leftover{{Kind: kind, ID: orUnknown(current.Get("client_id")), WhereToDelete: "retire it at the authorization server once the chained credential works"}}
-	return chainedSourcePlan(current, inputs, targetMethodClears(current, inputs, clear, "client_assertion_aud", "issuer", "resource_issuer"), leftovers), nil
+	// The IdP client's assertion settings follow its method; resource_issuer is leg 2's,
+	// which is the IdP client's only when the source names no resource client.
+	assertionKeys := []string{"client_assertion_aud", "issuer"}
+	var notes []string
+	resource := inputOr(inputs, current, "resource_client_auth")
+	if resource == "" {
+		assertionKeys = append(assertionKeys, "resource_issuer")
+		idpTarget := inputOr(inputs, current, "client_auth")
+		if idpTarget == "" {
+			idpTarget = idpClientKeys.defaultAuth
+		}
+		if credential.GetString(current, "grant", "") == tokenExchangeGrantIDJAG && isClientSecretMethod(idpTarget) {
+			notes = append(notes, "a secret-based id_jag source needs a resource client of its own, or leg 2 sends the IdP's client secret "+
+				"to the resource authorization server: pass resource_client_auth, and put that client's credential in the same payload")
+		}
+	} else {
+		// The resource client moves into the same referenced payload, and its own
+		// credential stays live at the resource authorization server until retired there.
+		clear = append(clear, "resource_client_id", "resource_client_secret", "resource_private_key", "resource_client_assertion_kid")
+		if isClientSecretMethod(resource) {
+			// A secret carries no assertion, so nothing names an audience for it.
+			clear = append(clear, "resource_client_assertion_aud", "resource_issuer")
+		}
+		if id := current.Get("resource_client_id"); id != "" || current.Get("resource_client_secret") != "" || current.Get("resource_private_key") != "" {
+			resourceKind := "resource client secret"
+			if current.Get("resource_private_key") != "" {
+				resourceKind = "resource client assertion signing key"
+			}
+			leftovers = append(leftovers, credential.Leftover{Kind: resourceKind, ID: orUnknown(id),
+				WhereToDelete: "retire it at the resource authorization server once the chained credential works"})
+		}
+	}
+	plan := chainedSourcePlan(current, inputs, targetMethodClears(current, inputs, clear, assertionKeys...), leftovers)
+	plan.Notes = append(plan.Notes, notes...)
+	return plan, nil
 }
 
 func (f *TokenExchangeDriverFactory) PlanKeylessSpec(_ string, _, _, _ credential.Config, inputs map[string]string) (*credential.KeylessSpecPlan, error) {
@@ -299,15 +333,27 @@ func (f *TokenExchangeDriverFactory) PlanKeylessSpec(_ string, _, _, _ credentia
 }
 
 func (f *TokenExchangeDriverFactory) KeylessPrerequisites(keyless credential.Config, _ []credential.PlannedSpec, _ credential.TrustEnv) []credential.Prerequisite {
+	// The resource client, when the source names one, travels in the same payload under
+	// its own field names.
+	var resource string
+	switch credential.GetString(keyless, "resource_client_auth", "") {
+	case clientAuthSecretBasic, clientAuthSecretPost:
+		resource = "; and resource_client_id and resource_client_secret for the resource authorization server"
+	case clientAuthPrivateKeyJWT:
+		resource = "; and resource_client_id and resource_private_key (with resource_client_assertion_kid or resource_kid when the resource authorization server selects keys by id)"
+	case clientAuthKMSPrivateKeyJWT:
+		resource = ", and payload.resource_client_id naming the client at the resource authorization server, " +
+			"which signs with the same key under the same kid"
+	}
 	switch credential.GetString(keyless, "client_auth", clientAuthSecretPost) {
 	case clientAuthNone:
 		return nil // no referenced secret to prepare
 	case clientAuthPrivateKeyJWT:
-		return chainedPrerequisites(keyless, "client_id and private_key (with client_assertion_kid or kid when the authorization server selects keys by id)")
+		return chainedPrerequisites(keyless, "client_id and private_key (with client_assertion_kid or kid when the authorization server selects keys by id)"+resource)
 	case clientAuthKMSPrivateKeyJWT:
-		return chainedPrerequisites(keyless, kmsSignerPayload)
+		return chainedPrerequisites(keyless, kmsSignerPayload+resource)
 	}
-	return chainedPrerequisites(keyless, "client_id and client_secret")
+	return chainedPrerequisites(keyless, "client_id and client_secret"+resource)
 }
 
 // orUnknown shows an identifier, or says it was not recorded.

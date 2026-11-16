@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stephnangue/warden/credential"
@@ -406,6 +407,57 @@ func TestKeylessPlan_TokenExchangePublicIDJAG(t *testing.T) {
 	plan, err = f.PlanKeyless(current, map[string]string{"grant": tokenExchangeGrantRFC8693})
 	require.NoError(t, err)
 	assert.Contains(t, plan.Notes[0], "already keyless")
+}
+
+// An id_jag source with a resource client moves both clients into one referenced
+// payload: both inline credentials go, both are named for retiring where they are
+// registered, and the leg 2 assertion's issuer stays with the resource client.
+func TestKeylessPlan_TokenExchangeIDJAGResourceClient(t *testing.T) {
+	f := &TokenExchangeDriverFactory{}
+	current := credential.NewConfig(map[string]string{
+		"token_url": "https://idp.example/token", "resource_token_url": "https://as.example/token", "grant": tokenExchangeGrantIDJAG,
+		"client_auth": clientAuthSecretPost, "client_id": "idp-app", "client_secret": "s",
+		"resource_client_auth": clientAuthPrivateKeyJWT, "resource_client_id": "xaa-app", "resource_private_key": testRSAPrivateKeyPEM(t),
+		"resource_client_assertion_aud": clientAssertionAudIssuer, "resource_issuer": "https://as.example",
+	})
+	require.NoError(t, f.ValidateConfig(current), "precondition: the source as it stands is valid")
+
+	plan, err := f.PlanKeyless(current, map[string]string{credential.ConfigSecretSpec: "xaa-clients"})
+	require.NoError(t, err)
+	keyless := current.WithAll(plan.Delta)
+	require.NoError(t, f.ValidateConfig(keyless), "the planned config validates: %v", plan.Delta)
+	assert.Empty(t, f.StoredSecrets(keyless))
+	assert.Equal(t, "https://as.example", keyless.Get("resource_issuer"), "leg 2's assertion still names the resource issuer")
+
+	require.Len(t, plan.Leftovers, 2)
+	assert.Equal(t, "idp-app", plan.Leftovers[0].ID)
+	assert.Equal(t, "xaa-app", plan.Leftovers[1].ID)
+	assert.Contains(t, plan.Leftovers[1].WhereToDelete, "resource authorization server")
+
+	prereqs := f.KeylessPrerequisites(keyless, nil, testTrustEnv)
+	require.Len(t, prereqs, 1)
+	assert.Contains(t, prereqs[0].Body, "resource_client_id and resource_private_key")
+
+	// Moving the resource client to a secret drops what only an assertion reads.
+	plan, err = f.PlanKeyless(current, map[string]string{credential.ConfigSecretSpec: "xaa-clients", "resource_client_auth": clientAuthSecretPost})
+	require.NoError(t, err)
+	keyless = current.WithAll(plan.Delta)
+	require.NoError(t, f.ValidateConfig(keyless), "the planned config validates: %v", plan.Delta)
+	assert.Empty(t, keyless.Get("resource_client_assertion_aud"))
+	assert.Empty(t, keyless.Get("resource_issuer"))
+
+	// A stored secret-based source with no resource client is told it needs one.
+	legacy := credential.NewConfig(map[string]string{
+		"token_url": "https://idp.example/token", "resource_token_url": "https://as.example/token", "grant": tokenExchangeGrantIDJAG,
+		"client_id": "idp-app", "client_secret": "s",
+	})
+	plan, err = f.PlanKeyless(legacy, map[string]string{credential.ConfigSecretSpec: "xaa-clients"})
+	require.NoError(t, err)
+	assert.Contains(t, strings.Join(plan.Notes, "\n"), "needs a resource client of its own")
+	plan, err = f.PlanKeyless(legacy, map[string]string{credential.ConfigSecretSpec: "xaa-clients", "resource_client_auth": clientAuthSecretPost})
+	require.NoError(t, err)
+	require.NoError(t, f.ValidateConfig(legacy.WithAll(plan.Delta)), "with a resource client the plan validates: %v", plan.Delta)
+	assert.Len(t, plan.Leftovers, 1, "only the IdP client had a credential here to retire")
 }
 
 // A certificate source goes keyless like a static one: the certificate and its key are

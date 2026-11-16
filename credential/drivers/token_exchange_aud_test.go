@@ -68,7 +68,7 @@ func TestTokenExchangeDriverFactory_ValidateConfig_AssertionAudience(t *testing.
 			"client_assertion_aud": "issuer", "issuer": "https://idp.example.com"}), "client_assertion_aud must be omitted for client_auth=none"},
 		{"an issuer nothing reads", base(map[string]string{"issuer": "https://idp.example.com"}), "issuer is read only when client_assertion_aud=issuer"},
 		{"a resource issuer nothing reads", base(with(idJAG, map[string]string{
-			"client_assertion_aud": "token_url", "resource_issuer": "https://res.example.com"})), "resource_issuer is read only when client_assertion_aud=issuer"},
+			"client_assertion_aud": "token_url", "resource_issuer": "https://res.example.com"})), "resource_issuer is read only when leg 2's client assertion names the issuer"},
 		{"issuer must be a URL", base(map[string]string{"client_assertion_aud": "issuer", "issuer": "ftp://idp.example.com"}), "issuer must use https"},
 		{"issuer over http", base(map[string]string{"client_assertion_aud": "issuer", "issuer": "http://idp.example.com"}), "issuer must use https"},
 		{"issuer over http in development", base(map[string]string{"client_assertion_aud": "issuer", "issuer": "http://127.0.0.1:8080", "tls_skip_verify": "true", "token_url": "http://127.0.0.1:8080/token"}), ""},
