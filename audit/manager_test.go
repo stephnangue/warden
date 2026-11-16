@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/logger"
+	"github.com/stephnangue/warden/logical"
 )
 
 func TestManagerParallelVsSequential(t *testing.T) {
@@ -769,4 +770,262 @@ func TestManagerParallelLogResponse(t *testing.T) {
 	if !continued {
 		t.Error("expected continue=true")
 	}
+}
+
+// gatewayAuth is the auth part of both entries of an MCP gateway request: an
+// agent whose role a static group granted, calling a tool a contract allows
+// for a user.
+func gatewayAuth() *Auth {
+	return &Auth{
+		TokenID:       "hmac-sha256:5f2c9a1b7d3e4f60718293a4b5c6d7e8f9a0b1c2d3e4f5061728394a5b6c7d8e",
+		TokenAccessor: "acc_9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+		TokenType:     logical.TokenTypeIdentity,
+		PrincipalID:   "spiffe://prod.example.com/ns/agents/sa/research-agent",
+		RoleName:      "research",
+		MountAccessor: "auth_jwt_3c1f9a2b",
+		AliasName:     "system:serviceaccount:agents:research-agent",
+		EntityKind:    "agent",
+		RoleGrantedBy: "group:research-agents",
+		RoleGroupType: string(logical.GroupTypeStatic),
+		Groups:        []string{"platform-agents", "research-agents"},
+		EntityID:      "ent_4b7a1c9e2d3f",
+		EntityName:    "research-agent",
+		GovernedBy:    "group:platform-team",
+		Policies:      []string{"default", "research-tools"},
+		PolicyResults: &PolicyResults{
+			Allowed:          true,
+			GrantingPolicies: []string{"research-tools"},
+			MCPDecision: &logical.MCPDecision{
+				Method:      "tools/call",
+				Name:        "search_issues",
+				Decision:    "allow",
+				PolicyName:  "github-contract",
+				MatchedRule: "search_*",
+				RuleType:    "allowed_tools",
+			},
+			MCPClient: &MCPClientInfo{Name: "claude-code", Version: "2.1.0"},
+		},
+		TokenTTL:    3412,
+		ExpiresAt:   1794829815,
+		NamespaceID: "root",
+		CreatedByIP: "10.42.7.19",
+		User: &UserAttribution{
+			Subject:     "alice@example.com",
+			TokenID:     "hmac-sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+			NamespaceID: "root",
+		},
+	}
+}
+
+// gatewayRequest is the request part of both entries.
+func gatewayRequest() *Request {
+	return &Request{
+		ID:          "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+		Operation:   "stream",
+		Path:        "github/role/research/gateway/mcp",
+		MountPoint:  "github/",
+		MountType:   "mcp_github",
+		MountClass:  "provider",
+		Method:      "POST",
+		ClientIP:    "10.42.7.19",
+		NamespaceID: "root",
+		Streamed:    true,
+		Transparent: true,
+	}
+}
+
+// gatewayRequestEntry is the entry logged before an MCP gateway request is
+// routed.
+func gatewayRequestEntry() *LogEntry {
+	return &LogEntry{
+		Type:      string(EntryTypeRequest),
+		Timestamp: time.Date(2026, 11, 16, 10, 30, 15, 123456789, time.UTC),
+		Request:   gatewayRequest(),
+		Auth:      gatewayAuth(),
+	}
+}
+
+// gatewayResponseEntry is the entry logged once the upstream answered: the
+// same request and auth, the response, and the credential minted for the call.
+func gatewayResponseEntry() *LogEntry {
+	return &LogEntry{
+		Type:      string(EntryTypeResponse),
+		Timestamp: time.Date(2026, 11, 16, 10, 30, 15, 187654321, time.UTC),
+		Request:   gatewayRequest(),
+		Auth:      gatewayAuth(),
+		Response: &Response{
+			StatusCode: 200,
+			MountClass: "provider",
+			Streamed:   true,
+			Credential: &Credential{
+				CredentialID: "2f1e4d3c-5b6a-4978-8695-a4b3c2d1e0f9",
+				Type:         "github_token",
+				Category:     "oauth",
+				LeaseTTL:     3600,
+				TokenID:      "hmac-sha256:5f2c9a1b7d3e4f60718293a4b5c6d7e8f9a0b1c2d3e4f5061728394a5b6c7d8e",
+				SourceName:   "github-app",
+				SourceType:   "github",
+				SpecName:     "research-readonly",
+				Data:         map[string]string{"token": "ghs_16C7e42F292c6912E7710c838347Ae178B4a"},
+				Metadata:     map[string]string{"subject": "alice@example.com"},
+			},
+			UpstreamURL: "https://api.githubcopilot.com/mcp/",
+		},
+	}
+}
+
+// discardSink accepts every entry and writes nothing.
+type discardSink struct{}
+
+func (discardSink) Write(context.Context, []byte) error { return nil }
+func (discardSink) Close() error                        { return nil }
+func (discardSink) Name() string                        { return "discard" }
+func (discardSink) Type() string                        { return "discard" }
+
+// benchFileDeviceConfig is a file device as an operator enables one, writing
+// under dir. One backup bounds the disk a long run fills.
+func benchFileDeviceConfig(dir string) map[string]any {
+	return map[string]any{
+		"file_path":   filepath.Join(dir, "audit.log"),
+		"hmac_key":    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"max_backups": 1,
+	}
+}
+
+// BenchmarkPipelineGatewayRequest measures what auditing one MCP gateway
+// request costs: its request entry and its response entry.
+//
+//   - pipeline: the manager and one file device built by the factory, as the
+//     server builds it (buffered file sink, HMAC key, default salt fields).
+//   - no-sink: the same with a sink that writes nothing, so what is left is
+//     the dispatch and the format.
+//   - format: the format alone.
+//   - sink: the buffered file sink alone, given entries already formatted.
+//
+// Each has a parallel twin: run it with -cpu 1,4,8 to see how the stage
+// scales with its callers.
+func BenchmarkPipelineGatewayRequest(b *testing.B) {
+	ctx := context.Background()
+	req, resp := gatewayRequestEntry(), gatewayResponseEntry()
+
+	// run measures once, called in turn and then from every benchmark
+	// goroutine.
+	run := func(b *testing.B, name string, setup func(b *testing.B) (once func() error)) {
+		b.Run(name, func(b *testing.B) {
+			once := setup(b)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := once(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(name+"-parallel", func(b *testing.B) {
+			once := setup(b)
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					if err := once(); err != nil {
+						b.Error(err)
+						return
+					}
+				}
+			})
+		})
+	}
+
+	// managerWith registers device with a new manager and logs both entries.
+	managerWith := func(b *testing.B, device Device) func() error {
+		log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+		mgr := NewAuditManager(log)
+		if err := mgr.RegisterDevice("bench/", device); err != nil {
+			b.Fatal(err)
+		}
+		b.Cleanup(func() { mgr.Close() })
+		return func() error {
+			if ok, err := mgr.LogRequest(ctx, req); err != nil || !ok {
+				return fmt.Errorf("LogRequest: ok=%v err=%v", ok, err)
+			}
+			if ok, err := mgr.LogResponse(ctx, resp); err != nil || !ok {
+				return fmt.Errorf("LogResponse: ok=%v err=%v", ok, err)
+			}
+			return nil
+		}
+	}
+
+	// fileDeviceConfig is the parsed configuration of the benchmark's device.
+	fileDeviceConfig := func(b *testing.B) *FileDeviceConfig {
+		conf, err := mapToFileDeviceConfig(benchFileDeviceConfig(b.TempDir()))
+		if err != nil {
+			b.Fatal(err)
+		}
+		return conf
+	}
+
+	// factoryFormat is the format the factory gives that device.
+	factoryFormat := func(b *testing.B) *JSONFormat {
+		format, warnings := jsonFormatFor(fileDeviceConfig(b))
+		if len(warnings) != 0 {
+			b.Fatalf("unexpected warnings: %q", warnings)
+		}
+		return format
+	}
+
+	run(b, "pipeline", func(b *testing.B) func() error {
+		device, err := (&FileDeviceFactory{}).Create(ctx, "bench/", "", "", benchFileDeviceConfig(b.TempDir()))
+		if err != nil {
+			b.Fatal(err)
+		}
+		return managerWith(b, device)
+	})
+
+	run(b, "no-sink", func(b *testing.B) func() error {
+		return managerWith(b, NewDevice("bench/", factoryFormat(b), discardSink{}, &DeviceConfig{Name: "bench/", Enabled: true}))
+	})
+
+	run(b, "format", func(b *testing.B) func() error {
+		format := factoryFormat(b)
+		return func() error {
+			if _, err := format.FormatRequest(ctx, req); err != nil {
+				return err
+			}
+			_, err := format.FormatResponse(ctx, resp)
+			return err
+		}
+	})
+
+	run(b, "sink", func(b *testing.B) func() error {
+		format := factoryFormat(b)
+		reqLine, err := format.FormatRequest(ctx, req)
+		if err != nil {
+			b.Fatal(err)
+		}
+		respLine, err := format.FormatResponse(ctx, resp)
+		if err != nil {
+			b.Fatal(err)
+		}
+		conf := fileDeviceConfig(b)
+		fileSink, err := NewFileSink(FileSinkConfig{
+			Path:        conf.Path,
+			RotateSize:  conf.RotateSize,
+			RotateDaily: conf.RotateDaily,
+			MaxBackups:  conf.MaxBackups,
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		sink, err := NewBufferedSink(BufferedSinkConfig{Sink: fileSink, BufferSize: conf.BufferSize, FlushPeriod: conf.FlushPeriod})
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Cleanup(func() { sink.Close() })
+		return func() error {
+			if err := sink.Write(ctx, reqLine); err != nil {
+				return err
+			}
+			return sink.Write(ctx, respLine)
+		}
+	})
 }
