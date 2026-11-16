@@ -66,7 +66,7 @@ func postJWTBearerGrant(ctx context.Context, httpClient *http.Client, tokenURL s
 			"assertion":  {assertion},
 		}, nil
 	}
-	resp, err := postOAuthTokenFormFuncReading(ctx, httpClient, tokenURL, build, nil, jwtBearerReadableStatuses)
+	resp, err := postOAuthTokenFormFuncReading(ctx, httpClient, tokenURL, build, nil, jwtBearerReadableStatuses, oauth2MaxRetryAttempts)
 	if err != nil {
 		return nil, err
 	}

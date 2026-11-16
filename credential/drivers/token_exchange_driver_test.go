@@ -1292,6 +1292,146 @@ func TestTokenExchangeDriver_IDJAG_RedeemsTheGrantedScope(t *testing.T) {
 	})
 }
 
+// Each leg's refusals read by the codes the draft profiles for that leg, so an
+// operator can tell what would fix them.
+func TestTokenExchangeDriver_IDJAG_ErrorCodes(t *testing.T) {
+	refusal := func(code string) error {
+		return &tokenEndpointError{status: http.StatusBadRequest, code: code}
+	}
+	request := classifyIDJAGRequestError(false)
+	for code, want := range map[string]string{
+		"invalid_request": "the IdP refused the subject token",
+		"invalid_grant":   "the IdP refused the subject token",
+		"access_denied":   "the IdP does not allow this client or user an ID-JAG",
+		"invalid_target":  "check audience and resources",
+		"invalid_client":  "the IdP rejected Warden's client authentication",
+		"server_error":    "requesting the ID-JAG from the IdP failed",
+	} {
+		err := request(refusal(code))
+		assert.Contains(t, err.Error(), want, code)
+		assert.NotErrorIs(t, err, credential.ErrUserChallenge, code)
+	}
+	for code, want := range map[string]string{
+		"invalid_grant":  "the resource authorization server refused the ID-JAG",
+		"access_denied":  "the resource authorization server does not allow this user or client",
+		"invalid_client": "the resource authorization server rejected Warden's client authentication",
+		"server_error":   "redeeming the ID-JAG at the resource authorization server failed",
+	} {
+		assert.Contains(t, classifyIDJAGRedeemError(refusal(code)).Error(), want, code)
+	}
+
+	// Only a refused subject that is the user's own token asks the user to sign in
+	// again; whatever else the IdP refuses, a new user token would not help.
+	err := classifyIDJAGRequestError(true)(refusal("invalid_request"))
+	assert.ErrorIs(t, err, credential.ErrUserChallenge)
+	var challenge *credential.UserChallengeError
+	require.ErrorAs(t, err, &challenge)
+	assert.Equal(t, credential.UserChallengeInvalidToken, challenge.Code)
+	assert.NotErrorIs(t, classifyIDJAGRequestError(true)(refusal("access_denied")), credential.ErrUserChallenge)
+	// invalid_grant is not the code the draft profiles for a refused subject; until an
+	// IdP shows that it means the user's token, it asks nothing of the user.
+	assert.NotErrorIs(t, classifyIDJAGRequestError(true)(refusal("invalid_grant")), credential.ErrUserChallenge)
+}
+
+func TestTokenExchangeDriver_IDJAG_ErrorsOnTheWire(t *testing.T) {
+	ctx := context.Background()
+	subject := subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "user"}))
+
+	t.Run("a 403 from the resource authorization server is read", func(t *testing.T) {
+		idp := newTokenStub(t, issuesIDJAGs)
+		res := newTokenStub(t, func(int) (int, map[string]interface{}) {
+			return http.StatusForbidden, map[string]interface{}{"error": "access_denied", "error_description": "not licensed"}
+		})
+		d := newExchangeDriver(map[string]string{
+			"token_url": idp.srv.URL, "resource_token_url": res.srv.URL,
+			"grant": tokenExchangeGrantIDJAG, "client_id": "c", "client_secret": "s",
+		}, &http.Client{})
+		_, _, _, _, err := d.MintCredentialWithExchange(ctx, &credential.CredSpec{Config: credential.NewConfig(map[string]string{
+			"audience": "https://resource-as.example.com",
+		})}, subject)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not allow this user or client")
+		assert.Contains(t, err.Error(), "not licensed")
+	})
+
+	t.Run("a refusal whose body names no OAuth2 error keeps its body", func(t *testing.T) {
+		idp := newTokenStub(t, issuesIDJAGs)
+		res := newTokenStub(t, func(int) (int, map[string]interface{}) {
+			return http.StatusForbidden, map[string]interface{}{"message": "blocked by policy"}
+		})
+		d := newExchangeDriver(map[string]string{
+			"token_url": idp.srv.URL, "resource_token_url": res.srv.URL,
+			"grant": tokenExchangeGrantIDJAG, "client_id": "c", "client_secret": "s",
+		}, &http.Client{})
+		_, _, _, _, err := d.MintCredentialWithExchange(ctx, &credential.CredSpec{Config: credential.NewConfig(map[string]string{
+			"audience": "https://resource-as.example.com",
+		})}, subject)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "blocked by policy")
+		var tee *tokenEndpointError
+		require.ErrorAs(t, err, &tee)
+		assert.Equal(t, http.StatusForbidden, tee.HTTPStatus())
+	})
+
+	t.Run("an expired user token asks the user to authenticate again", func(t *testing.T) {
+		idp := newTokenStub(t, func(int) (int, map[string]interface{}) {
+			return http.StatusBadRequest, map[string]interface{}{"error": "invalid_request", "error_description": "token expired"}
+		})
+		res := newTokenStub(t, losesFirst)
+		d := newExchangeDriver(map[string]string{
+			"token_url": idp.srv.URL, "resource_token_url": res.srv.URL,
+			"grant": tokenExchangeGrantIDJAG, "client_id": "c", "client_secret": "s",
+		}, &http.Client{})
+		spec := func(source string) *credential.CredSpec {
+			return &credential.CredSpec{Config: credential.NewConfig(map[string]string{
+				"audience": "https://resource-as.example.com", credential.ConfigSubjectTokenSource: source,
+			})}
+		}
+
+		_, _, _, _, err := d.MintCredentialWithExchange(ctx, spec(credential.SourceUserIdentity), subject)
+		assert.ErrorIs(t, err, credential.ErrUserChallenge)
+		_, _, _, _, err = d.MintCredentialWithExchange(ctx, spec(credential.SourceAgentIdentity), subject)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, credential.ErrUserChallenge, "the agent's own token is not the user's to renew")
+		assert.Zero(t, res.count())
+
+		// A request the IdP could refuse for something other than the user's token asks
+		// nothing of the user: an actor token rides along, or extras of the source's own.
+		withActor := *subject
+		withActor.ActorToken = makeUnsignedJWT(map[string]interface{}{"sub": "agent"})
+		withActor.ActorTokenType = credential.TokenTypeJWT
+		_, _, _, _, err = d.MintCredentialWithExchange(ctx, spec(credential.SourceUserIdentity), &withActor)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, credential.ErrUserChallenge, "the IdP may have refused the actor token")
+
+		withExtra := newExchangeDriver(map[string]string{
+			"token_url": idp.srv.URL, "resource_token_url": res.srv.URL,
+			"grant": tokenExchangeGrantIDJAG, "client_id": "c", "client_secret": "s",
+			"token_param.tenant": "acme",
+		}, &http.Client{})
+		_, _, _, _, err = withExtra.MintCredentialWithExchange(ctx, spec(credential.SourceUserIdentity), subject)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, credential.ErrUserChallenge, "the IdP may have refused the source's own extra")
+	})
+
+	t.Run("an answer that does not say it issued an ID-JAG is not redeemed", func(t *testing.T) {
+		idp := newTokenStub(t, func(int) (int, map[string]interface{}) {
+			return http.StatusOK, map[string]interface{}{"access_token": "something", "expires_in": 300}
+		})
+		res := newTokenStub(t, losesFirst)
+		d := newExchangeDriver(map[string]string{
+			"token_url": idp.srv.URL, "resource_token_url": res.srv.URL,
+			"grant": tokenExchangeGrantIDJAG, "client_id": "c", "client_secret": "s",
+		}, &http.Client{})
+		_, _, _, _, err := d.MintCredentialWithExchange(ctx, &credential.CredSpec{Config: credential.NewConfig(map[string]string{
+			"audience": "https://resource-as.example.com",
+		})}, subject)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "issued_token_type")
+		assert.Zero(t, res.count())
+	})
+}
+
 // A stored id_jag source that carries a field a write would now refuse is logged each
 // time its driver is built, with the endpoints that identify it.
 func TestTokenExchangeDriver_IDJAG_StoredTokenParamsWarn(t *testing.T) {
