@@ -129,7 +129,7 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) er
 
 		credential.StringField("client_auth").
 			OneOf(clientAuthSecretBasic, clientAuthSecretPost, clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT, clientAuthNone).
-			Describe("How Warden authenticates to the token endpoint; kms_private_key_jwt signs the same assertion with a key held in a KMS, reached through secret_spec; none presents no client credential (a public client identified by its subject token)").
+			Describe("How Warden authenticates to the token endpoint; kms_private_key_jwt signs the same assertion with a key held in a KMS, reached through secret_spec; none presents no client credential (a public client identified by its subject token; not with grant=id_jag)").
 			Example("client_secret_post"),
 
 		credential.StringField("client_id").
@@ -214,6 +214,9 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) er
 	if idJAG {
 		if credential.GetString(config, "resource_token_url", "") == "" {
 			return fmt.Errorf("resource_token_url is required for grant=id_jag")
+		}
+		if err := idJAGClientAuthError(config); err != nil {
+			return err
 		}
 	}
 
@@ -349,6 +352,19 @@ func (f *TokenExchangeDriverFactory) ValidateConfig(config credential.Config) er
 	return nil
 }
 
+// idJAGClientAuthError refuses an id_jag source that would not authenticate its client.
+// The IdP must authenticate the client that asks it for an ID-JAG, and refuse a request
+// that does not (draft-ietf-oauth-identity-assertion-authz-grant §4.3.3): the ID-JAG
+// names that client, and the resource authorization server redeems it only for that
+// client. A public client is therefore never an ID-JAG client.
+func idJAGClientAuthError(config credential.Config) error {
+	if credential.GetString(config, "client_auth", clientAuthSecretPost) != clientAuthNone {
+		return nil
+	}
+	return fmt.Errorf("client_auth=%s cannot be used with grant=id_jag: the IdP must authenticate the client that asks for an ID-JAG; use %s, %s, %s or %s",
+		clientAuthNone, clientAuthSecretBasic, clientAuthSecretPost, clientAuthPrivateKeyJWT, clientAuthKMSPrivateKeyJWT)
+}
+
 // idJAGPinnedParamError refuses token_param.<key> on an id_jag source when key is one of
 // the fields that make the request an ID-JAG request, saying what to do instead.
 func idJAGPinnedParamError(key string) error {
@@ -423,52 +439,58 @@ func newTokenExchangeDriver(config credential.Config, client *http.Client, log *
 		// The source's TLS settings describe its token endpoint, not the signing
 		// store, so they are not handed to the signers.
 		capSigners: remotesign.NewCapabilitySigners(log, remotesign.CapabilityOptions{}),
-		refusal:    storedIDJAGParamRefusal(config),
+		refusal:    storedIDJAGRefusal(config),
 	}
-	d.warnStoredIDJAGParams()
+	d.warnStoredIDJAG()
 	return d
 }
 
-// storedIDJAGParamRefusal is why an id_jag source cannot mint when it carries a pinned
-// token_param.* field, or nil. Only a source stored before the write check existed can
-// carry one. Dropping it would change what the IdP is sent without a word, and sending
-// it would make the request something other than an ID-JAG request, so the source is
-// refused until it is fixed. The first pinned field in idJAGPinnedParams order is named.
-func storedIDJAGParamRefusal(cfg credential.Config) error {
+// storedIDJAGRefusal is why an id_jag source stored before today's write checks cannot
+// mint, or nil. A write refuses both shapes now; a stored source reaches the driver
+// without one, so the same rules hold here, before anything is sent or signed.
+//
+// A public client is refused because the IdP must authenticate the client it issues an
+// ID-JAG to. A pinned token_param.* field is refused because dropping it would change
+// what the IdP is sent without a word, and sending it would make the request something
+// other than an ID-JAG request; the first in idJAGPinnedParams order is named.
+func storedIDJAGRefusal(cfg credential.Config) error {
 	if credential.GetString(cfg, "grant", tokenExchangeGrantRFC8693) != tokenExchangeGrantIDJAG {
 		return nil
+	}
+	if err := idJAGClientAuthError(cfg); err != nil {
+		return fmt.Errorf("this id_jag source cannot mint until it is updated: %w", err)
 	}
 	params := credential.GetPrefixed(cfg, "token_param.")
 	for _, p := range idJAGPinnedParams {
 		if _, ok := params[p.key]; ok {
-			return fmt.Errorf("id_jag: %w; remove it from the source", idJAGPinnedParamError(p.key))
+			return fmt.Errorf("this id_jag source cannot mint until it is updated: %w", idJAGPinnedParamError(p.key))
 		}
 	}
 	return nil
 }
 
-// warnStoredIDJAGParams logs the token_param.* fields a stored id_jag source carries that
-// a write would now refuse, each time the driver is built: a pinned one stops every
-// mint, and a first-class one is sent only when its config key is empty. The endpoints
-// identify the source, whose name the driver is not given.
-func (d *TokenExchangeDriver) warnStoredIDJAGParams() {
+// warnStoredIDJAG logs, each time the driver is built, what a stored id_jag source
+// carries that a write would now refuse: why it cannot mint at all, if it cannot, and
+// each token_param.* field sent only when its config key is empty. Otherwise an operator
+// would learn of either only from a failed or changed request. The endpoints identify
+// the source, whose name the driver is not given.
+func (d *TokenExchangeDriver) warnStoredIDJAG() {
 	cfg := d.credSource.Config
 	if d.logger == nil || credential.GetString(cfg, "grant", tokenExchangeGrantRFC8693) != tokenExchangeGrantIDJAG {
 		return
 	}
+	source := []logger.TypedField{
+		logger.String("token_url", credential.GetString(cfg, "token_url", "")),
+		logger.String("resource_token_url", credential.GetString(cfg, "resource_token_url", "")),
+	}
+	if d.refusal != nil {
+		d.logger.Warn("id_jag source cannot mint until it is updated", append(source, logger.Err(d.refusal))...)
+	}
 	params := credential.GetPrefixed(cfg, "token_param.")
-	keys := slices.Sorted(maps.Keys(params))
-	for _, key := range keys {
-		source := []logger.TypedField{
-			logger.String("token_param", key),
-			logger.String("token_url", credential.GetString(cfg, "token_url", "")),
-			logger.String("resource_token_url", credential.GetString(cfg, "resource_token_url", "")),
-		}
-		if idJAGPinned(key) {
-			d.logger.Warn("id_jag source cannot mint: a token_param overrides the ID-JAG request; remove it from the source", source...)
-		} else if own, ok := idJAGFirstClassParams[key]; ok {
+	for _, key := range slices.Sorted(maps.Keys(params)) {
+		if own, ok := idJAGFirstClassParams[key]; ok {
 			d.logger.Warn("id_jag source carries a token_param that is sent only when its config key is empty; set the config key instead",
-				append(source, logger.String("config_key", own))...)
+				append(source, logger.String("token_param", key), logger.String("config_key", own))...)
 		}
 	}
 }
@@ -798,7 +820,7 @@ func grantedScope(answer *oauth2TokenResponse, request url.Values) string {
 // addIDJAGExtras adds a source's token_param.* extras to an ID-JAG request (leg 1).
 //
 // A pinned field is never added: a source that carries one is refused before any
-// request is built (storedIDJAGParamRefusal). A first-class field is added only when its
+// request is built (storedIDJAGRefusal). A first-class field is added only when its
 // config key left it empty, so it never replaces a narrower value a spec sets nor
 // collapses repeated resource indicators. A resource fallback is split like resources,
 // one indicator per value.

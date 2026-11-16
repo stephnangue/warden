@@ -379,6 +379,35 @@ func TestKeylessPlan_TokenExchangePublicClient(t *testing.T) {
 	assert.Empty(t, f.KeylessPrerequisites(current, nil, testTrustEnv))
 }
 
+// A public id_jag source is not keyless but refused: the IdP must authenticate the
+// client it issues an ID-JAG to. There is no stored credential to move, so the plan
+// moves nothing and says the fix is a source update; the source it proposes still
+// fails a write, which names why.
+func TestKeylessPlan_TokenExchangePublicIDJAG(t *testing.T) {
+	f := &TokenExchangeDriverFactory{}
+	current := credential.NewConfig(map[string]string{
+		"token_url": "https://idp.example/token", "resource_token_url": "https://as.example/token",
+		"grant": tokenExchangeGrantIDJAG, "client_auth": clientAuthNone, "client_id": "warden",
+	})
+
+	plan, err := f.PlanKeyless(current, map[string]string{})
+	require.NoError(t, err)
+	assert.Empty(t, plan.Delta)
+	assert.Empty(t, plan.NeedsInput)
+	assert.Empty(t, plan.Leftovers)
+	require.Len(t, plan.Notes, 1)
+	assert.Contains(t, plan.Notes[0], "grant=id_jag cannot use it")
+	assert.NotContains(t, plan.Notes[0], "already keyless")
+	err = f.ValidateConfig(current.WithAll(plan.Delta))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "client_auth=none cannot be used with grant=id_jag")
+
+	// Planned as staying public under another grant, it is keyless again.
+	plan, err = f.PlanKeyless(current, map[string]string{"grant": tokenExchangeGrantRFC8693})
+	require.NoError(t, err)
+	assert.Contains(t, plan.Notes[0], "already keyless")
+}
+
 // A certificate source goes keyless like a static one: the certificate and its key are
 // cleared, and the certificate registered on the app is named by its thumbprint so the
 // operator can remove it — never by anything from the private key.
