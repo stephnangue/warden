@@ -29,13 +29,14 @@ func postOAuthTokenForm(ctx context.Context, httpClient *http.Client, tokenURL s
 // not as a token-endpoint failure: a signing capability found spent keeps its sentinel
 // and its wording, exactly as when it failed before the request was assembled.
 func postOAuthTokenFormFunc(ctx context.Context, httpClient *http.Client, tokenURL string, build func() (url.Values, error), extraHeaders map[string]string) (*oauth2TokenResponse, error) {
-	return postOAuthTokenFormFuncReading(ctx, httpClient, tokenURL, build, extraHeaders, tokenEndpointReadableStatuses)
+	return postOAuthTokenFormFuncReading(ctx, httpClient, tokenURL, build, extraHeaders, tokenEndpointReadableStatuses, oauth2MaxRetryAttempts)
 }
 
 // postOAuthTokenFormFuncReading is postOAuthTokenFormFunc for a token endpoint that
 // carries its OAuth2 error bodies on more statuses than RFC 6749 names: readable
-// lists every status whose body is parsed rather than discarded.
-func postOAuthTokenFormFuncReading(ctx context.Context, httpClient *http.Client, tokenURL string, build func() (url.Values, error), extraHeaders map[string]string, readable []int) (*oauth2TokenResponse, error) {
+// lists every status whose body is parsed rather than discarded. attempts is how many
+// times the request is tried before a retryable failure is given up on.
+func postOAuthTokenFormFuncReading(ctx context.Context, httpClient *http.Client, tokenURL string, build func() (url.Values, error), extraHeaders map[string]string, readable []int, attempts int) (*oauth2TokenResponse, error) {
 	bodyFunc := func(int) ([]byte, error) {
 		form, err := build()
 		if err != nil {
@@ -43,7 +44,7 @@ func postOAuthTokenFormFuncReading(ctx context.Context, httpClient *http.Client,
 		}
 		return []byte(form.Encode()), nil
 	}
-	return postOAuthTokenRequest(ctx, httpClient, tokenURL, "application/x-www-form-urlencoded", nil, bodyFunc, extraHeaders, readable)
+	return postOAuthTokenRequest(ctx, httpClient, tokenURL, "application/x-www-form-urlencoded", nil, bodyFunc, extraHeaders, readable, attempts)
 }
 
 // postOAuthTokenJSON is postOAuthTokenForm for a token endpoint that takes its
@@ -184,7 +185,7 @@ func ExpiryFromExpiresIn(expiresIn int, fallback, max time.Duration) time.Time {
 // so grant assembly and body encoding stay per-driver while the transport, retry,
 // and error-classification behaviour is defined once.
 func postOAuthToken(ctx context.Context, httpClient *http.Client, tokenURL, contentType string, body []byte, extraHeaders map[string]string) (*oauth2TokenResponse, error) {
-	return postOAuthTokenRequest(ctx, httpClient, tokenURL, contentType, body, nil, extraHeaders, tokenEndpointReadableStatuses)
+	return postOAuthTokenRequest(ctx, httpClient, tokenURL, contentType, body, nil, extraHeaders, tokenEndpointReadableStatuses, oauth2MaxRetryAttempts)
 }
 
 // tokenEndpointReadableStatuses are the statuses whose body is read as an OAuth2
@@ -196,9 +197,14 @@ var tokenEndpointReadableStatuses = []int{http.StatusOK, http.StatusBadRequest, 
 // postOAuthTokenRequest is postOAuthToken with the body given either once (body) or
 // per attempt (bodyFunc); exactly one is set. readable lists the statuses whose
 // body is parsed; any other status is a failure classified by status alone.
-func postOAuthTokenRequest(ctx context.Context, httpClient *http.Client, tokenURL, contentType string, body []byte, bodyFunc func(int) ([]byte, error), extraHeaders map[string]string, readable []int) (*oauth2TokenResponse, error) {
+// attempts is how many times the request is tried before a retryable failure is
+// given up on.
+func postOAuthTokenRequest(ctx context.Context, httpClient *http.Client, tokenURL, contentType string, body []byte, bodyFunc func(int) ([]byte, error), extraHeaders map[string]string, readable []int, attempts int) (*oauth2TokenResponse, error) {
+	// A request is always tried once: with no attempt there would be no answer, and the
+	// failure would read as an empty response rather than as what it was.
+	attempts = max(attempts, 1)
 	retryConfig := httputil.HTTPRetryConfig{
-		MaxAttempts:       oauth2MaxRetryAttempts,
+		MaxAttempts:       attempts,
 		MaxBodySize:       httputil.DefaultMaxBodySize,
 		RetryableStatuses: []int{http.StatusTooManyRequests, 500},
 		BaseBackoff:       1 * time.Second,
@@ -245,6 +251,12 @@ func postOAuthTokenRequest(ctx context.Context, httpClient *http.Client, tokenUR
 			return nil, &tokenEndpointError{status: status, err: fmt.Errorf("status %d: %s", status, string(respBody))}
 		}
 		return nil, fmt.Errorf("failed to decode token response: %w", jsonErr)
+	}
+	if status != http.StatusOK && tokenResp.Error == "" {
+		// A refusal whose JSON body names no OAuth2 error (a gateway's
+		// {"message": "Forbidden"}, say): the body is all that says why, so it is
+		// kept, as for a body that is not JSON at all.
+		return nil, &tokenEndpointError{status: status, err: fmt.Errorf("status %d: %s", status, string(respBody))}
 	}
 	if status != http.StatusOK || tokenResp.Error != "" {
 		// An OAuth2 error body — carried on a readable error status, or as an

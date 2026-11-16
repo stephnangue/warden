@@ -567,37 +567,82 @@ func (d *TokenExchangeDriver) exchangeOnce(ctx context.Context, spec *credential
 		return nil, err
 	}
 	cfg := d.credSource.Config
-	return d.postWithClientAuth(ctx, credential.GetString(cfg, "token_url", ""), credential.GetString(cfg, "issuer", ""), form, chained)
+	return d.postWithClientAuth(ctx, tokenCall{
+		endpoint: credential.GetString(cfg, "token_url", ""),
+		issuer:   credential.GetString(cfg, "issuer", ""),
+		readable: tokenEndpointReadableStatuses,
+		attempts: oauth2MaxRetryAttempts,
+		classify: classifyExchangeError,
+		rejected: "token_exchange: client authentication rejected",
+	}, sameForm(form), chained)
 }
 
-// postWithClientAuth POSTs form to tokenEndpoint authenticated as the client. issuer is
-// the issuer identifier of the server behind tokenEndpoint, which a client assertion
-// names as its audience when the source asks for it (client_assertion_aud=issuer); it
-// otherwise names tokenEndpoint.
+// tokenCall is how one request to a token endpoint is made, and how its refusals read.
+type tokenCall struct {
+	// endpoint is where the request is sent. issuer is the issuer identifier of the
+	// server behind it, which a client assertion names as its audience when the source
+	// asks for it (client_assertion_aud=issuer); the assertion otherwise names endpoint.
+	endpoint, issuer string
+	// readable lists the statuses whose body is read as an OAuth2 answer.
+	readable []int
+	// attempts is how many times the request is tried before a retryable failure is
+	// given up on.
+	attempts int
+	// classify renders a failure the endpoint answered with, or a transport failure.
+	classify func(error) error
+	// rejected opens the error for a chained client credential the endpoint refused.
+	rejected string
+}
+
+// sameForm builds the same form for every attempt, each a copy of form, so the
+// client authentication an attempt adds never reaches the next one.
+func sameForm(form url.Values) func() (url.Values, error) {
+	return func() (url.Values, error) { return maps.Clone(form), nil }
+}
+
+// postWithClientAuth sends the form build makes to call.endpoint, authenticated as the
+// client.
 //
-// The client authentication is applied afresh on every attempt, so a retry presents a
-// new client assertion rather than replaying one: a server enforcing single use refuses
-// a repeated jti as invalid_client, and a request it received but whose answer was lost
-// would otherwise turn a blip into a failed mint. The base form is never touched; each
-// attempt decorates its own copy.
+// build runs once per attempt, and the client authentication is applied afresh to what
+// it returns, so a retry presents a new client assertion rather than replaying one: a
+// server enforcing single use refuses a repeated jti as invalid_client, and a request it
+// received but whose answer was lost would otherwise turn a blip into a failed mint.
 //
-// A failure to authenticate — a key that will not parse, a capability found spent — is
-// returned as it is: nothing was sent, so it is not a token-endpoint error to classify.
-func (d *TokenExchangeDriver) postWithClientAuth(ctx context.Context, tokenEndpoint, issuer string, form url.Values, chained *chainedClientAuth) (*oauth2TokenResponse, error) {
-	aud := clientAssertionAudience(credential.GetString(d.credSource.Config, "client_assertion_aud", ""), tokenEndpoint, issuer)
-	var authErr error
-	resp, err := postOAuthTokenFormFunc(ctx, d.httpClient, tokenEndpoint, func() (url.Values, error) {
-		attempt := maps.Clone(form)
-		if authErr = d.applyClientAuth(ctx, attempt, aud, chained); authErr != nil {
-			return nil, authErr
+// A failure before sending is returned as it is: a key that will not parse, a capability
+// found spent, or whatever build itself failed on. Nothing was sent, so it is not this
+// endpoint's error to classify. When the endpoint rejects a client credential that came
+// from credential chaining, the error wraps credential.ErrChainedSecretRejected, so the
+// minting layer evicts the cached secret and retries once with a fresh fetch;
+// invalid_client does not say which half was refused and need not, since the refetch
+// replaces both. Any other failure is rendered by call.classify.
+func (d *TokenExchangeDriver) postWithClientAuth(ctx context.Context, call tokenCall, build func() (url.Values, error), chained *chainedClientAuth) (*oauth2TokenResponse, error) {
+	aud := clientAssertionAudience(credential.GetString(d.credSource.Config, "client_assertion_aud", ""), call.endpoint, call.issuer)
+	var buildErr error
+	resp, err := postOAuthTokenFormFuncReading(ctx, d.httpClient, call.endpoint, func() (url.Values, error) {
+		form, err := build()
+		if err == nil {
+			err = d.applyClientAuth(ctx, form, aud, chained)
 		}
-		return attempt, nil
-	}, d.clientAuthHeaders(chained))
-	if authErr != nil {
-		return nil, authErr
+		if err != nil {
+			buildErr = err
+			return nil, err
+		}
+		return form, nil
+	}, d.clientAuthHeaders(chained), call.readable, call.attempts)
+	if buildErr != nil {
+		return nil, buildErr
 	}
 	if err != nil {
-		return nil, chainedClientAuthError(err, chained != nil)
+		// The rejection test is shared with the oauth2 driver: client_secret_post's 400,
+		// client_secret_basic's 401, and a rejected assertion under either private_key_jwt
+		// method. For a KMS-held key that last case is how an authorization server holding
+		// only the previous public key recovers: the eviction re-mints the capability,
+		// which resolves the current key version. It runs before call.classify, whose
+		// reading of a 400 or 401 would otherwise hide it.
+		if chained != nil && isChainedClientAuthRejection(err) {
+			return nil, fmt.Errorf("%s: %w (%w)", call.rejected, credential.ErrChainedSecretRejected, err)
+		}
+		return nil, call.classify(err)
 	}
 	return resp, nil
 }
@@ -620,13 +665,101 @@ func (d *TokenExchangeDriver) postWithClientAuth(ctx context.Context, tokenEndpo
 // out, which says they are the same (§4.3.4) — so it is never more than the ID-JAG
 // carries, and cannot be refused for asking more. Client auth runs on both legs
 // (each with its own endpoint as the assertion audience). Only the final access
-// token is returned; the ID-JAG is single-use.
+// token is returned.
+//
+// Each attempt at leg 2 sends an ID-JAG no attempt has sent before, with the scope
+// granted for it. A resource authorization server may accept each ID-JAG only once,
+// by its jti, and one whose answer was lost may already have spent it; so a retried
+// leg 2 asks the IdP for a new one first. That request is tried once: leg 2's own
+// retries already cover a failing IdP, and trying it again inside each of them would
+// multiply the calls. A retry the resource authorization server asked for with a 429
+// costs a new ID-JAG too, since an attempt cannot tell that answer from a lost one.
 func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.CredSpec, inputs *credential.ExchangeInputs, chained *chainedClientAuth) (*oauth2TokenResponse, error) {
 	cfg := d.credSource.Config
+	leg1, err := d.idJAGRequestForm(spec, inputs)
+	if err != nil {
+		return nil, err
+	}
+	// A refused subject asks the user to sign in again only when the user's token is the
+	// one thing the request could be refused for: a request that also carries an actor
+	// token or extras of the source's own can be refused for those, which a new user
+	// token would not fix and the user would be sent round in circles.
+	challenge := spec != nil && spec.Config.Get(credential.ConfigSubjectTokenSource) == credential.SourceUserIdentity &&
+		!leg1.Has("actor_token") && len(credential.GetPrefixed(cfg, "token_param.")) == 0
+	jag, scope, err := d.requestIDJAG(ctx, leg1, challenge, chained, oauth2MaxRetryAttempts)
+	if err != nil {
+		return nil, err
+	}
 
-	// Leg 1: exchange the subject for an ID-JAG at the home IdP. The ID-JAG must be
-	// bound to the resource authorization server via audience.
-	idpURL := credential.GetString(cfg, "token_url", "")
+	// Leg 2: redeem the ID-JAG at the resource authorization server, for the scope the
+	// IdP granted. The ID-JAG an attempt sends is cleared once it is in the form; a
+	// later attempt finds none and requests its own.
+	redeem := tokenCall{
+		endpoint: credential.GetString(cfg, "resource_token_url", ""),
+		issuer:   credential.GetString(cfg, "resource_issuer", ""),
+		readable: jwtBearerReadableStatuses,
+		attempts: oauth2MaxRetryAttempts,
+		classify: classifyIDJAGRedeemError,
+		rejected: "id_jag: the resource authorization server rejected the chained client credential",
+	}
+	return d.postWithClientAuth(ctx, redeem, func() (url.Values, error) {
+		if jag == "" {
+			if d.logger != nil {
+				d.logger.Debug("requesting a new ID-JAG for a retried redemption",
+					logger.String("resource_token_url", redeem.endpoint))
+			}
+			fresh, freshScope, err := d.requestIDJAG(ctx, leg1, challenge, chained, 1)
+			if err != nil {
+				// The mint fails with the IdP's answer; what made the redemption retry is
+				// only in this record.
+				if d.logger != nil {
+					d.logger.Warn("a retried ID-JAG redemption could not get a new ID-JAG",
+						logger.String("resource_token_url", redeem.endpoint), logger.Err(err))
+				}
+				return nil, err
+			}
+			jag, scope = fresh, freshScope
+		}
+		form := url.Values{"grant_type": {grantTypeJWTBearer}, "assertion": {jag}}
+		if scope != "" {
+			form.Set("scope", scope)
+		}
+		jag = ""
+		return form, nil
+	}, chained)
+}
+
+// requestIDJAG asks the IdP for an ID-JAG (leg 1) with form, trying at most attempts
+// times, and returns it with the scope the IdP granted for it. challenge makes a
+// refused subject ask the user to authenticate again.
+func (d *TokenExchangeDriver) requestIDJAG(ctx context.Context, form url.Values, challenge bool, chained *chainedClientAuth, attempts int) (string, string, error) {
+	cfg := d.credSource.Config
+	resp, err := d.postWithClientAuth(ctx, tokenCall{
+		endpoint: credential.GetString(cfg, "token_url", ""),
+		issuer:   credential.GetString(cfg, "issuer", ""),
+		readable: tokenEndpointReadableStatuses,
+		attempts: attempts,
+		classify: classifyIDJAGRequestError(challenge),
+		rejected: "id_jag: the IdP rejected the chained client credential",
+	}, sameForm(form), chained)
+	if err != nil {
+		return "", "", err
+	}
+	if resp.AccessToken == "" {
+		return "", "", fmt.Errorf("id_jag: the IdP returned no ID-JAG")
+	}
+	// The response must say what it issued (draft-ietf-oauth-identity-assertion-authz-grant
+	// §4.3.4), so nothing else is ever redeemed as an ID-JAG.
+	if resp.IssuedTokenType != tokenTypeIDJAG {
+		return "", "", fmt.Errorf("id_jag: the IdP returned issued_token_type %q, expected %q", resp.IssuedTokenType, tokenTypeIDJAG)
+	}
+	return resp.AccessToken, grantedScope(resp, form), nil
+}
+
+// idJAGRequestForm builds the ID-JAG request (leg 1) for one mint, without client
+// authentication, which each attempt adds to its own copy.
+func (d *TokenExchangeDriver) idJAGRequestForm(spec *credential.CredSpec, inputs *credential.ExchangeInputs) (url.Values, error) {
+	// The ID-JAG must be bound to the resource authorization server via audience.
 	audience := d.resolve(spec, "audience")
 	if audience == "" {
 		return nil, fmt.Errorf("id_jag: audience (the resource authorization server) is required")
@@ -648,29 +781,8 @@ func (d *TokenExchangeDriver) mintIDJAG(ctx context.Context, spec *credential.Cr
 	}
 	d.addResources(leg1, spec)
 	// Vendor-specific extras apply to the exchange (leg 1) at the home IdP.
-	addIDJAGExtras(leg1, cfg)
-	jag, err := d.postWithClientAuth(ctx, idpURL, credential.GetString(cfg, "issuer", ""), leg1, chained)
-	if err != nil {
-		return nil, err
-	}
-	if jag.AccessToken == "" {
-		return nil, fmt.Errorf("id_jag: leg 1 returned no ID-JAG assertion")
-	}
-	// If the IdP labels the issued token, confirm it is an ID-JAG before redeeming it.
-	if jag.IssuedTokenType != "" && jag.IssuedTokenType != tokenTypeIDJAG {
-		return nil, fmt.Errorf("id_jag: leg 1 returned issued_token_type %q, expected %q", jag.IssuedTokenType, tokenTypeIDJAG)
-	}
-
-	// Leg 2: redeem the ID-JAG at the resource authorization server, for the scope the
-	// IdP granted.
-	resURL := credential.GetString(cfg, "resource_token_url", "")
-	leg2 := url.Values{}
-	leg2.Set("grant_type", grantTypeJWTBearer)
-	leg2.Set("assertion", jag.AccessToken)
-	if scope := grantedScope(jag, leg1); scope != "" {
-		leg2.Set("scope", scope)
-	}
-	return d.postWithClientAuth(ctx, resURL, credential.GetString(cfg, "resource_issuer", ""), leg2, chained)
+	addIDJAGExtras(leg1, d.credSource.Config)
+	return leg1, nil
 }
 
 // grantedScope is the scope the IdP granted an ID-JAG request: its answer's scope, or
@@ -972,26 +1084,57 @@ func classifyExchangeError(err error) error {
 	return fmt.Errorf("token_exchange failed: %w", err)
 }
 
-// chainedClientAuthError classifies a token-endpoint failure, but when the client
-// credential came from credential chaining (chained) and the endpoint rejected the client
-// authentication (invalid_client — 400 for client_secret_post, 401 for
-// client_secret_basic, or a rejected private_key_jwt assertion), it wraps
-// credential.ErrChainedSecretRejected so the minting layer evicts the cached secret and
-// retries once with a fresh fetch. This must run BEFORE classifyExchangeError, whose
-// broad 400/401 branch would otherwise mask invalid_client as a subject-token problem.
+// classifyIDJAGRequestError renders a failed ID-JAG request (leg 1), by the error codes
+// draft-ietf-oauth-identity-assertion-authz-grant §4.3.4.3 profiles for it, so an
+// operator can tell what would fix it.
 //
-// invalid_client does not say which half was refused, and it does not need to: the
-// eviction refetches the payload, so the id and the secret are replaced together.
-func chainedClientAuthError(err error, chained bool) error {
-	// The rejection test itself is shared with the oauth2 driver
-	// (isChainedClientAuthRejection); here it covers client_secret_post's 400,
-	// client_secret_basic's 401, and a rejected assertion under either private_key_jwt
-	// method. For a KMS-held key that last case is how an authorization server holding
-	// only the previous public key recovers: the eviction re-mints the capability, which
-	// resolves the current key version. Keep the underlying error (the IdP's code /
-	// description) in the chain alongside the sentinel for legible diagnostics.
-	if chained && isChainedClientAuthRejection(err) {
-		return fmt.Errorf("token_exchange: client authentication rejected: %w (%w)", credential.ErrChainedSecretRejected, err)
+// challenge marks a request whose only token of the user's is the subject, and nothing
+// else of the source's own that could be refused: an invalid_request then asks the user
+// to authenticate again, since a new token from them is what resolves it. It can still
+// be a request the IdP will not take at all, which the user cannot fix; the cause stays
+// in the error for the logs. invalid_grant, which some IdPs answer a refused subject
+// with in place of the code the draft profiles, reads the same but asks nothing of the
+// user, until an IdP shows that it means the user's token.
+func classifyIDJAGRequestError(challenge bool) func(error) error {
+	return func(err error) error {
+		var tee *tokenEndpointError
+		if !errors.As(err, &tee) {
+			return fmt.Errorf("id_jag: requesting the ID-JAG from the IdP failed: %w", err)
+		}
+		switch tee.code {
+		case "invalid_request", "invalid_grant":
+			refused := fmt.Errorf("id_jag: the IdP refused the subject token (expired, malformed, or issued to another client); a new subject token may resolve it: %w", err)
+			if challenge && tee.code == "invalid_request" {
+				return &credential.UserChallengeError{Code: credential.UserChallengeInvalidToken, Cause: refused}
+			}
+			return refused
+		case "access_denied":
+			return fmt.Errorf("id_jag: the IdP does not allow this client or user an ID-JAG for that resource authorization server; a new subject token will not resolve it: %w", err)
+		case "invalid_target":
+			return fmt.Errorf("id_jag: the IdP has no trust relationship with the audience, or a resource is not governed by it; check audience and resources: %w", err)
+		case "invalid_client":
+			return fmt.Errorf("id_jag: the IdP rejected Warden's client authentication: %w", err)
+		}
+		return fmt.Errorf("id_jag: requesting the ID-JAG from the IdP failed: %w", err)
 	}
-	return classifyExchangeError(err)
+}
+
+// classifyIDJAGRedeemError renders a failed ID-JAG redemption (leg 2), by the error
+// codes draft-ietf-oauth-identity-assertion-authz-grant §4.4.3 profiles for it. Every
+// attempt redeems an ID-JAG never sent before, so an invalid_grant points at what the
+// ID-JAG says or how it was signed, not at its reuse.
+func classifyIDJAGRedeemError(err error) error {
+	var tee *tokenEndpointError
+	if !errors.As(err, &tee) {
+		return fmt.Errorf("id_jag: redeeming the ID-JAG at the resource authorization server failed: %w", err)
+	}
+	switch tee.code {
+	case "invalid_grant":
+		return fmt.Errorf("id_jag: the resource authorization server refused the ID-JAG: check that its audience is that server and its client_id the client redeeming it, and its signature, type and lifetime: %w", err)
+	case "access_denied":
+		return fmt.Errorf("id_jag: the resource authorization server does not allow this user or client; a new ID-JAG will not resolve it: %w", err)
+	case "invalid_client":
+		return fmt.Errorf("id_jag: the resource authorization server rejected Warden's client authentication: %w", err)
+	}
+	return fmt.Errorf("id_jag: redeeming the ID-JAG at the resource authorization server failed: %w", err)
 }
