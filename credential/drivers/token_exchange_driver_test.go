@@ -1657,6 +1657,79 @@ func TestTokenExchangeDriver_IDJAG_RedeemsTheGrantedScope(t *testing.T) {
 	})
 }
 
+// The audit records the issued token's scope and the jti of the ID-JAG redeemed for
+// it, beside the two clients.
+func TestTokenExchangeDriver_IDJAG_AuditsTheRedemption(t *testing.T) {
+	subject := subjectInputs(makeUnsignedJWT(map[string]interface{}{"sub": "user"}))
+	run := func(t *testing.T, requested string, idpAnswer, resAnswer map[string]interface{}) map[string]interface{} {
+		res := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resAnswer)
+		}))
+		t.Cleanup(res.Close)
+		idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(idpAnswer)
+		}))
+		t.Cleanup(idp.Close)
+		d := newExchangeDriver(map[string]string{
+			"token_url": idp.URL, "resource_token_url": res.URL, "grant": tokenExchangeGrantIDJAG,
+			"client_id": "c", "client_secret": "s",
+			"resource_client_auth": clientAuthSecretPost, "resource_client_id": "c-at-resource", "resource_client_secret": "rs",
+		}, &http.Client{})
+		cfg := map[string]string{"audience": "https://resource-as.example.com"}
+		if requested != "" {
+			cfg["scope"] = requested
+		}
+		_, meta, _, _, err := d.MintCredentialWithExchange(context.Background(), &credential.CredSpec{Config: credential.NewConfig(cfg)}, subject)
+		require.NoError(t, err)
+		return meta
+	}
+	idJAG := func(jti string, scope string) map[string]interface{} {
+		answer := map[string]interface{}{
+			"access_token":      makeUnsignedJWT(map[string]interface{}{"jti": jti}),
+			"issued_token_type": tokenTypeIDJAG, "expires_in": 300,
+		}
+		if scope != "" {
+			answer["scope"] = scope
+		}
+		return answer
+	}
+	issued := map[string]interface{}{"access_token": "final-access", "expires_in": 600}
+
+	t.Run("the scope granted and the ID-JAG redeemed", func(t *testing.T) {
+		meta := run(t, "files:read files:write", idJAG("jag-1", "files:read"), issued)
+		assert.Equal(t, "files:read", meta["scope"], "the IdP granted less than was asked for")
+		assert.Equal(t, "jag-1", meta["id_jag_jti"])
+		assert.Equal(t, "c", meta["client_id"])
+		assert.Equal(t, "c-at-resource", meta["resource_client_id"])
+	})
+	t.Run("the scope the resource authorization server issued", func(t *testing.T) {
+		narrower := map[string]interface{}{"access_token": "final-access", "expires_in": 600, "scope": "files:read"}
+		meta := run(t, "files:read files:write", idJAG("jag-1", ""), narrower)
+		assert.Equal(t, "files:read", meta["scope"])
+	})
+	t.Run("an ID-JAG with no jti, and no scope anywhere", func(t *testing.T) {
+		opaque := map[string]interface{}{"access_token": "the-id-jag", "issued_token_type": tokenTypeIDJAG, "expires_in": 300}
+		meta := run(t, "", opaque, issued)
+		assert.NotContains(t, meta, "scope")
+		assert.NotContains(t, meta, "id_jag_jti")
+	})
+	t.Run("other grants record neither", func(t *testing.T) {
+		sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "final-access", "expires_in": 600, "scope": "files:read"})
+		}))
+		t.Cleanup(sts.Close)
+		d := newExchangeDriver(map[string]string{"token_url": sts.URL, "client_id": "c", "client_secret": "s"}, &http.Client{})
+		_, meta, _, _, err := d.MintCredentialWithExchange(context.Background(),
+			&credential.CredSpec{Config: credential.NewConfig(map[string]string{"scope": "files:read"})}, subject)
+		require.NoError(t, err)
+		assert.NotContains(t, meta, "scope")
+		assert.NotContains(t, meta, "id_jag_jti")
+	})
+}
+
 // Each leg's refusals read by the codes the draft profiles for that leg, so an
 // operator can tell what would fix them.
 func TestTokenExchangeDriver_IDJAG_ErrorCodes(t *testing.T) {
