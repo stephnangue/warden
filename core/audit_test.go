@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1084,6 +1085,83 @@ func TestTeardownAudits_WritesBufferedEntries(t *testing.T) {
 	content := logged()
 	before, after := strings.Index(content, "before-the-seal"), strings.Index(content, "after-the-unseal")
 	assert.True(t, before >= 0 && after > before, "want both entries, in the order they were accepted: %s", content)
+}
+
+// A request is answered when one audit device records it, whatever the other
+// device does: that is what a second device is for. It is refused when no
+// device records it. Before, a request was refused as soon as any device
+// failed, so a second device added a way to stop the service instead of
+// removing one.
+func TestHandleRequest_OneAuditDeviceFailing(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	failure := errors.New("no space left on device")
+	device := func(name string, onRequest, onResponse error) *mockAuditDevice {
+		d := newMockAuditDevice(name)
+		d.logRequestErr, d.logResponseErr = onRequest, onResponse
+		return d
+	}
+	// handle sends a request with a root token to a backend, through a core
+	// audited by devices, and says whether it reached the backend. The
+	// request is not a streamed one, whose answer is on its way before it can
+	// be audited.
+	handle := func(t *testing.T, devices ...*mockAuditDevice) (resp *logical.Response, err error, reached bool) {
+		t.Helper()
+		c := createTestCore(t)
+		c.auditManager = audit.NewAuditManager(c.logger)
+		for _, d := range devices {
+			require.NoError(t, c.auditManager.RegisterDevice(d.name, d))
+		}
+		backend := &mintingBackend{mockProvider: newMockProvider()}
+		mountGateway(t, c, "mintgw/", backend)
+		root, err := c.tokenStore.GenerateRootToken()
+		require.NoError(t, err)
+
+		hr := httptest.NewRequest(http.MethodGet, "/v1/mintgw/creds", nil)
+		hr.Header.Set(logical.HeaderWardenToken, root)
+		resp, err = c.handleCancelableRequest(ctx, &logical.Request{
+			Path: "mintgw/creds", Operation: logical.ReadOperation, HTTPRequest: hr,
+		})
+		return resp, err, backend.handled.Load()
+	}
+
+	// refused is what the client of a request that could not be audited gets:
+	// no answer, and an internal error.
+	refused := func(resp *logical.Response, err error) bool {
+		return resp == nil && errors.Is(err, ErrInternalError)
+	}
+
+	t.Run("no device fails", func(t *testing.T) {
+		resp, err, reached := handle(t, device("first/", nil, nil), device("second/", nil, nil))
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		require.True(t, reached, "the request this test sends does not reach its backend even when audited")
+	})
+
+	t.Run("one of two devices fails", func(t *testing.T) {
+		failing, healthy := device("failing/", failure, failure), device("healthy/", nil, nil)
+		resp, err, reached := handle(t, failing, healthy)
+		assert.False(t, refused(resp, err), "the request was refused although a device recorded it: resp=%v err=%v", resp, err)
+		assert.True(t, reached, "the request was not routed although a device recorded it")
+		assert.Equal(t, 1, healthy.logRequestCalls, "the healthy device records the request")
+		assert.Equal(t, 1, healthy.logResponseCalls, "the healthy device records the response")
+		assert.Equal(t, 1, failing.logRequestCalls, "the failing device is still tried")
+	})
+
+	// No device records the request: it is refused before it is routed, so
+	// nothing happens that the log does not hold.
+	t.Run("both devices fail", func(t *testing.T) {
+		resp, err, reached := handle(t, device("first/", failure, failure), device("second/", failure, failure))
+		assert.True(t, refused(resp, err), "the request was answered although no device recorded it: resp=%v err=%v", resp, err)
+		assert.False(t, reached, "the request reached its backend although no device recorded it")
+	})
+
+	// The request was recorded and routed; no device records its response.
+	// The client is not answered.
+	t.Run("both devices fail on the response", func(t *testing.T) {
+		resp, err, reached := handle(t, device("first/", nil, failure), device("second/", nil, failure))
+		assert.True(t, reached)
+		assert.True(t, refused(resp, err), "the request was answered although no device recorded its response: resp=%v err=%v", resp, err)
+	})
 }
 
 // newCoreForLoadAuditsTest builds a real-barrier Core wired with the real

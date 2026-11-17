@@ -1,11 +1,13 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -215,143 +217,148 @@ func TestManagerDisabledDevices(t *testing.T) {
 	}
 }
 
-func TestManagerErrorAggregation(t *testing.T) {
-	// Create manager with multiple devices, some will fail
-	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log)
-	defer manager.Close()
+// errSinkDown is what a faultySink refuses an entry with.
+var errSinkDown = errors.New("sink is down")
 
-	// Device 1: will succeed
-	tmpDir1 := t.TempDir()
-	sink1, _ := NewFileSink(FileSinkConfig{
-		Path: filepath.Join(tmpDir1, "audit1.log"),
-	})
-	format := NewJSONFormat()
-	device1 := NewDevice("device1", format, sink1, &DeviceConfig{
-		Name:    "device1",
-		Enabled: true,
-	})
-	manager.RegisterDevice("device1", device1)
-
-	// Device 2: will fail (invalid path)
-	sink2, err := NewFileSink(FileSinkConfig{
-		Path: "/nonexistent/path/audit2.log",
-	})
-	if err == nil {
-		// If creation succeeded, register it (it will fail on write)
-		device2 := NewDevice("device2", format, sink2, &DeviceConfig{
-			Name:    "device2",
-			Enabled: true,
-		})
-		manager.RegisterDevice("device2", device2)
-	}
-
-	entry := &LogEntry{
-		Timestamp: time.Now(),
-		Request: &Request{
-			ID:        "req-error",
-			Operation: "read",
-			Path:      "/test",
-			ClientIP:  "192.168.1.100",
-		},
-	}
-
-	ctx := context.Background()
-
-	// Should return error but device1 should have written, so continue should be true
-	continued, err := manager.LogRequest(ctx, entry)
-	if err != nil {
-		t.Logf("Expected error from LogRequest due to device2 failure: %v", err)
-	}
-	if !continued {
-		t.Error("Expected continue=true since device1 succeeded, but got false")
-	}
-
-	// Verify device1 wrote successfully
-	content, _ := os.ReadFile(filepath.Join(tmpDir1, "audit1.log"))
-	if len(content) == 0 {
-		t.Error("Device1 should have written despite device2 failing")
-	}
+// faultySink is a sink that refuses entries while down is set, and notes the
+// ones it takes otherwise.
+type faultySink struct {
+	recordingSink
+	down *atomic.Bool
 }
 
+func (s faultySink) Write(ctx context.Context, entry []byte) error {
+	if s.down.Load() {
+		return errSinkDown
+	}
+	return s.recordingSink.Write(ctx, entry)
+}
+
+// faultyDevice is an enabled device named name, which writes to log unless
+// down is set.
+func faultyDevice(name string, log *writeLog, down *atomic.Bool) Device {
+	sink := faultySink{recordingSink: recordingSink{name: name, log: log}, down: down}
+	return NewDevice(name, NewJSONFormat(), sink, &DeviceConfig{Name: name, Enabled: true})
+}
+
+// managerWithServerLog is a manager and what it writes to the server log.
+func managerWithServerLog(t *testing.T) (AuditManager, *bytes.Buffer) {
+	t.Helper()
+	var serverLog bytes.Buffer
+	config := logger.DefaultConfig()
+	config.Outputs = nil
+	log, _ := logger.NewGatedLogger(config, logger.GatedWriterConfig{Underlying: &serverLog, InitialState: logger.GateOpen})
+	return NewAuditManager(log), &serverLog
+}
+
+// terminalColours matches the colour codes the server log is written with.
+var terminalColours = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// An entry one device takes is audited, whatever the others do: the request
+// goes on, with no error for its handler to refuse it on. That is what a
+// second device is for. The device that fails is reported in the server log,
+// once when it starts to and once when it recovers, not once per entry.
 func TestManagerPartialFailure(t *testing.T) {
-	// Test case where some devices succeed and some fail
-	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log)
-	defer manager.Close()
-
-	// Device 1: succeeds
-	tmpDir1 := t.TempDir()
-	sink1, _ := NewFileSink(FileSinkConfig{
-		Path: filepath.Join(tmpDir1, "audit1.log"),
-	})
-	format := NewJSONFormat()
-	device1 := NewDevice("device1", format, sink1, &DeviceConfig{
-		Name:    "device1",
-		Enabled: true,
-	})
-	manager.RegisterDevice("device1", device1)
-
-	entry := &LogEntry{
-		Timestamp: time.Now(),
-		Request: &Request{
-			ID:        "req-partial",
-			Operation: "read",
-			Path:      "/test",
-			ClientIP:  "192.168.1.100",
-		},
+	mgr, serverLog := managerWithServerLog(t)
+	writes := &writeLog{}
+	var down atomic.Bool
+	down.Store(true)
+	if err := mgr.RegisterDevice("failing/", faultyDevice("failing/", writes, &down)); err != nil {
+		t.Fatal(err)
 	}
-
+	if err := mgr.RegisterDevice("healthy/", recordingDevice("healthy/", writes)); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
-
-	// With one device succeeding, continue should be true even if there are errors
-	continued, err := manager.LogRequest(ctx, entry)
-	if err != nil {
-		t.Logf("Got error (expected if device2 was added): %v", err)
+	entry := &LogEntry{Timestamp: time.Now(), Request: &Request{ID: "req-1"}}
+	logBoth := func() {
+		t.Helper()
+		if ok, err := mgr.LogRequest(ctx, entry); err != nil || !ok {
+			t.Fatalf("LogRequest: ok=%v err=%v, want the entry audited and no error", ok, err)
+		}
+		if ok, err := mgr.LogResponse(ctx, entry); err != nil || !ok {
+			t.Fatalf("LogResponse: ok=%v err=%v, want the entry audited and no error", ok, err)
+		}
 	}
-	if !continued {
-		t.Error("Expected continue=true when at least one device succeeds")
+
+	logBoth()
+	// Another device coming changes nothing for the one that is failing.
+	if err := mgr.RegisterDevice("late/", recordingDevice("late/", writes)); err != nil {
+		t.Fatal(err)
+	}
+	logBoth()
+	if got, want := writes.written(), []string{"healthy/", "healthy/", "healthy/", "late/", "healthy/", "late/"}; !slices.Equal(got, want) {
+		t.Errorf("devices written: %q, want %q", got, want)
+	}
+	if got := strings.Count(serverLog.String(), "audit device is failing"); got != 1 {
+		t.Errorf("the failing device was reported %d times over 4 entries, want once: %s", got, serverLog)
+	}
+	if !strings.Contains(serverLog.String(), "failing/") || !strings.Contains(serverLog.String(), errSinkDown.Error()) {
+		t.Errorf("the report names neither the device nor its error: %s", serverLog)
+	}
+	if strings.Contains(serverLog.String(), "audit device recovered") {
+		t.Errorf("a recovery was reported while the device fails: %s", serverLog)
+	}
+
+	down.Store(false)
+	logBoth()
+	if got := strings.Count(serverLog.String(), "audit device recovered"); got != 1 {
+		t.Errorf("the recovery was reported %d times, want once: %s", got, serverLog)
+	}
+	if plain := terminalColours.ReplaceAllString(serverLog.String(), ""); !strings.Contains(plain, "writes_refused=4") {
+		t.Errorf("the recovery does not say 4 entries were refused: %s", plain)
+	}
+
+	// A device that fails again is reported again.
+	down.Store(true)
+	logBoth()
+	if got := strings.Count(serverLog.String(), "audit device is failing"); got != 2 {
+		t.Errorf("the device failing a second time was reported %d times in all, want 2: %s", got, serverLog)
 	}
 }
 
+// With no enabled device taking the entry, it is not audited: the caller is
+// told so, and why each device refused.
 func TestManagerAllDevicesFail(t *testing.T) {
-	// Test case where all devices fail
-	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log)
-	defer manager.Close()
+	mgr, _ := managerWithServerLog(t)
+	writes := &writeLog{}
+	var down atomic.Bool
+	down.Store(true)
+	ctx := context.Background()
+	entry := &LogEntry{Timestamp: time.Now(), Request: &Request{ID: "req-1"}}
 
-	// Device with invalid path that will fail
-	sink, err := NewFileSink(FileSinkConfig{
-		Path: "/nonexistent/path/audit.log",
-	})
-	if err == nil {
-		format := NewJSONFormat()
-		device := NewDevice("failing", format, sink, &DeviceConfig{
-			Name:    "failing",
-			Enabled: true,
-		})
-		manager.RegisterDevice("failing", device)
+	if err := mgr.RegisterDevice("first/", faultyDevice("first/", writes, &down)); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := mgr.LogRequest(ctx, entry)
+	if ok || !errors.Is(err, errSinkDown) || !strings.Contains(err.Error(), `"first/"`) {
+		t.Errorf("one device, failing: ok=%v err=%v, want the device's failure", ok, err)
+	}
 
-		entry := &LogEntry{
-			Timestamp: time.Now(),
-			Request: &Request{
-				ID:        "req-all-fail",
-				Operation: "read",
-				Path:      "/test",
-				ClientIP:  "192.168.1.100",
-			},
-		}
+	if err := mgr.RegisterDevice("second/", faultyDevice("second/", writes, &down)); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = mgr.LogResponse(ctx, entry)
+	if ok || err == nil || !strings.Contains(err.Error(), `"first/"`) || !strings.Contains(err.Error(), `"second/"`) {
+		t.Errorf("two devices, both failing: ok=%v err=%v, want both failures", ok, err)
+	}
 
-		ctx := context.Background()
+	// A healthy device that is disabled takes no entry, so it audits none.
+	healthy := recordingDevice("third/", writes)
+	healthy.SetEnabled(false)
+	if err := mgr.RegisterDevice("third/", healthy); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := mgr.LogRequest(ctx, entry); ok || err == nil {
+		t.Errorf("failing devices and a disabled one: ok=%v err=%v, want the failures", ok, err)
+	}
+	if got := writes.written(); len(got) != 0 {
+		t.Errorf("devices written: %q, want none", got)
+	}
 
-		// All devices failed, continue should be false
-		continued, err := manager.LogRequest(ctx, entry)
-		if err == nil {
-			t.Error("Expected error when all devices fail")
-		}
-		if continued {
-			t.Error("Expected continue=false when all devices fail, but got true")
-		}
+	healthy.SetEnabled(true)
+	if ok, err := mgr.LogRequest(ctx, entry); err != nil || !ok {
+		t.Errorf("once a device takes the entry: ok=%v err=%v", ok, err)
 	}
 }
 

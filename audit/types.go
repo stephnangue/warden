@@ -517,12 +517,14 @@ type AuditManager interface {
 	// ListDevices returns all registered devices
 	ListDevices() []string
 
-	// LogRequest logs a request to all enabled devices
-	// Returns (continue, error) where continue is true if at least one device succeeded
+	// LogRequest logs a request to all enabled devices.
+	// Returns (continue, error) where continue is true if at least one device
+	// succeeded, and the error is nil whenever it is: the error is why no
+	// device took the entry.
 	LogRequest(ctx context.Context, entry *LogEntry) (bool, error)
 
-	// LogResponse logs a response to all enabled devices
-	// Returns (continue, error) where continue is true if at least one device succeeded
+	// LogResponse logs a response to all enabled devices, and returns what
+	// LogRequest does.
 	LogResponse(ctx context.Context, entry *LogEntry) (bool, error)
 
 	// Unregister all registered audit devices
@@ -533,12 +535,14 @@ type AuditManager interface {
 }
 
 type AuditAccess interface {
-	// LogRequest logs a request to all enabled devices
-	// Returns (continue, error) where continue is true if at least one device succeeded
+	// LogRequest logs a request to all enabled devices.
+	// Returns (continue, error) where continue is true if at least one device
+	// succeeded, and the error is nil whenever it is: the error is why no
+	// device took the entry.
 	LogRequest(ctx context.Context, entry *LogEntry) (bool, error)
 
-	// LogResponse logs a response to all enabled devices
-	// Returns (continue, error) where continue is true if at least one device succeeded
+	// LogResponse logs a response to all enabled devices, and returns what
+	// LogRequest does.
 	LogResponse(ctx context.Context, entry *LogEntry) (bool, error)
 }
 
