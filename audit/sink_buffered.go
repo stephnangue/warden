@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -188,16 +189,27 @@ func (bs *BufferedSink) Close() error {
 		}
 	}
 
-	// Flush remaining buffer with timeout context
+	// Flush remaining buffer with timeout context, then close the sink below
+	// whether or not the flush succeeded: left open, its file would stay
+	// beside the one the next device opens for the same path.
 	ctx, cancel := context.WithTimeout(context.Background(), bs.closeTimeout)
 	defer cancel()
 
+	var failures []error
 	if err := bs.Flush(ctx); err != nil {
-		return fmt.Errorf("failed to flush on close: %w", err)
+		failures = append(failures, fmt.Errorf("failed to flush on close, %d entries are not written: %w", bs.held(), err))
 	}
+	if err := bs.sink.Close(); err != nil {
+		failures = append(failures, err)
+	}
+	return errors.Join(failures...)
+}
 
-	// Close underlying sink
-	return bs.sink.Close()
+// held is how many entries the sink holds.
+func (bs *BufferedSink) held() int {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	return len(bs.buffer)
 }
 
 // Name returns the sink name

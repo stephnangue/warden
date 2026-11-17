@@ -278,6 +278,38 @@ func TestBufferedSink_ShortWrite(t *testing.T) {
 	}
 }
 
+// A sink whose last flush fails is closed all the same, and says how many
+// entries it could not write. Left open, its file stayed beside the one the
+// next device opened for the same path, and the entries went unreported.
+func TestBufferedSink_CloseWhenTheLastFlushFails(t *testing.T) {
+	fileSink, err := NewFileSink(FileSinkConfig{Path: filepath.Join(t.TempDir(), "audit.log")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	realFile := fileSink.file
+	file := &flakyFile{}
+	fileSink.writer = file
+	sink, err := NewBufferedSink(BufferedSinkConfig{Sink: fileSink, BufferSize: 10, FlushPeriod: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	file.accept(0)
+	for n := 1; n <= 2; n++ {
+		if err := sink.Write(ctx, sinkEntry(n)); err != nil {
+			t.Fatalf("entry %d: %v", n, err)
+		}
+	}
+	err = sink.Close()
+	if !errors.Is(err, errDiskFull) || !strings.Contains(err.Error(), "2 entries are not written") {
+		t.Errorf("Close: got %v, want the flush failure and the 2 entries it leaves", err)
+	}
+	if _, err := realFile.Write([]byte("x")); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("the file is still open after Close: writing to it gave %v", err)
+	}
+}
+
 // Closing writes what is still buffered, and a closed sink refuses writes.
 func TestBufferedSink_CloseFlushes(t *testing.T) {
 	sink, file := newFlakySink(t, 10)

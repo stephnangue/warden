@@ -256,6 +256,27 @@ func TestEnableAudit(t *testing.T) {
 		assert.Equal(t, 1, mockDevice.logRequestCalls)
 	})
 
+	// The manager already holds a device at the path, which the table does
+	// not know of. The device just created is closed and the caller told:
+	// it used to be left open, unregistered, and reported as enabled.
+	t.Run("enable audit at a path the manager holds a device for", func(t *testing.T) {
+		core := createMockCoreForAudit()
+		mockManager := core.auditManager.(*mockAuditManagerFull)
+		require.NoError(t, mockManager.RegisterDevice("test/", newMockAuditDevice("stale")))
+		mockDevice := newMockAuditDevice("test")
+		core.auditDevices["mock"] = &mockAuditFactory{device: mockDevice}
+
+		err := core.EnableAudit(ctx, &MountEntry{
+			Class:  mountClassAudit,
+			Type:   "mock",
+			Path:   "test/",
+			Config: map[string]any{"skip_test": "true"},
+		}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to register audit device")
+		assert.Equal(t, 1, mockDevice.closeCalls)
+	})
+
 	t.Run("enable audit with test probe failure", func(t *testing.T) {
 		core := createMockCoreForAudit()
 		mockDevice := newMockAuditDevice("test")
@@ -274,6 +295,9 @@ func TestEnableAudit(t *testing.T) {
 		err := core.EnableAudit(ctx, entry, false)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "audit device failed test message")
+		// The refused device is closed: left open, it would keep its file
+		// and its flush goroutine.
+		assert.Equal(t, 1, mockDevice.closeCalls)
 	})
 
 	t.Run("enable audit adds to audit table", func(t *testing.T) {
@@ -1003,6 +1027,63 @@ func TestLoadAudits_EmptyHMACKeyIsGenerated(t *testing.T) {
 		require.Len(t, core.audit.Entries, 1)
 		assert.NotEmpty(t, core.audit.Entries[0].Config["hmac_key"])
 	})
+}
+
+// A seal writes the entries its audit devices accepted and still buffer, and
+// closes the devices. The unseal that follows gives the path a new device,
+// which carries on in the same file. Before, a seal dropped the devices open:
+// what they buffered was lost when the process exited.
+func TestTeardownAudits_WritesBufferedEntries(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core := newCoreForLoadAuditsTest(t)
+	// The test core's manager is a stand-in that keeps no device.
+	core.auditManager = audit.NewAuditManager(core.logger)
+	auditPath := filepath.Join(t.TempDir(), "audit.log")
+	core.audit.Entries = append(core.audit.Entries, &MountEntry{
+		Class:       mountClassAudit,
+		Type:        "file",
+		Path:        "siem/",
+		Accessor:    "audit_file_test",
+		NamespaceID: namespace.RootNamespaceID,
+		namespace:   namespace.RootNamespace,
+		Config: map[string]any{
+			"file_path": auditPath,
+			"hmac_key":  "k",
+			// Only the seal flushes within this test.
+			"flush_period": int64(time.Hour),
+		},
+	})
+	require.NoError(t, core.persistAudits(ctx))
+	core.audit = NewMountTable()
+
+	logged := func() string {
+		content, err := os.ReadFile(auditPath)
+		require.NoError(t, err)
+		return string(content)
+	}
+	accept := func(id string) {
+		ok, err := core.auditManager.LogRequest(ctx, &audit.LogEntry{
+			Timestamp: time.Now(),
+			Request:   &audit.Request{ID: id},
+		})
+		require.NoError(t, err)
+		require.True(t, ok)
+	}
+
+	require.NoError(t, core.loadAudits(ctx))
+	accept("before-the-seal")
+	require.NotContains(t, logged(), "before-the-seal", "written before the seal, so this test shows nothing")
+
+	require.NoError(t, core.teardownAudits(ctx))
+	assert.Contains(t, logged(), "before-the-seal")
+	assert.Empty(t, core.auditManager.ListDevices())
+
+	require.NoError(t, core.loadAudits(ctx))
+	accept("after-the-unseal")
+	require.NoError(t, core.teardownAudits(ctx))
+	content := logged()
+	before, after := strings.Index(content, "before-the-seal"), strings.Index(content, "after-the-unseal")
+	assert.True(t, before >= 0 && after > before, "want both entries, in the order they were accepted: %s", content)
 }
 
 // newCoreForLoadAuditsTest builds a real-barrier Core wired with the real

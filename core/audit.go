@@ -176,11 +176,21 @@ func (c *Core) loadAudits(ctx context.Context) error {
 		// a real fs.
 		if entry.Config["skip_test"] != "true" {
 			if err := backend.LogTestRequest(ctx); err != nil {
+				c.discardAuditBackend(entry.Path, backend)
 				return fmt.Errorf("audit device %q failed test message: %w", entry.Path, err)
 			}
 		}
 
-		c.auditManager.RegisterDevice(entry.Path, backend)
+		if err := c.auditManager.RegisterDevice(entry.Path, backend); err != nil {
+			// A device is already registered at the path: the one in place
+			// stays, and the one just created is not left open beside it.
+			c.discardAuditBackend(entry.Path, backend)
+			c.logger.Warn("audit device not registered: the one in place at its path is kept",
+				logger.String("path", entry.Path),
+				logger.Err(err),
+			)
+			continue
+		}
 		c.logger.Info("registered audit device",
 			logger.String("path", entry.Path),
 			logger.String("type", entry.Type),
@@ -332,7 +342,14 @@ func (c *Core) teardownAudits(ctx context.Context) error {
 	// Reset the audit mount table to empty instead of nil to avoid
 	// nil pointer dereference when loadAudits is called during next unseal
 	c.audit = NewMountTable()
-	return c.auditManager.Reset(ctx)
+	// Reported here: a seal goes on whatever its teardown returns.
+	err := c.auditManager.Reset(ctx)
+	if err != nil {
+		c.logger.Error("audit devices did not all close: the entries they held and could not write are lost",
+			logger.Err(err),
+		)
+	}
+	return err
 }
 
 // EnableAudit is used to enable a new audit backend
@@ -406,6 +423,7 @@ func (c *Core) EnableAudit(ctx context.Context, entry *MountEntry, updateStorage
 				logger.String("type", entry.Type),
 				logger.Err(err),
 			)
+			c.discardAuditBackend(entry.Path, backend)
 			return fmt.Errorf("audit device failed test message: %w", err)
 
 		}
@@ -418,12 +436,16 @@ func (c *Core) EnableAudit(ctx context.Context, entry *MountEntry, updateStorage
 	if updateStorage {
 		if err := c.persistAuditsLocked(ctx); err != nil {
 			c.logger.Error("failed to persist audit table after enable", logger.Err(err))
+			c.discardAuditBackend(entry.Path, backend)
 			return fmt.Errorf("failed to persist audit table: %w", err)
 		}
 	}
 
 	// Register the backend
-	c.auditManager.RegisterDevice(entry.Path, backend)
+	if err := c.auditManager.RegisterDevice(entry.Path, backend); err != nil {
+		c.discardAuditBackend(entry.Path, backend)
+		return fmt.Errorf("failed to register audit device: %w", err)
+	}
 
 	c.logger.Info("audit backend successfully enabled",
 		logger.String("path", entry.Path),
@@ -464,6 +486,18 @@ func (c *Core) newAuditBackend(ctx context.Context, entry *MountEntry) (audit.De
 		}
 	}
 	return backend, nil
+}
+
+// discardAuditBackend closes a device that was created and will not be
+// registered. Left open, it would keep its file and its flush goroutine for
+// as long as the process runs.
+func (c *Core) discardAuditBackend(path string, backend audit.Device) {
+	if err := backend.Close(); err != nil {
+		c.logger.Warn("failed to close a discarded audit device",
+			logger.String("path", path),
+			logger.Err(err),
+		)
+	}
 }
 
 // DisableAudit is used to disable an existing audit backend
@@ -515,12 +549,18 @@ func (c *Core) DisableAudit(ctx context.Context, path string, updateStorage bool
 		}
 	}
 
-	// Unmount the backend
-	c.auditManager.UnregisterDevice(path)
-
-	c.logger.Info("audit device successfully disabled",
-		logger.String("path", path),
-	)
+	// Unmount the backend. It is disabled whether or not it closed cleanly:
+	// what it could not write is lost, and said to be.
+	if err := c.auditManager.UnregisterDevice(path); err != nil {
+		c.logger.Error("audit device disabled, but it did not close cleanly: the entries it held and could not write are lost",
+			logger.String("path", path),
+			logger.Err(err),
+		)
+	} else {
+		c.logger.Info("audit device successfully disabled",
+			logger.String("path", path),
+		)
+	}
 
 	return true, nil
 }

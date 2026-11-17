@@ -3,6 +3,8 @@ package audit
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 
 	"github.com/stephnangue/warden/logger"
@@ -94,13 +96,22 @@ func (m *manager) GetDevice(name string) (Device, error) {
 	return device, nil
 }
 
+// Reset closes every device and unregisters it: the teardown before a seal.
+// Closing a device writes the entries it still buffers and stops its flush
+// goroutine; one dropped while open would lose those entries when the process
+// exits, and would keep its file open beside the device the next unseal
+// creates for the same path.
+//
+// A device that fails to close is unregistered all the same, so that the next
+// unseal can register its successor. The failures are returned.
 func (m *manager) Reset(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	err := closeDevices(m.devices)
 	m.devices = make(map[string]Device)
 
-	return nil
+	return err
 }
 
 // ListDevices returns all registered devices
@@ -279,10 +290,31 @@ func (m *manager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	return closeDevices(m.devices)
+}
+
+// closeDevices closes every device and reports the ones that failed to. The
+// devices are closed at the same time: a device gives up closing after its
+// own timeout, and a seal waits for the slowest of them, not for their sum.
+func closeDevices(devices map[string]Device) error {
+	names := slices.Sorted(maps.Keys(devices))
+	failures := make([]error, len(names))
+	var closing sync.WaitGroup
+	for i, name := range names {
+		closing.Add(1)
+		go func() {
+			defer closing.Done()
+			if err := devices[name].Close(); err != nil {
+				failures[i] = fmt.Errorf("device %q: %w", name, err)
+			}
+		}()
+	}
+	closing.Wait()
+
 	var errs []error
-	for name, device := range m.devices {
-		if err := device.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("device %q: %w", name, err))
+	for _, err := range failures {
+		if err != nil {
+			errs = append(errs, err)
 		}
 	}
 

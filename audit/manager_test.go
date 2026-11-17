@@ -2,9 +2,11 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -656,6 +658,80 @@ func TestManagerReset(t *testing.T) {
 
 	if devs := mgr.ListDevices(); len(devs) != 0 {
 		t.Errorf("expected 0 devices after reset, got %d", len(devs))
+	}
+}
+
+// A reset closes its devices: an entry a device accepted and still buffers is
+// in the file once the reset returns, and the device takes no entry after it.
+// Before, a seal dropped the devices open, so the entries were lost when the
+// process exited, and each device kept its file and its flush goroutine.
+func TestManagerReset_ClosesDevices(t *testing.T) {
+	ctx := context.Background()
+	logPath := filepath.Join(t.TempDir(), "audit.log")
+	device, err := (&FileDeviceFactory{}).Create(ctx, "file/", "", "", map[string]any{
+		"file_path":    logPath,
+		"hmac_key":     "k",
+		"flush_period": int64(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+	if err := mgr.RegisterDevice("file/", device); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := gatewayRequestEntry()
+	if ok, err := mgr.LogRequest(ctx, entry); err != nil || !ok {
+		t.Fatalf("LogRequest: ok=%v err=%v", ok, err)
+	}
+	if content, _ := os.ReadFile(logPath); len(content) != 0 {
+		t.Fatalf("the entry was written before the reset, so this test shows nothing: %s", content)
+	}
+
+	if err := mgr.Reset(ctx); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), entry.Request.ID) {
+		t.Errorf("the buffered entry is not in the file after the reset: %q", content)
+	}
+	if err := device.LogRequest(ctx, entry); err == nil {
+		t.Error("the device still accepts entries after the reset")
+	}
+}
+
+// failingCloseSink is a sink that cannot be closed.
+type failingCloseSink struct{ discardSink }
+
+func (failingCloseSink) Close() error { return errors.New("close failed") }
+
+// A device that fails to close is reported and unregistered all the same: the
+// next unseal registers a device under the same name, and would be refused
+// while this one stayed.
+func TestManagerReset_DropsADeviceThatFailsToClose(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+	for name, sink := range map[string]Sink{"good/": discardSink{}, "bad/": failingCloseSink{}} {
+		device := NewDevice(name, NewJSONFormat(), sink, &DeviceConfig{Name: name, Enabled: true})
+		if err := mgr.RegisterDevice(name, device); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := mgr.Reset(context.Background())
+	if err == nil || !strings.Contains(err.Error(), `"bad/"`) || strings.Contains(err.Error(), `"good/"`) {
+		t.Errorf("Reset: got %v, want the failure of bad/ alone", err)
+	}
+	if devices := mgr.ListDevices(); len(devices) != 0 {
+		t.Errorf("devices left after the reset: %q", devices)
+	}
+	if err := mgr.RegisterDevice("bad/", NewDevice("bad/", NewJSONFormat(), discardSink{}, nil)); err != nil {
+		t.Errorf("the name of the device that failed to close cannot be registered again: %v", err)
 	}
 }
 
