@@ -2,8 +2,6 @@ package audit
 
 import (
 	"context"
-	"maps"
-	"slices"
 	"time"
 
 	"github.com/stephnangue/warden/logger"
@@ -342,74 +340,6 @@ const (
 	EntryTypeRequest  EntryType = "request"
 	EntryTypeResponse EntryType = "response"
 )
-
-// Clone creates a deep copy of the LogEntry to avoid data races
-func (e *LogEntry) Clone() *LogEntry {
-	if e == nil {
-		return nil
-	}
-
-	// Every struct is copied by value first, then each of its reference fields
-	// (slices, maps, pointers) is copied anew, so devices writing the same
-	// entry share nothing. Copying by value is what keeps a field added later
-	// from being lost: a field-by-field copy once dropped the user principal,
-	// and then auth_time, from every written entry, because the JSON formatter
-	// clones before serialising. TestCloneKeepsEverythingSharesNothing pins it.
-	clone := *e
-
-	if e.Request != nil {
-		req := *e.Request
-		clone.Request = &req
-	}
-
-	if e.Response != nil {
-		resp := *e.Response
-		resp.Warnings = slices.Clone(e.Response.Warnings)
-		if c := e.Response.Credential; c != nil {
-			cred := *c
-			cred.Data = maps.Clone(c.Data)
-			cred.Metadata = maps.Clone(c.Metadata)
-			resp.Credential = &cred
-		}
-		if ar := e.Response.AuthResult; ar != nil {
-			result := *ar
-			result.Policies = slices.Clone(ar.Policies)
-			resp.AuthResult = &result
-		}
-		clone.Response = &resp
-	}
-
-	if e.Auth != nil {
-		auth := *e.Auth
-		auth.Policies = slices.Clone(e.Auth.Policies)
-		auth.Groups = slices.Clone(e.Auth.Groups)
-		auth.Actors = slices.Clone(e.Auth.Actors)
-		if d := e.Auth.Discovery; d != nil {
-			dc := *d
-			dc.AdmittedBy = slices.Clone(d.AdmittedBy)
-			auth.Discovery = &dc
-		}
-		if pr := e.Auth.PolicyResults; pr != nil {
-			results := *pr
-			results.GrantingPolicies = slices.Clone(pr.GrantingPolicies)
-			results.MCPDecision = pr.MCPDecision.Clone()
-			results.Condition = pr.Condition.Clone()
-			if mc := pr.MCPClient; mc != nil {
-				mcCopy := *mc
-				results.MCPClient = &mcCopy
-			}
-			auth.PolicyResults = &results
-		}
-		if u := e.Auth.User; u != nil {
-			user := *u
-			user.Actors = slices.Clone(u.Actors)
-			auth.User = &user
-		}
-		clone.Auth = &auth
-	}
-
-	return &clone
-}
 
 // Format defines the serialization format for audit logs.
 //

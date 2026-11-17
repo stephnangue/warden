@@ -176,21 +176,6 @@ type MCPDecision struct {
 	Condition *ConditionResult `json:"condition,omitempty"`
 }
 
-// Clone returns a deep copy of the MCPDecision. Safe to call on a nil
-// receiver (returns nil).
-func (d *MCPDecision) Clone() *MCPDecision {
-	if d == nil {
-		return nil
-	}
-	clone := *d
-	if d.BatchIndex != nil {
-		idx := *d.BatchIndex
-		clone.BatchIndex = &idx
-	}
-	clone.Condition = d.Condition.Clone()
-	return &clone
-}
-
 // ConditionResult is the audited outcome of evaluating a CEL condition. It is
 // recorded at both audit sites — PolicyResults.Condition (path-level) and
 // MCPDecision.Condition (per-call) — and carries enough to explain a decision
@@ -232,22 +217,6 @@ type ConditionResult struct {
 	// values so a denial is self-explanatory. Sensitive keys are
 	// redacted/salted by the audit format layer.
 	Inputs map[string]string `json:"inputs,omitempty"`
-}
-
-// Clone returns a deep copy of the ConditionResult. Safe to call on a nil
-// receiver (returns nil).
-func (c *ConditionResult) Clone() *ConditionResult {
-	if c == nil {
-		return nil
-	}
-	clone := *c
-	if c.Inputs != nil {
-		clone.Inputs = make(map[string]string, len(c.Inputs))
-		for k, v := range c.Inputs {
-			clone.Inputs[k] = v
-		}
-	}
-	return &clone
 }
 
 // Sanitize CTL-strips string fields so adversary-influenced input values

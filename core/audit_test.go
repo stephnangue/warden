@@ -1743,23 +1743,6 @@ func TestStampMCPClient(t *testing.T) {
 	})
 }
 
-// The async audit writer works from a clone, so a field the clone drops is a
-// field that never reaches the log.
-func TestLogEntry_CloneCarriesMCPClient(t *testing.T) {
-	entry := &audit.LogEntry{Auth: &audit.Auth{PolicyResults: &audit.PolicyResults{
-		MCPClient: &audit.MCPClientInfo{Name: "claude-code", Version: "2.1.0"},
-	}}}
-
-	clone := entry.Clone()
-
-	require.NotNil(t, clone.Auth.PolicyResults.MCPClient)
-	assert.Equal(t, "claude-code", clone.Auth.PolicyResults.MCPClient.Name)
-
-	clone.Auth.PolicyResults.MCPClient.Name = "mutated"
-	assert.Equal(t, "claude-code", entry.Auth.PolicyResults.MCPClient.Name,
-		"the clone must not share the struct with the live entry")
-}
-
 // The stamp is only useful if the entry builders call it. Asserting through
 // them rather than through stampMCPClient directly means removing the call
 // site fails the test.
