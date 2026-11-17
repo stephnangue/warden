@@ -1285,13 +1285,18 @@ func BenchmarkPipelineGatewayRequest(b *testing.B) {
 		return managerWith(b, NewDevice("bench/", factoryFormat(b), discardSink{}, &DeviceConfig{Name: "bench/", Enabled: true}))
 	})
 
+	// The format is given a buffer to reuse, as a device gives it one.
 	run(b, "format", func(b *testing.B) func() error {
 		format := factoryFormat(b)
 		return func() error {
-			if _, err := format.FormatRequest(ctx, req); err != nil {
+			buf := entryBuffers.Get().(*[]byte)
+			defer entryBuffers.Put(buf)
+			out, err := format.AppendRequest(ctx, (*buf)[:0], req)
+			if err != nil {
 				return err
 			}
-			_, err := format.FormatResponse(ctx, resp)
+			out, err = format.AppendResponse(ctx, out[:0], resp)
+			*buf = out[:0]
 			return err
 		}
 	})

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1756,6 +1758,211 @@ func TestGoldenEntries(t *testing.T) {
 	if !t.Failed() {
 		t.Error("the golden file and the corpus hold the same records in a different layout")
 	}
+}
+
+// randomStrings are the strings randomValue picks from, beside those it makes
+// up: each holds something the encoder treats in a way of its own.
+var randomStrings = []string{
+	"x", "a plain value", "with space ", "42", "null", "{}",
+	hostile,
+	"quote \" backslash \\ slash /",
+	"<script>&amp;</script>",
+	"tab\there, newline\nthere, return\r, bell\a, null\x00, escape\x1b, del\x7f",
+	"not UTF-8: \xff \xc3 \xe2\x82 \xf0\x9f\x98",
+	"separators " + string(rune(0x2028)) + string(rune(0x2029)),
+	"replacement " + string(rune(0xFFFD)) + " private " + string(rune(0xE000)) + " astral " + string(rune(0x1F600)),
+	strings.Repeat("long ", 200),
+}
+
+// randomString is a string picked from randomStrings, or made of bytes drawn
+// one by one: letters, the characters JSON and HTML escape, control
+// characters, and bytes that are UTF-8 only by chance.
+func randomString(r *rand.Rand) string {
+	if r.IntN(3) > 0 {
+		return randomStrings[r.IntN(len(randomStrings))]
+	}
+	const letters = "abcXYZ019 _-./:@"
+	const escaped = "\"\\<>&\b\f\n\r\t\x00\x01\x1f\x7f"
+	b := make([]byte, r.IntN(12))
+	for i := range b {
+		switch r.IntN(4) {
+		case 0:
+			b[i] = escaped[r.IntN(len(escaped))]
+		case 1:
+			b[i] = byte(0x80 + r.IntN(0x80))
+		default:
+			b[i] = letters[r.IntN(len(letters))]
+		}
+	}
+	return string(b)
+}
+
+// randomTimes are the timestamps randomValue picks from: the zero time, times
+// with and without a fraction of a second, and times away from UTC.
+var randomTimes = []time.Time{
+	{},
+	goldenTime,
+	time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	time.Date(2026, 1, 2, 3, 4, 5, 120000000, time.FixedZone("east", 5*3600+30*60)),
+	time.Date(1999, 12, 31, 23, 59, 59, 999999000, time.FixedZone("west", -8*3600)),
+}
+
+// randomValue sets v, and everything below it, at random. Every kind of
+// field takes each value its encoding has a rule for: empty and not, zero,
+// negative and extreme numbers, a nil pointer and one to a zero value, a nil,
+// an empty and a filled slice or map, a map with more keys than the encoder
+// sorts without allocating.
+func randomValue(v reflect.Value, r *rand.Rand) {
+	switch v.Kind() {
+	case reflect.Pointer:
+		if r.IntN(3) == 0 {
+			v.SetZero()
+			return
+		}
+		v.Set(reflect.New(v.Type().Elem()))
+		// One in four stays a pointer to a zero value.
+		if r.IntN(4) > 0 {
+			randomValue(v.Elem(), r)
+		}
+	case reflect.Struct:
+		if v.Type() == reflect.TypeOf(time.Time{}) {
+			v.Set(reflect.ValueOf(randomTimes[r.IntN(len(randomTimes))]))
+			return
+		}
+		for i := range v.NumField() {
+			if v.Type().Field(i).IsExported() {
+				randomValue(v.Field(i), r)
+			}
+		}
+	case reflect.Slice:
+		switch r.IntN(4) {
+		case 0:
+			v.SetZero()
+		case 1:
+			v.Set(reflect.MakeSlice(v.Type(), 0, 0))
+		default:
+			s := reflect.MakeSlice(v.Type(), 1+r.IntN(3), 4)
+			for i := range s.Len() {
+				randomValue(s.Index(i), r)
+			}
+			v.Set(s)
+		}
+	case reflect.Map:
+		switch r.IntN(4) {
+		case 0:
+			v.SetZero()
+		case 1:
+			v.Set(reflect.MakeMap(v.Type()))
+		default:
+			m := reflect.MakeMap(v.Type())
+			for range 1 + r.IntN(24) {
+				k, e := reflect.New(v.Type().Key()).Elem(), reflect.New(v.Type().Elem()).Elem()
+				randomValue(k, r)
+				randomValue(e, r)
+				m.SetMapIndex(k, e)
+			}
+			v.Set(m)
+		}
+	case reflect.String:
+		if r.IntN(3) == 0 {
+			v.SetString("")
+			return
+		}
+		v.SetString(randomString(r))
+	case reflect.Bool:
+		v.SetBool(r.IntN(2) == 0)
+	case reflect.Int, reflect.Int64:
+		numbers := []int64{0, 0, 1, -1, 42, -42, 1794829815, math.MaxInt64, math.MinInt64}
+		v.SetInt(numbers[r.IntN(len(numbers))])
+	default:
+		panic(fmt.Sprintf("randomValue: an audit entry holds a %s, which this test cannot fill", v.Kind()))
+	}
+}
+
+// firstDifference shows where two encodings part: the bytes around the first
+// one that differs.
+func firstDifference(got, want []byte) string {
+	at := 0
+	for at < len(got) && at < len(want) && got[at] == want[at] {
+		at++
+	}
+	around := func(b []byte) string {
+		return fmt.Sprintf("%q", b[max(0, at-60):min(len(b), at+60)])
+	}
+	return fmt.Sprintf("at byte %d:\n got %s\nwant %s", at, around(got), around(want))
+}
+
+// The encoder writes an entry byte for byte as encoding/json does. The format
+// is a released one, and encoding/json is its definition: a field the encoder
+// leaves out or misplaces, an omitempty it applies wrongly, a character it
+// escapes differently, a map it orders otherwise each fail here. Entries are
+// filled by reflection, so a field added to a structure is part of the test
+// the day it is added.
+func TestEncoderMatchesEncodingJSON(t *testing.T) {
+	check := func(t *testing.T, name string, entry *LogEntry) bool {
+		t.Helper()
+		want, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatalf("%s: encoding/json: %v", name, err)
+		}
+		enc := jsonEncoder{}
+		if err := enc.entry(entry); err != nil {
+			t.Fatalf("%s: the encoder: %v", name, err)
+		}
+		if string(enc.buf) != string(want) {
+			t.Errorf("%s: the encoder differs from encoding/json %s", name, firstDifference(enc.buf, want))
+			return false
+		}
+		return true
+	}
+
+	for _, e := range goldenEntries() {
+		check(t, e.name, e.entry)
+	}
+
+	r := rand.New(rand.NewPCG(2026, 1117))
+	for n := range 5000 {
+		var entry LogEntry
+		randomValue(reflect.ValueOf(&entry).Elem(), r)
+		if !check(t, fmt.Sprintf("random entry %d", n), &entry) {
+			return
+		}
+	}
+}
+
+// A timestamp encoding/json refuses is refused by the encoder too, where it
+// would otherwise write a year no parser of the format reads.
+func TestEncoder_RefusesWhatEncodingJSONRefuses(t *testing.T) {
+	entry := &LogEntry{Timestamp: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}
+	if _, err := json.Marshal(entry); err == nil {
+		t.Fatal("encoding/json accepts a five-digit year, so this test shows nothing")
+	}
+	enc := jsonEncoder{}
+	if err := enc.entry(entry); err == nil {
+		t.Errorf("the encoder wrote %s", enc.buf)
+	}
+}
+
+// FuzzAppendJSONString holds the encoder's strings to encoding/json's: what
+// is escaped, how, and what is done with bytes that are not UTF-8. Its seeds,
+// which every test run goes through, are each single byte and the strings
+// the random entries use.
+func FuzzAppendJSONString(f *testing.F) {
+	for b := range 256 {
+		f.Add(string([]byte{byte(b)}))
+	}
+	for _, s := range randomStrings {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		want, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := appendJSONString(nil, s); string(got) != string(want) {
+			t.Errorf("%q: the encoder differs from encoding/json %s", s, firstDifference(got, want))
+		}
+	})
 }
 
 // goldenDeltaMark starts a line of the golden file that holds a difference.

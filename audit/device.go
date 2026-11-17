@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -105,6 +106,39 @@ func (d *device) shouldLog(entry *LogEntry) bool {
 	return true
 }
 
+// entryBuffers holds the buffers entries are formatted in. An entry is
+// formatted, handed to its sink, and its buffer put back for the next: a sink
+// does not keep what it is handed. A buffer still holds the bytes of the last
+// entry formatted in it; no device writes them, since each writes only what
+// its own format appended.
+var entryBuffers = sync.Pool{New: func() any { return new([]byte) }}
+
+// maxPooledEntry is the largest buffer put back in the pool. One entry far
+// larger than the others does not leave its buffer behind for good.
+const maxPooledEntry = 64 << 10
+
+// write formats entry, as a request or as a response, in a pooled buffer and
+// hands it to the sink. It says which of the two failed.
+func (d *device) write(ctx context.Context, entry *LogEntry, asRequest bool) (formatErr, sinkErr error) {
+	buf := entryBuffers.Get().(*[]byte)
+
+	var formatted []byte
+	if asRequest {
+		formatted, formatErr = d.format.AppendRequest(ctx, (*buf)[:0], entry)
+	} else {
+		formatted, formatErr = d.format.AppendResponse(ctx, (*buf)[:0], entry)
+	}
+	if formatErr == nil {
+		sinkErr = d.sink.Write(ctx, formatted)
+	}
+
+	if cap(formatted) <= maxPooledEntry {
+		*buf = formatted[:0]
+		entryBuffers.Put(buf)
+	}
+	return formatErr, sinkErr
+}
+
 // LogRequest logs a request
 func (d *device) LogRequest(ctx context.Context, entry *LogEntry) error {
 	if !d.enabled.Load() {
@@ -115,15 +149,12 @@ func (d *device) LogRequest(ctx context.Context, entry *LogEntry) error {
 		return nil
 	}
 
-	// Format the entry
-	formatted, err := d.format.FormatRequest(ctx, entry)
-	if err != nil {
-		return fmt.Errorf("failed to format request: %w", err)
+	formatErr, sinkErr := d.write(ctx, entry, true)
+	if formatErr != nil {
+		return fmt.Errorf("failed to format request: %w", formatErr)
 	}
-
-	// Write to sink
-	if err := d.sink.Write(ctx, formatted); err != nil {
-		return fmt.Errorf("failed to write to sink: %w", err)
+	if sinkErr != nil {
+		return fmt.Errorf("failed to write to sink: %w", sinkErr)
 	}
 
 	return nil
@@ -139,15 +170,12 @@ func (d *device) LogResponse(ctx context.Context, entry *LogEntry) error {
 		return nil
 	}
 
-	// Format the entry
-	formatted, err := d.format.FormatResponse(ctx, entry)
-	if err != nil {
-		return fmt.Errorf("failed to format response: %w", err)
+	formatErr, sinkErr := d.write(ctx, entry, false)
+	if formatErr != nil {
+		return fmt.Errorf("failed to format response: %w", formatErr)
 	}
-
-	// Write to sink
-	if err := d.sink.Write(ctx, formatted); err != nil {
-		return fmt.Errorf("failed to write to sink: %w", err)
+	if sinkErr != nil {
+		return fmt.Errorf("failed to write to sink: %w", sinkErr)
 	}
 
 	return nil
@@ -166,15 +194,12 @@ func (d *device) LogTestRequest(ctx context.Context) error {
 		},
 	}
 
-	// Format the entry
-	formatted, err := d.format.FormatRequest(ctx, entry)
-	if err != nil {
-		return fmt.Errorf("failed to format test request: %w", err)
+	formatErr, sinkErr := d.write(ctx, entry, true)
+	if formatErr != nil {
+		return fmt.Errorf("failed to format test request: %w", formatErr)
 	}
-
-	// Write to sink
-	if err := d.sink.Write(ctx, formatted); err != nil {
-		return fmt.Errorf("failed to write test request to sink: %w", err)
+	if sinkErr != nil {
+		return fmt.Errorf("failed to write test request to sink: %w", sinkErr)
 	}
 
 	return nil

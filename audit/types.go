@@ -411,13 +411,19 @@ func (e *LogEntry) Clone() *LogEntry {
 	return &clone
 }
 
-// Format defines the serialization format for audit logs
+// Format defines the serialization format for audit logs.
+//
+// A format appends to the buffer it is given, so that a device formats entry
+// after entry in the same one. It does not change the entry: every device is
+// handed the same.
 type Format interface {
-	// FormatRequest formats a request entry
-	FormatRequest(ctx context.Context, entry *LogEntry) ([]byte, error)
+	// AppendRequest appends entry, formatted as a request, to dst and
+	// returns the extended buffer.
+	AppendRequest(ctx context.Context, dst []byte, entry *LogEntry) ([]byte, error)
 
-	// FormatResponse formats a response entry
-	FormatResponse(ctx context.Context, entry *LogEntry) ([]byte, error)
+	// AppendResponse appends entry, formatted as a response, to dst and
+	// returns the extended buffer.
+	AppendResponse(ctx context.Context, dst []byte, entry *LogEntry) ([]byte, error)
 
 	// Name returns the format name
 	Name() string
@@ -425,7 +431,9 @@ type Format interface {
 
 // Sink is the interface for audit log destinations
 type Sink interface {
-	// Write writes the formatted entry to the sink
+	// Write writes the formatted entry to the sink. The entry is the
+	// caller's, who reuses it once Write returns: a sink that needs it
+	// longer copies it.
 	Write(ctx context.Context, entry []byte) error
 
 	// Close closes the sink and releases resources

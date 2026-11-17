@@ -2,8 +2,12 @@ package audit
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -237,6 +241,86 @@ func TestDeviceBackendMethods(t *testing.T) {
 
 	if paths := d.SpecialPaths(); paths != nil {
 		t.Error("SpecialPaths should return nil")
+	}
+}
+
+// keepingSink is a sink that keeps a copy of each entry it is given.
+type keepingSink struct {
+	discardSink
+	mu      sync.Mutex
+	entries []string
+}
+
+func (s *keepingSink) Write(_ context.Context, entry []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entries = append(s.entries, string(entry))
+	return nil
+}
+
+// Devices format their entries in buffers they take from a common pool and
+// put back. Entries logged at the same time, by devices that format them
+// differently, each reach their sink whole: none holds bytes of another, or
+// of the entry its buffer held before.
+func TestDevice_EntriesDoNotShareABuffer(t *testing.T) {
+	type sunk struct {
+		prefix string
+		sink   *keepingSink
+		device Device
+	}
+	var devices []sunk
+	for _, prefix := range []string{"first:", "second:"} {
+		sink := &keepingSink{}
+		format := NewJSONFormat(WithPrefix(prefix))
+		devices = append(devices, sunk{prefix, sink, NewDevice(prefix, format, sink, &DeviceConfig{Name: prefix, Enabled: true})})
+	}
+
+	const loggers, perLogger = 8, 200
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for l := range loggers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range perLogger {
+				// Entries of very different sizes, each naming itself twice.
+				id := fmt.Sprintf("logger-%d-entry-%d", l, n)
+				entry := &LogEntry{
+					Timestamp: time.Now(),
+					Request:   &Request{ID: id, Path: strings.Repeat("/segment", n%40) + "/" + id},
+				}
+				for _, d := range devices {
+					if err := d.device.LogRequest(ctx, entry); err != nil {
+						t.Errorf("%s %s: %v", d.prefix, id, err)
+						return
+					}
+					if err := d.device.LogResponse(ctx, entry); err != nil {
+						t.Errorf("%s %s: %v", d.prefix, id, err)
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	for _, d := range devices {
+		if got, want := len(d.sink.entries), 2*loggers*perLogger; got != want {
+			t.Fatalf("%s %d entries, want %d", d.prefix, got, want)
+		}
+		for _, line := range d.sink.entries {
+			body, ok := strings.CutPrefix(line, d.prefix)
+			if !ok {
+				t.Fatalf("%s an entry without the device's prefix: %q", d.prefix, line)
+			}
+			var entry LogEntry
+			if err := json.Unmarshal([]byte(body), &entry); err != nil {
+				t.Fatalf("%s an entry that is not JSON (%v): %q", d.prefix, err, line)
+			}
+			if entry.Request == nil || !strings.HasSuffix(entry.Request.Path, "/"+entry.Request.ID) {
+				t.Fatalf("%s an entry made of two: %q", d.prefix, line)
+			}
+		}
 	}
 }
 
