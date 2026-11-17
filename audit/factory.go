@@ -143,7 +143,7 @@ func jsonFormatFor(conf *FileDeviceConfig) (*JSONFormat, []string) {
 	switch {
 	case len(conf.SaltFields) == 0:
 	case conf.HMACKey != "":
-		opts = append(opts, WithSaltFunc(NewHMACer(conf.HMACKey).SaltFunc()), WithSaltFields(conf.SaltFields))
+		opts = append(opts, WithHMACer(NewHMACer(conf.HMACKey)), WithSaltFields(conf.SaltFields))
 	default:
 		omit = fieldPaths(omit, conf.SaltFields, false)
 		warnings = append(warnings, fmt.Sprintf("no hmac_key: these fields are omitted instead of salted: %v", conf.SaltFields))

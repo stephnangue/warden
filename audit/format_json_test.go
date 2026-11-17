@@ -1558,8 +1558,9 @@ func goldenFormats(t *testing.T) []goldenFormat {
 			"hmac_key": goldenKey, "salt_fields": []string{inputs + ".agent", inputs + ".agent.metadata.env"},
 		})},
 
-		// A path and a path below it, and a path listed twice: each value is
-		// salted once per path that reaches it. The factory never builds this.
+		// A path and a path below it, and a path listed twice: a value is
+		// salted once, however many paths reach it, and its salted form is
+		// the one sys/audit-hash computes. The factory never builds this.
 		{name: "direct-overlapping-salt-paths", broad: true, format: NewJSONFormat(
 			WithSaltFunc(hmac),
 			WithSaltFields([]string{
@@ -1580,6 +1581,7 @@ func goldenFormats(t *testing.T) []goldenFormat {
 			WithSaltFields([]string{"agent.metadata.env", "auth.token_id", "auth"}),
 			WithOmitFields([]string{"request.headers", "no.such.field", "request.client_ip"}),
 		)},
+		// A value its salt function fails on is written empty, not in clear.
 		{name: "direct-salt-function-fails", broad: true, format: NewJSONFormat(
 			WithSaltFunc(func(context.Context, string) (string, error) { return "", errors.New("no salt") }),
 			WithSaltFields([]string{"auth.token_id", credentialData}),
@@ -1905,8 +1907,9 @@ func TestEncoderMatchesEncodingJSON(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: encoding/json: %v", name, err)
 		}
-		enc := jsonEncoder{}
-		if err := enc.entry(entry); err != nil {
+		// With nothing to redact: what is compared is the encoding.
+		enc := jsonEncoder{red: &redaction{}}
+		if err := enc.entry(entry, entry.Type); err != nil {
 			t.Fatalf("%s: the encoder: %v", name, err)
 		}
 		if string(enc.buf) != string(want) {
@@ -1937,8 +1940,8 @@ func TestEncoder_RefusesWhatEncodingJSONRefuses(t *testing.T) {
 	if _, err := json.Marshal(entry); err == nil {
 		t.Fatal("encoding/json accepts a five-digit year, so this test shows nothing")
 	}
-	enc := jsonEncoder{}
-	if err := enc.entry(entry); err == nil {
+	enc := jsonEncoder{red: &redaction{}}
+	if err := enc.entry(entry, entry.Type); err == nil {
 		t.Errorf("the encoder wrote %s", enc.buf)
 	}
 }
