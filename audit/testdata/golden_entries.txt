@@ -490,9 +490,9 @@
 === input-key-prefix-of-another | empty-parts | response
 ~ 569 0
 === input-key-prefix-of-another | full | request
-~ 2519 732 hmac-sha256:2ba2c4c4bc7bae368c15470fae84957f9b1abb9ba47189f8fc9a4ba2c47ceab3
+~ 2519 704 hmac-sha256:2ba2c4c4bc7bae368c15470fae84957f9b1abb9ba47189f8fc9a4ba2c47ceab3","agent.metadata.env":"hmac-sha256:bd9da7a93e4fd9ed63dfa4a17fc18330fc338b23c21985cf308c47ddb24c22ba
 === input-key-prefix-of-another | full | response
-~ 2520 732 hmac-sha256:2ba2c4c4bc7bae368c15470fae84957f9b1abb9ba47189f8fc9a4ba2c47ceab3
+~ 2520 704 hmac-sha256:2ba2c4c4bc7bae368c15470fae84957f9b1abb9ba47189f8fc9a4ba2c47ceab3","agent.metadata.env":"hmac-sha256:bd9da7a93e4fd9ed63dfa4a17fc18330fc338b23c21985cf308c47ddb24c22ba
 === input-key-prefix-of-another | gateway-request | request
 ~ 1543 0
 === input-key-prefix-of-another | gateway-request | response
@@ -506,9 +506,9 @@
 === input-key-prefix-of-another | login | response
 ~ 535 0
 === input-key-prefix-of-another | denied | request
-~ 922 0
+~ 730 185 hmac-sha256:b89b2482bf1223a0433ecfb9a1c960cd07f0f8829bd78d3fadd455756db9fb99
 === input-key-prefix-of-another | denied | response
-~ 923 0
+~ 731 185 hmac-sha256:b89b2482bf1223a0433ecfb9a1c960cd07f0f8829bd78d3fadd455756db9fb99
 === input-key-prefix-of-another | discovery | request
 ~ 764 0
 === input-key-prefix-of-another | discovery | response

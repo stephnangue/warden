@@ -1529,8 +1529,9 @@ func goldenFormats(t *testing.T) []goldenFormat {
 		{name: "whole-parts-omitted", broad: true, format: device(map[string]any{
 			"hmac_key": goldenKey, "omit_fields": []string{"auth", "request", "response", "error"},
 		})},
-		// Two listed keys, one of whose names starts with the other's: the
-		// longer one is taken for a key below the shorter and left in clear.
+		// Two listed keys, one of whose names starts with the other's: two
+		// keys, both salted. The longer one was once taken for a key below
+		// the shorter, dropped from the list, and left in clear.
 		{name: "input-key-prefix-of-another", broad: true, format: device(map[string]any{
 			"hmac_key": goldenKey, "salt_fields": []string{inputs + ".agent", inputs + ".agent.metadata.env"},
 		})},
