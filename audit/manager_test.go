@@ -244,11 +244,17 @@ func faultyDevice(name string, log *writeLog, down *atomic.Bool) Device {
 // managerWithServerLog is a manager and what it writes to the server log.
 func managerWithServerLog(t *testing.T) (AuditManager, *bytes.Buffer) {
 	t.Helper()
+	log, serverLog := serverLogger()
+	return NewAuditManager(log), serverLog
+}
+
+// serverLogger is a logger and what it writes: the server log of a test.
+func serverLogger() (*logger.GatedLogger, *bytes.Buffer) {
 	var serverLog bytes.Buffer
 	config := logger.DefaultConfig()
 	config.Outputs = nil
 	log, _ := logger.NewGatedLogger(config, logger.GatedWriterConfig{Underlying: &serverLog, InitialState: logger.GateOpen})
-	return NewAuditManager(log), &serverLog
+	return log, &serverLog
 }
 
 // terminalColours matches the colour codes the server log is written with.

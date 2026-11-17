@@ -14,6 +14,10 @@ import (
 const (
 	// DefaultCloseTimeout is the maximum time to wait for graceful shutdown
 	DefaultCloseTimeout = 10 * time.Second
+
+	// maxBufferedFactor times the buffer size is the most entries a sink
+	// keeps while it cannot write them.
+	maxBufferedFactor = 2
 )
 
 // batchWriter is a sink that takes several entries in one write.
@@ -49,10 +53,12 @@ type BufferedSink struct {
 
 	// inFlight is how many entries the flush in progress took out of the
 	// buffer and has not yet written; zero between flushes. failing is set by
-	// a flush the sink did not take whole and cleared by one it did. Both
-	// are guarded by mu.
-	inFlight int
-	failing  bool
+	// a flush the sink did not take whole and cleared by one it did.
+	// droppedEntries counts the entries dropped since the sink last took a
+	// whole flush. All three are guarded by mu.
+	inFlight       int
+	failing        bool
+	droppedEntries int
 
 	// flushMu serialises the flushes, so that entries reach the sink in the
 	// order they were accepted. It guards out and outEnds, the buffer a
@@ -121,17 +127,43 @@ func NewBufferedSink(config BufferedSinkConfig) (*BufferedSink, error) {
 // A sink that fails with a full buffer refuses every write: each writer
 // flushes in its turn, and is told if that fails too. The entries the sink
 // could not take are kept to be written when it recovers, those of refused
-// writes among them.
+// writes among them, up to maxBufferedFactor times the buffer size. Past
+// that an entry is dropped: a sink that fails for long would otherwise take
+// the memory of the process, and everything buffered with it.
 //
 // One write is not refused that a sink writing under a single lock would
 // have: one that comes while the first flush to fail is still in progress.
 // Nothing says yet that the sink fails, and its entry is kept like those
 // accepted before it.
 func (bs *BufferedSink) Write(ctx context.Context, entry []byte) error {
+	bound := maxBufferedFactor * bs.bufferSize
+
 	bs.mu.Lock()
-	if bs.closed {
+	for {
+		if bs.closed {
+			bs.mu.Unlock()
+			return errSinkClosed
+		}
+		if bs.heldLocked() < bound {
+			break
+		}
+		// The sink holds as many entries as it may. That alone does not say
+		// it fails: writers may have filled the buffer behind a flush that
+		// is only slow. Flushing answers it, after waiting for the one in
+		// progress. The entry is dropped only if that failed and made no
+		// room.
 		bs.mu.Unlock()
-		return errSinkClosed
+		err := bs.flush(ctx, true)
+		bs.mu.Lock()
+		if err != nil && bs.heldLocked() >= bound {
+			bs.droppedEntries++
+			first := bs.droppedEntries == 1
+			bs.mu.Unlock()
+			if first {
+				bs.dropsEntries(err)
+			}
+			return fmt.Errorf("audit buffer is full, entry dropped: %w", err)
+		}
 	}
 
 	bs.pending = append(bs.pending, entry...)
@@ -159,6 +191,30 @@ var errSinkClosed = errors.New("sink is closed")
 // as long as the write lasts. The caller holds mu.
 func (bs *BufferedSink) heldLocked() int {
 	return len(bs.ends) + bs.inFlight
+}
+
+// dropsEntries reports that the sink holds as many entries as it may and
+// drops what it is given. It is called for the first entry of a run: there is
+// one per request while the sink fails.
+func (bs *BufferedSink) dropsEntries(cause error) {
+	if bs.logger != nil {
+		bs.logger.Error("audit buffer is full: entries are dropped until its sink recovers",
+			logger.String("sink", bs.sink.Name()),
+			logger.Int("entries_kept", maxBufferedFactor*bs.bufferSize),
+			logger.Err(cause),
+		)
+	}
+}
+
+// recovered reports that the sink took a whole flush again after dropping
+// entries, and how many it dropped: they are in no file.
+func (bs *BufferedSink) recovered(dropped int) {
+	if bs.logger != nil {
+		bs.logger.Warn("audit sink recovered: the entries dropped while it failed are not in the log",
+			logger.String("sink", bs.sink.Name()),
+			logger.Int("entries_dropped", dropped),
+		)
+	}
 }
 
 // Flush flushes the buffer to the underlying sink
@@ -197,14 +253,19 @@ func (bs *BufferedSink) flush(ctx context.Context, ifFull bool) error {
 
 	bs.mu.Lock()
 	bs.inFlight = 0
+	dropped := 0
 	if written < len(bs.outEnds) || writeErr != nil {
 		bs.putBackLocked(written)
 		bs.failing = true
 	} else {
 		bs.failing = false
+		dropped, bs.droppedEntries = bs.droppedEntries, 0
 	}
 	bs.mu.Unlock()
 
+	if dropped > 0 {
+		bs.recovered(dropped)
+	}
 	if writeErr != nil {
 		return fmt.Errorf("failed to write buffered entry: %w", writeErr)
 	}
