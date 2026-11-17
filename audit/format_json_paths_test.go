@@ -145,6 +145,19 @@ var notOmittable = map[string]bool{"type": true, "timestamp": true}
 // entry structure without an omit case fails here, rather than becoming a
 // value an operator cannot keep out of their log.
 func TestOmit_EveryFieldIsOmittable(t *testing.T) {
+	for _, path := range entryFieldPaths() {
+		if err := checkFieldPath(false, path); err != nil {
+			t.Errorf("%s cannot be omitted: %v", path, err)
+		}
+	}
+}
+
+// entryFieldPaths is the path of every field an audit entry records, found by
+// walking its structures, so a field added later is part of it. It leaves out
+// the fields no omit path removes and those inside a structure omitted only
+// as a whole.
+func entryFieldPaths() []string {
+	var paths []string
 	var walk func(prefix string, typ reflect.Type)
 	walk = func(prefix string, typ reflect.Type) {
 		for i := 0; i < typ.NumField(); i++ {
@@ -157,10 +170,7 @@ func TestOmit_EveryFieldIsOmittable(t *testing.T) {
 			if notOmittable[path] {
 				continue
 			}
-			if err := checkFieldPath(false, path); err != nil {
-				t.Errorf("%s (%s.%s) cannot be omitted: %v", path, typ.Name(), field.Name, err)
-				continue
-			}
+			paths = append(paths, path)
 			ft := field.Type
 			if ft.Kind() == reflect.Pointer {
 				ft = ft.Elem()
@@ -171,6 +181,7 @@ func TestOmit_EveryFieldIsOmittable(t *testing.T) {
 		}
 	}
 	walk("", reflect.TypeOf(LogEntry{}))
+	return paths
 }
 
 // An unknown path costs nothing at format time: it is skipped, and the paths
