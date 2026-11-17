@@ -288,38 +288,6 @@ func TestBufferedSink_ShortWrite(t *testing.T) {
 	}
 }
 
-// A sink whose last flush fails is closed all the same, and says how many
-// entries it could not write. Left open, its file stayed beside the one the
-// next device opened for the same path, and the entries went unreported.
-func TestBufferedSink_CloseWhenTheLastFlushFails(t *testing.T) {
-	fileSink, err := NewFileSink(FileSinkConfig{Path: filepath.Join(t.TempDir(), "audit.log")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	realFile := fileSink.file
-	file := &flakyFile{}
-	fileSink.writer = file
-	sink, err := NewBufferedSink(BufferedSinkConfig{Sink: fileSink, BufferSize: 10, FlushPeriod: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-
-	file.accept(0)
-	for n := 1; n <= 2; n++ {
-		if err := sink.Write(ctx, sinkEntry(n)); err != nil {
-			t.Fatalf("entry %d: %v", n, err)
-		}
-	}
-	err = sink.Close()
-	if !errors.Is(err, errDiskFull) || !strings.Contains(err.Error(), "2 entries are not written") {
-		t.Errorf("Close: got %v, want the flush failure and the 2 entries it leaves", err)
-	}
-	if _, err := realFile.Write([]byte("x")); !errors.Is(err, os.ErrClosed) {
-		t.Errorf("the file is still open after Close: writing to it gave %v", err)
-	}
-}
-
 // A flush hands a file its whole buffer in one write, where it used to make
 // one per entry while every request waited for the buffer.
 func TestBufferedSink_OneWritePerFlush(t *testing.T) {
@@ -413,6 +381,342 @@ func TestBufferedSink_SinkWithoutBatches(t *testing.T) {
 	}
 	if got, want := inner.entries, entries(1, 4); !slices.Equal(got, want) {
 		t.Errorf("entries the sink took: %q, want %q", got, want)
+	}
+}
+
+// gate is what a gatedSink is told to do with the write it holds: take the
+// whole batch, or only its first take bytes and fail with err.
+type gate struct {
+	take int
+	err  error
+}
+
+// gatedSink is a batch sink that holds each write until it is told what to do
+// with it, and keeps what it wrote. It says on started when a write begins.
+type gatedSink struct {
+	discardSink
+	started chan struct{}
+	gates   chan gate
+
+	mu  sync.Mutex
+	out bytes.Buffer
+}
+
+func newGatedSink() *gatedSink {
+	return &gatedSink{started: make(chan struct{}, 16), gates: make(chan gate, 16)}
+}
+
+func (s *gatedSink) WriteBatch(_ context.Context, batch []byte) (int, error) {
+	s.started <- struct{}{}
+	g := <-s.gates
+	n := len(batch)
+	if g.err != nil {
+		n = g.take
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.out.Write(batch[:n])
+	return n, g.err
+}
+
+func (s *gatedSink) content() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.out.String()
+}
+
+// newGatedBufferedSink is a buffered sink of bufferSize entries over a gated
+// sink.
+func newGatedBufferedSink(t *testing.T, bufferSize int) (*BufferedSink, *gatedSink) {
+	t.Helper()
+	inner := newGatedSink()
+	sink, err := NewBufferedSink(BufferedSinkConfig{
+		Sink: inner, BufferSize: bufferSize, FlushPeriod: time.Hour, CloseTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// Let through whatever the test left held or buffered.
+		for range cap(inner.gates) - len(inner.gates) {
+			inner.gates <- gate{}
+		}
+		sink.Close()
+	})
+	return sink, inner
+}
+
+// attempt waits for the sink to begin a write, which it holds until told what
+// to do with it.
+func (s *gatedSink) attempt(t *testing.T, what string) {
+	t.Helper()
+	select {
+	case <-s.started:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s: the sink was not written to", what)
+	}
+}
+
+// writeInBackground writes entry n and returns where its result will come.
+func writeInBackground(sink *BufferedSink, n int) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- sink.Write(context.Background(), sinkEntry(n)) }()
+	return done
+}
+
+// within returns what comes on done, or fails the test if nothing does: the
+// write is stuck behind something it should not wait for.
+func within(t *testing.T, done <-chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not return", what)
+		return nil
+	}
+}
+
+// Entries are accepted while a flush writes to the file: a request's entry
+// waits for the copy of another, not for the disk.
+func TestBufferedSink_AcceptsEntriesWhileFlushing(t *testing.T) {
+	sink, file := newGatedBufferedSink(t, 3)
+	ctx := context.Background()
+
+	for n := 1; n <= 2; n++ {
+		if err := sink.Write(ctx, sinkEntry(n)); err != nil {
+			t.Fatalf("entry %d: %v", n, err)
+		}
+	}
+	flushing := writeInBackground(sink, 3)
+	<-file.started
+
+	// The file has the first three entries and has not returned.
+	for n := 4; n <= 5; n++ {
+		if err := within(t, writeInBackground(sink, n), "a write during the flush"); err != nil {
+			t.Fatalf("entry %d, written during the flush: %v", n, err)
+		}
+	}
+
+	file.gates <- gate{}
+	if err := within(t, flushing, "the write that flushed"); err != nil {
+		t.Fatalf("the write that flushed: %v", err)
+	}
+	file.gates <- gate{}
+	if err := sink.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := file.content(), sinkLines(1, 5); got != want {
+		t.Errorf("file:\n got %q\nwant %q", got, want)
+	}
+}
+
+// A file slower than its writers holds them back: the writer that fills the
+// buffer again waits for the flush in progress, then flushes in its turn. The
+// buffer does not grow without limit behind a slow disk.
+func TestBufferedSink_SlowFileHoldsWritersBack(t *testing.T) {
+	sink, file := newGatedBufferedSink(t, 2)
+	ctx := context.Background()
+
+	if err := sink.Write(ctx, sinkEntry(1)); err != nil {
+		t.Fatal(err)
+	}
+	first := writeInBackground(sink, 2)
+	<-file.started
+
+	if err := within(t, writeInBackground(sink, 3), "a write below the buffer size, during the flush"); err != nil {
+		t.Fatalf("entry 3, below the buffer size: %v", err)
+	}
+	second := writeInBackground(sink, 4)
+
+	file.gates <- gate{}
+	if err := within(t, first, "the first flush"); err != nil {
+		t.Fatalf("the first flush: %v", err)
+	}
+	// The writer that filled the buffer again flushes in its turn: its write
+	// is the one the file now holds, and it has not returned.
+	file.attempt(t, "the second flush")
+	select {
+	case err := <-second:
+		t.Fatalf("the write that filled the buffer again returned (%v) while the file held its flush", err)
+	default:
+	}
+	file.gates <- gate{}
+	if err := within(t, second, "the second flush"); err != nil {
+		t.Fatalf("the second flush: %v", err)
+	}
+	if got, want := file.content(), sinkLines(1, 4); got != want {
+		t.Errorf("file:\n got %q\nwant %q", got, want)
+	}
+}
+
+// Entries a failed flush could not write go back in front of those accepted
+// while it was writing: the file holds them in the order they were accepted,
+// whether the flush wrote nothing or part of its batch.
+func TestBufferedSink_FailedFlushKeepsOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		taken int // entries the failing write takes before it fails
+	}{
+		{"nothing written", 0},
+		{"one entry written", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink, file := newGatedBufferedSink(t, 3)
+			ctx := context.Background()
+
+			for n := 1; n <= 2; n++ {
+				if err := sink.Write(ctx, sinkEntry(n)); err != nil {
+					t.Fatalf("entry %d: %v", n, err)
+				}
+			}
+			flushing := writeInBackground(sink, 3)
+			<-file.started
+			if err := within(t, writeInBackground(sink, 4), "a write during the flush"); err != nil {
+				t.Fatalf("entry 4, written during the flush: %v", err)
+			}
+
+			file.gates <- gate{take: len(sinkLines(1, tc.taken)), err: errDiskFull}
+			if err := within(t, flushing, "the write that flushed"); !errors.Is(err, errDiskFull) {
+				t.Fatalf("the write that flushed: got %v, want the failure", err)
+			}
+			if got, want := file.content(), sinkLines(1, tc.taken); got != want {
+				t.Fatalf("file after the failed flush:\n got %q\nwant %q", got, want)
+			}
+
+			file.gates <- gate{}
+			if err := sink.Flush(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := file.content(), sinkLines(1, 4); got != want {
+				t.Errorf("file:\n got %q\nwant %q", got, want)
+			}
+		})
+	}
+}
+
+// While its file fails with the buffer full, a sink refuses every writer,
+// however the writers overlap. A writer that comes while another's attempt is
+// in progress finds the buffer empty, the entries being with the file for as
+// long as the attempt lasts: it is not let through for that, it makes its own
+// attempt and is told.
+func TestBufferedSink_FailingSinkRefusesOverlappingWriters(t *testing.T) {
+	sink, file := newGatedBufferedSink(t, 3)
+	ctx := context.Background()
+	failed := gate{err: errDiskFull}
+	holds := func(want int) {
+		t.Helper()
+		if got := sink.held(); got != want {
+			t.Fatalf("the sink holds %d entries, want %d", got, want)
+		}
+	}
+
+	for n := 1; n <= 2; n++ {
+		if err := sink.Write(ctx, sinkEntry(n)); err != nil {
+			t.Fatalf("entry %d: %v", n, err)
+		}
+	}
+	// The first flush to fail. Nothing says yet that the file fails: a writer
+	// that comes meanwhile is accepted, its entry kept.
+	third := writeInBackground(sink, 3)
+	file.attempt(t, "the first flush")
+	if err := within(t, writeInBackground(sink, 4), "a write during the first flush"); err != nil {
+		t.Fatalf("entry 4, written before any flush had failed: %v", err)
+	}
+	file.gates <- failed
+	if err := within(t, third, "the write that flushed"); !errors.Is(err, errDiskFull) {
+		t.Fatalf("entry 3: got %v, want the flush failure", err)
+	}
+	holds(4)
+
+	// From here the file is known to fail. Entry 5's attempt is in progress,
+	// the buffer empty, when entry 6 comes: it waits, makes its own attempt,
+	// and is refused. Both entries are kept.
+	fifth := writeInBackground(sink, 5)
+	file.attempt(t, "entry 5's flush")
+	sixth := writeInBackground(sink, 6)
+	// Entry 6 is in the buffer, entry 5's attempt still held.
+	for deadline := time.Now().Add(5 * time.Second); sink.held() < 6; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the sink holds %d entries: entry 6 was not accepted during entry 5's flush", sink.held())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	file.gates <- failed
+	if err := within(t, fifth, "entry 5"); !errors.Is(err, errDiskFull) {
+		t.Fatalf("entry 5: got %v, want the flush failure", err)
+	}
+	file.attempt(t, "entry 6's own flush")
+	file.gates <- failed
+	if err := within(t, sixth, "entry 6"); !errors.Is(err, errDiskFull) {
+		t.Fatalf("entry 6: got %v, want the flush failure", err)
+	}
+	holds(6)
+	if got := file.content(); got != "" {
+		t.Fatalf("written while the file was failing: %q", got)
+	}
+
+	// The file recovers: what was kept is written, in order, by the first
+	// write to find it so.
+	file.gates <- gate{}
+	if err := within(t, writeInBackground(sink, 7), "the first write after recovery"); err != nil {
+		t.Fatalf("entry 7: %v", err)
+	}
+	if got, want := file.content(), sinkLines(1, 7); got != want {
+		t.Errorf("file after recovery:\n got %q\nwant %q", got, want)
+	}
+}
+
+// A sink whose last flush fails is closed all the same, and says how many
+// entries it could not write. Left open, its file stayed beside the one the
+// next device opened for the same path, and the entries went unreported.
+func TestBufferedSink_CloseWhenTheLastFlushFails(t *testing.T) {
+	fileSink, err := NewFileSink(FileSinkConfig{Path: filepath.Join(t.TempDir(), "audit.log")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	realFile := fileSink.file
+	file := &flakyFile{}
+	fileSink.writer = file
+	sink, err := NewBufferedSink(BufferedSinkConfig{Sink: fileSink, BufferSize: 10, FlushPeriod: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	file.accept(0)
+	for n := 1; n <= 2; n++ {
+		if err := sink.Write(ctx, sinkEntry(n)); err != nil {
+			t.Fatalf("entry %d: %v", n, err)
+		}
+	}
+	err = sink.Close()
+	if !errors.Is(err, errDiskFull) || !strings.Contains(err.Error(), "2 entries are not written") {
+		t.Errorf("Close: got %v, want the flush failure and the 2 entries it leaves", err)
+	}
+	if _, err := realFile.Write([]byte("x")); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("the file is still open after Close: writing to it gave %v", err)
+	}
+}
+
+// A sink whose file no longer answers does not keep Close waiting: a seal
+// closes its devices, and would never complete.
+func TestBufferedSink_CloseDoesNotWaitForAStuckWrite(t *testing.T) {
+	sink, file := newGatedBufferedSink(t, 1)
+
+	stuck := writeInBackground(sink, 1)
+	file.attempt(t, "the flush")
+
+	closed := make(chan error, 1)
+	go func() { closed <- sink.Close() }()
+	err := within(t, closed, "Close, behind a write that does not return")
+	if err == nil || !strings.Contains(err.Error(), "1 entries are not written") {
+		t.Errorf("Close: got %v, want it to give up and say what it leaves", err)
+	}
+
+	file.gates <- gate{}
+	if err := within(t, stuck, "the write, once the file answers"); err != nil {
+		t.Errorf("the write that was stuck: %v", err)
 	}
 }
 

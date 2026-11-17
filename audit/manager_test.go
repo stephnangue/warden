@@ -638,6 +638,67 @@ func TestManagerReset_ClosesDevices(t *testing.T) {
 	}
 }
 
+// A request still on its way through a seal is refused, not served unaudited.
+// The devices stay listed until they are closed, and a closed device takes no
+// entry. Emptied first, the list would be that of a server with no device
+// yet, which serves every request: for as long as the devices took to close,
+// a seal was a window with no audit. A device that refuses because it was
+// closed is not reported as failing.
+func TestManagerReset_RefusesRequestsWhileItCloses(t *testing.T) {
+	mgr, serverLog := managerWithServerLog(t)
+	sink, file := newGatedBufferedSink(t, 1)
+	device := NewDevice("file/", NewJSONFormat(), sink, &DeviceConfig{Name: "file/", Enabled: true})
+	if err := mgr.RegisterDevice("file/", device); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	entry := &LogEntry{Timestamp: time.Now(), Request: &Request{ID: "req-1"}}
+
+	// The file holds a write, so the device cannot finish closing.
+	held := make(chan error, 1)
+	go func() {
+		_, err := mgr.LogRequest(ctx, entry)
+		held <- err
+	}()
+	file.attempt(t, "the entry's flush")
+
+	reset := make(chan error, 1)
+	go func() { reset <- mgr.Reset(ctx) }()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		sink.mu.Lock()
+		closing := sink.closed
+		sink.mu.Unlock()
+		if closing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the reset did not start closing the device")
+		}
+	}
+
+	ok, err := mgr.LogRequest(ctx, entry)
+	if ok || !errors.Is(err, errSinkClosed) {
+		t.Errorf("a request during the reset: ok=%v err=%v, want it refused by the closed device", ok, err)
+	}
+	if strings.Contains(serverLog.String(), "audit device is failing") {
+		t.Errorf("a device being closed was reported as failing: %s", serverLog)
+	}
+
+	// The device gives up on the held write, and the reset says so.
+	if err := within(t, reset, "the reset, behind a write that does not return"); err == nil {
+		t.Error("the reset reported nothing of the entry its device could not write")
+	}
+	file.gates <- gate{}
+	if err := within(t, held, "the held write"); err != nil {
+		t.Errorf("the held write, once the file answered: %v", err)
+	}
+
+	// Sealed: the list is empty, as before any device was registered.
+	if ok, err := mgr.LogRequest(ctx, entry); err != nil || !ok {
+		t.Errorf("after the reset: ok=%v err=%v", ok, err)
+	}
+}
+
 // failingCloseSink is a sink that cannot be closed.
 type failingCloseSink struct{ discardSink }
 

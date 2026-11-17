@@ -30,18 +30,36 @@ type batchWriter interface {
 
 // BufferedSink wraps a sink with buffering capabilities
 type BufferedSink struct {
-	mu   sync.Mutex
 	sink Sink
 	// batch is sink when it takes a whole buffer in one write, nil otherwise.
 	batch batchWriter
 
+	// mu guards what is buffered: pending, ends and closed. It is held for
+	// the time it takes to copy an entry in, or to take the buffer out, and
+	// never across a write to the sink: a request's entry does not wait for
+	// the file.
+	mu sync.Mutex
+
 	// pending holds the buffered entries one after the other, each followed
 	// by a newline, in the order they were accepted; ends[i] is where the
-	// i-th ends in it, newline included. Both are emptied by a flush and
-	// filled again in place: accepting an entry copies it and allocates
-	// nothing.
+	// i-th ends in it, newline included. A flush exchanges them for out and
+	// outEnds, emptied: accepting an entry copies it and allocates nothing.
 	pending []byte
 	ends    []int
+
+	// inFlight is how many entries the flush in progress took out of the
+	// buffer and has not yet written; zero between flushes. failing is set by
+	// a flush the sink did not take whole and cleared by one it did. Both
+	// are guarded by mu.
+	inFlight int
+	failing  bool
+
+	// flushMu serialises the flushes, so that entries reach the sink in the
+	// order they were accepted. It guards out and outEnds, the buffer a
+	// flush is writing. It is taken before mu, never while holding it.
+	flushMu sync.Mutex
+	out     []byte
+	outEnds []int
 
 	bufferSize   int
 	flushPeriod  time.Duration
@@ -99,21 +117,34 @@ func NewBufferedSink(config BufferedSinkConfig) (*BufferedSink, error) {
 
 // Write adds an entry to the buffer. The entry is copied: the caller may
 // reuse it as soon as Write returns.
+//
+// A sink that fails with a full buffer refuses every write: each writer
+// flushes in its turn, and is told if that fails too. The entries the sink
+// could not take are kept to be written when it recovers, those of refused
+// writes among them.
+//
+// One write is not refused that a sink writing under a single lock would
+// have: one that comes while the first flush to fail is still in progress.
+// Nothing says yet that the sink fails, and its entry is kept like those
+// accepted before it.
 func (bs *BufferedSink) Write(ctx context.Context, entry []byte) error {
 	bs.mu.Lock()
-	defer bs.mu.Unlock()
-
 	if bs.closed {
+		bs.mu.Unlock()
 		return errSinkClosed
 	}
 
 	bs.pending = append(bs.pending, entry...)
 	bs.pending = append(bs.pending, '\n')
 	bs.ends = append(bs.ends, len(bs.pending))
+	// Flush if buffer is full. While the sink fails, what it holds counts,
+	// the entries of the attempt in progress with the rest: the buffer is
+	// empty for as long as that attempt lasts, and no less full for it.
+	flush := len(bs.ends) >= bs.bufferSize || (bs.failing && bs.heldLocked() >= bs.bufferSize)
+	bs.mu.Unlock()
 
-	// Flush if buffer is full
-	if len(bs.ends) >= bs.bufferSize {
-		return bs.flushLocked(ctx)
+	if flush {
+		return bs.flush(ctx, true)
 	}
 
 	return nil
@@ -122,52 +153,57 @@ func (bs *BufferedSink) Write(ctx context.Context, entry []byte) error {
 // errSinkClosed refuses a write to a sink that has been closed.
 var errSinkClosed = errors.New("sink is closed")
 
-// Flush flushes the buffer to the underlying sink
-func (bs *BufferedSink) Flush(ctx context.Context) error {
-	bs.mu.Lock()
-	defer bs.mu.Unlock()
-
-	// Allow flush even when closed (needed for final flush during Close)
-	return bs.flushLocked(ctx)
+// heldLocked is how many entries the sink holds: those buffered and those a
+// flush is writing. Entries being written are still the sink's until the
+// write succeeds: counted out, a sink whose write fails would look empty for
+// as long as the write lasts. The caller holds mu.
+func (bs *BufferedSink) heldLocked() int {
+	return len(bs.ends) + bs.inFlight
 }
 
-// flushLocked flushes the buffer (must be called with lock held).
-// On partial failure, only successfully written entries are removed from the buffer.
+// Flush flushes the buffer to the underlying sink
+func (bs *BufferedSink) Flush(ctx context.Context) error {
+	// Allow flush even when closed (needed for final flush during Close)
+	return bs.flush(ctx, false)
+}
+
+// flush writes the buffer to the sink. On partial failure, only successfully
+// written entries are removed from the buffer.
 //
-// A sink that takes a batch is handed the whole buffer in one write: the lock
-// that every request's entry waits for is held for one write, not one per
-// entry. Any other sink is written one entry at a time, without the newline,
-// as if it were not buffered.
-func (bs *BufferedSink) flushLocked(ctx context.Context) error {
-	if len(bs.ends) == 0 {
+// The buffer is taken out under mu and written outside it, so entries are
+// accepted while the sink writes. A writer that finds the buffer full waits
+// here, behind the flush in progress: a sink slower than its writers holds
+// them back, it does not let the buffer grow.
+//
+// ifFull is set by a writer: by the time it is its turn, another flush may
+// have emptied the buffer, and there is nothing left for it to do. Not while
+// the sink fails: then the writer makes its own attempt and is told how it
+// went, so that every writer is refused until a flush succeeds.
+func (bs *BufferedSink) flush(ctx context.Context, ifFull bool) error {
+	bs.flushMu.Lock()
+	defer bs.flushMu.Unlock()
+
+	bs.mu.Lock()
+	if len(bs.ends) == 0 || (ifFull && len(bs.ends) < bs.bufferSize && !bs.failing) {
+		bs.mu.Unlock()
 		return nil
 	}
+	bs.pending, bs.out = bs.out[:0], bs.pending
+	bs.ends, bs.outEnds = bs.outEnds[:0], bs.ends
+	bs.inFlight = len(bs.outEnds)
+	bs.mu.Unlock()
 
-	// written counts the entries the sink took whole.
-	var written int
-	var writeErr error
-	if bs.batch != nil {
-		var n int
-		n, writeErr = bs.batch.WriteBatch(ctx, bs.pending)
-		// An entry the write cut short is not written: it stays, whole. One
-		// cut just before its newline is: the sink has all of it, and ends
-		// the line before it writes anything else.
-		written = sort.Search(len(bs.ends), func(i int) bool { return bs.ends[i]-1 > n })
+	written, writeErr := bs.writeOut(ctx)
+
+	bs.mu.Lock()
+	bs.inFlight = 0
+	if written < len(bs.outEnds) || writeErr != nil {
+		bs.putBackLocked(written)
+		bs.failing = true
 	} else {
-		start := 0
-		for _, end := range bs.ends {
-			// The entry without its newline, and with no room after it but
-			// the newline's: a sink that appends to what it is handed writes
-			// over nothing of the next entry.
-			if writeErr = bs.sink.Write(ctx, bs.pending[start:end-1:end]); writeErr != nil {
-				break
-			}
-			written++
-			start = end
-		}
+		bs.failing = false
 	}
-
-	bs.dropWritten(written)
+	bs.mu.Unlock()
 
 	if writeErr != nil {
 		return fmt.Errorf("failed to write buffered entry: %w", writeErr)
@@ -175,19 +211,59 @@ func (bs *BufferedSink) flushLocked(ctx context.Context) error {
 	return nil
 }
 
-// dropWritten removes the first written entries from the buffer and moves the
-// rest to its start, in their order. The buffer keeps its capacity.
-func (bs *BufferedSink) dropWritten(written int) {
-	if written == 0 {
-		return
+// writeOut writes out to the sink and returns how many of its entries the
+// sink took whole. The caller holds flushMu.
+//
+// A sink that takes a batch is handed the whole buffer in one write. Any
+// other sink is written one entry at a time, without the newline, as if it
+// were not buffered.
+func (bs *BufferedSink) writeOut(ctx context.Context) (written int, err error) {
+	if bs.batch != nil {
+		n, err := bs.batch.WriteBatch(ctx, bs.out)
+		// An entry the write cut short is not written: it stays, whole. One
+		// cut just before its newline is: the sink has all of it, and ends
+		// the line before it writes anything else.
+		return sort.Search(len(bs.outEnds), func(i int) bool { return bs.outEnds[i]-1 > n }), err
 	}
-	offset := bs.ends[written-1]
-	bs.pending = bs.pending[:copy(bs.pending, bs.pending[offset:])]
-	kept := bs.ends[:0]
-	for _, end := range bs.ends[written:] {
-		kept = append(kept, end-offset)
+
+	start := 0
+	for _, end := range bs.outEnds {
+		// The entry without its newline, and with no room after it but the
+		// newline's: a sink that appends to what it is handed writes over
+		// nothing of the next entry.
+		if err := bs.sink.Write(ctx, bs.out[start:end-1:end]); err != nil {
+			return written, err
+		}
+		written++
+		start = end
 	}
-	bs.ends = kept
+	return written, nil
+}
+
+// putBackLocked returns to the buffer the entries of out after the first
+// written, which the sink did not take, in front of those accepted since the
+// flush began: the order entries were accepted in is the order they are
+// written in. The caller holds flushMu and mu.
+func (bs *BufferedSink) putBackLocked(written int) {
+	offset := 0
+	if written > 0 {
+		offset = bs.outEnds[written-1]
+	}
+
+	// Build the buffer in out: its unwritten entries moved to the start, then
+	// what is pending.
+	kept := copy(bs.out, bs.out[offset:])
+	bs.out = append(bs.out[:kept], bs.pending...)
+	ends := bs.outEnds[:0]
+	for _, end := range bs.outEnds[written:] {
+		ends = append(ends, end-offset)
+	}
+	for _, end := range bs.ends {
+		ends = append(ends, end+kept)
+	}
+
+	bs.pending, bs.out = bs.out, bs.pending[:0]
+	bs.ends, bs.outEnds = ends, bs.ends[:0]
 }
 
 // periodicFlush periodically flushes the buffer
@@ -215,7 +291,10 @@ func (bs *BufferedSink) periodicFlush() {
 	}
 }
 
-// Close closes the buffered sink with a timeout to prevent hanging on shutdown
+// Close stops the sink: it accepts no entry from here on, writes what it
+// holds, and closes the sink below. It reports the entries it could not
+// write. It returns within about twice the close timeout whatever the sink
+// below does, so that a file that no longer answers does not hold up a seal.
 func (bs *BufferedSink) Close() error {
 	// Mark as closed to prevent new writes
 	bs.mu.Lock()
@@ -248,27 +327,36 @@ func (bs *BufferedSink) Close() error {
 		}
 	}
 
-	// Flush remaining buffer with timeout context, then close the sink below
-	// whether or not the flush succeeded: left open, its file would stay
-	// beside the one the next device opens for the same path.
-	ctx, cancel := context.WithTimeout(context.Background(), bs.closeTimeout)
-	defer cancel()
+	// The last flush, then the close of the sink below whether or not the
+	// flush succeeded: left open, its file would stay beside the one the
+	// next device opens for the same path. Both run off this goroutine. A
+	// write that never returns holds flushMu for as long, and a seal waits
+	// for this close.
+	finished := make(chan error, 1)
+	go func() {
+		var failures []error
+		if err := bs.Flush(context.Background()); err != nil {
+			failures = append(failures, fmt.Errorf("failed to flush on close, %d entries are not written: %w", bs.held(), err))
+		}
+		if err := bs.sink.Close(); err != nil {
+			failures = append(failures, err)
+		}
+		finished <- errors.Join(failures...)
+	}()
 
-	var failures []error
-	if err := bs.Flush(ctx); err != nil {
-		failures = append(failures, fmt.Errorf("failed to flush on close, %d entries are not written: %w", bs.held(), err))
+	select {
+	case err := <-finished:
+		return err
+	case <-time.After(bs.closeTimeout):
+		return fmt.Errorf("gave up closing after %s, the sink still writing: %d entries are not written", bs.closeTimeout, bs.held())
 	}
-	if err := bs.sink.Close(); err != nil {
-		failures = append(failures, err)
-	}
-	return errors.Join(failures...)
 }
 
-// held is how many entries the sink holds.
+// held is how many entries the sink holds, buffered or being written.
 func (bs *BufferedSink) held() int {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
-	return len(bs.ends)
+	return bs.heldLocked()
 }
 
 // Name returns the sink name
