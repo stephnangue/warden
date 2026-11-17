@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -88,13 +89,22 @@ var errDiskFull = errors.New("no space left on device")
 type flakyFile struct {
 	mu      sync.Mutex
 	out     bytes.Buffer
+	writes  int
 	limited bool
 	budget  int
+}
+
+// writeCount is how many writes the file has received.
+func (f *flakyFile) writeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.writes
 }
 
 func (f *flakyFile) Write(p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.writes++
 	if !f.limited {
 		return f.out.Write(p)
 	}
@@ -250,10 +260,10 @@ func TestBufferedSink_FailedFlushKeepsEntries(t *testing.T) {
 	}
 }
 
-// A write the disk cuts short leaves the start of the entry in the file. The
-// entry is kept and written again whole, but straight after that fragment: the
-// two share a line no JSON parser reads, so the entry is lost to whoever reads
-// the log.
+// A write the disk cuts short leaves the start of an entry in the file. The
+// entry is kept and written again whole, on a line of its own: the fragment is
+// ended first, and is the one line a JSON parser cannot read. Written straight
+// after the fragment, as it used to be, the entry was lost with it.
 func TestBufferedSink_ShortWrite(t *testing.T) {
 	sink, file := newFlakySink(t, 3)
 	ctx := context.Background()
@@ -273,7 +283,7 @@ func TestBufferedSink_ShortWrite(t *testing.T) {
 	if err := sink.Flush(ctx); err != nil {
 		t.Fatalf("flush after recovery: %v", err)
 	}
-	if got, want := file.content(), sinkLines(1, 1)+fragment+sinkLines(2, 3); got != want {
+	if got, want := file.content(), sinkLines(1, 1)+fragment+"\n"+sinkLines(2, 3); got != want {
 		t.Errorf("file after recovery:\n got %q\nwant %q", got, want)
 	}
 }
@@ -307,6 +317,195 @@ func TestBufferedSink_CloseWhenTheLastFlushFails(t *testing.T) {
 	}
 	if _, err := realFile.Write([]byte("x")); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("the file is still open after Close: writing to it gave %v", err)
+	}
+}
+
+// A flush hands a file its whole buffer in one write, where it used to make
+// one per entry while every request waited for the buffer.
+func TestBufferedSink_OneWritePerFlush(t *testing.T) {
+	sink, file := newFlakySink(t, 50)
+	ctx := context.Background()
+
+	for n := 1; n <= 125; n++ {
+		if err := sink.Write(ctx, sinkEntry(n)); err != nil {
+			t.Fatalf("entry %d: %v", n, err)
+		}
+	}
+	if err := sink.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := file.content(), sinkLines(1, 125); got != want {
+		t.Errorf("file:\n got %q\nwant %q", got, want)
+	}
+	// Two full buffers, and the flush of what was left.
+	if got := file.writeCount(); got != 3 {
+		t.Errorf("%d writes for 125 entries buffered by 50, want 3", got)
+	}
+}
+
+// A buffer of one entry writes each entry as it comes: what a device set that
+// way is for, to show an entry as soon as it is made.
+func TestBufferedSink_BufferOfOne(t *testing.T) {
+	sink, file := newFlakySink(t, 1)
+	ctx := context.Background()
+
+	for n := 1; n <= 3; n++ {
+		if err := sink.Write(ctx, sinkEntry(n)); err != nil {
+			t.Fatalf("entry %d: %v", n, err)
+		}
+		if got, want := file.content(), sinkLines(1, n); got != want {
+			t.Fatalf("file after entry %d:\n got %q\nwant %q", n, got, want)
+		}
+	}
+}
+
+// entrySink is a sink that takes one entry per write, like a syslog or a
+// socket. It keeps the entries it was given and refuses the one numbered
+// failOn.
+type entrySink struct {
+	discardSink
+	entries []string
+	failOn  int
+}
+
+func (s *entrySink) Write(_ context.Context, entry []byte) error {
+	if s.failOn != 0 && string(entry) == string(sinkEntry(s.failOn)) {
+		return errDiskFull
+	}
+	s.entries = append(s.entries, string(entry))
+	return nil
+}
+
+// A sink that takes no batch is written one entry at a time, each as it was
+// given, with no newline added; one it refuses stays buffered with those after
+// it.
+func TestBufferedSink_SinkWithoutBatches(t *testing.T) {
+	inner := &entrySink{failOn: 3}
+	sink, err := NewBufferedSink(BufferedSinkConfig{Sink: inner, BufferSize: 4, FlushPeriod: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	ctx := context.Background()
+	entries := func(from, to int) []string {
+		var out []string
+		for n := from; n <= to; n++ {
+			out = append(out, string(sinkEntry(n)))
+		}
+		return out
+	}
+
+	for n := 1; n <= 3; n++ {
+		if err := sink.Write(ctx, sinkEntry(n)); err != nil {
+			t.Fatalf("entry %d: %v", n, err)
+		}
+	}
+	if err := sink.Write(ctx, sinkEntry(4)); !errors.Is(err, errDiskFull) {
+		t.Fatalf("the write that flushed: got %v, want the sink's refusal", err)
+	}
+	if got, want := inner.entries, entries(1, 2); !slices.Equal(got, want) {
+		t.Fatalf("entries the sink took: %q, want %q", got, want)
+	}
+
+	inner.failOn = 0
+	if err := sink.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := inner.entries, entries(1, 4); !slices.Equal(got, want) {
+		t.Errorf("entries the sink took: %q, want %q", got, want)
+	}
+}
+
+// A write cut just before an entry's newline leaves the whole entry in the
+// file. It is written: the newline is added before anything follows, and the
+// entry is not written a second time.
+func TestBufferedSink_WriteCutBeforeTheNewline(t *testing.T) {
+	sink, file := newFlakySink(t, 3)
+	ctx := context.Background()
+
+	file.accept(len(sinkLines(1, 2)) - len("\n"))
+	for n := 1; n <= 2; n++ {
+		if err := sink.Write(ctx, sinkEntry(n)); err != nil {
+			t.Fatalf("entry %d: %v", n, err)
+		}
+	}
+	if err := sink.Write(ctx, sinkEntry(3)); !errors.Is(err, errDiskFull) {
+		t.Fatalf("the write that flushed: got %v, want the flush failure", err)
+	}
+
+	file.recover()
+	if err := sink.Flush(ctx); err != nil {
+		t.Fatalf("flush after recovery: %v", err)
+	}
+	if got, want := file.content(), sinkLines(1, 3); got != want {
+		t.Errorf("file after recovery:\n got %q\nwant %q", got, want)
+	}
+}
+
+// appendingSink is a sink that frames an entry by appending to it, as the
+// file and socket sinks do, and keeps what it would send.
+type appendingSink struct {
+	discardSink
+	sent []string
+}
+
+func (s *appendingSink) Write(_ context.Context, entry []byte) error {
+	s.sent = append(s.sent, string(append(entry, "\r\n"...)))
+	return nil
+}
+
+// A sink written one entry at a time may append to the entry it is handed.
+// The entry lies in the buffer, with the next one after it: the sink is given
+// no room to write over that one.
+func TestBufferedSink_SinkThatAppendsToItsEntry(t *testing.T) {
+	inner := &appendingSink{}
+	sink, err := NewBufferedSink(BufferedSinkConfig{Sink: inner, BufferSize: 3, FlushPeriod: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+
+	for n := 1; n <= 3; n++ {
+		if err := sink.Write(context.Background(), sinkEntry(n)); err != nil {
+			t.Fatalf("entry %d: %v", n, err)
+		}
+	}
+	want := []string{string(sinkEntry(1)) + "\r\n", string(sinkEntry(2)) + "\r\n", string(sinkEntry(3)) + "\r\n"}
+	if !slices.Equal(inner.sent, want) {
+		t.Errorf("the sink was handed %q, want %q", inner.sent, want)
+	}
+}
+
+// batchDiscardSink is a sink that takes batches and keeps nothing.
+type batchDiscardSink struct{ discardSink }
+
+func (batchDiscardSink) WriteBatch(_ context.Context, batch []byte) (int, error) {
+	return len(batch), nil
+}
+
+// Accepting an entry allocates nothing once the buffer has grown to its size:
+// the entry is copied into it, and a flush empties it without letting it go.
+func TestBufferedSink_AllocatesNothing(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation counts are not meaningful under the race detector")
+	}
+	sink, err := NewBufferedSink(BufferedSinkConfig{Sink: batchDiscardSink{}, BufferSize: 10, FlushPeriod: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	ctx := context.Background()
+	entry := sinkEntry(1)
+
+	// Fifteen entries a run: every run flushes, and starts with the buffer at
+	// a different level.
+	got := testing.AllocsPerRun(100, func() {
+		for range 15 {
+			sink.Write(ctx, entry)
+		}
+	})
+	if got != 0 {
+		t.Errorf("%v allocations for 15 entries, want none", got)
 	}
 }
 
