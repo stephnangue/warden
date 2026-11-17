@@ -39,6 +39,7 @@ type mockAuditDevice struct {
 	logResponseErr   error
 	logRequestCalls  int
 	logResponseCalls int
+	closeCalls       int
 	lastEntry        *audit.LogEntry
 	mu               sync.Mutex
 }
@@ -76,6 +77,9 @@ func (d *mockAuditDevice) LogTestRequest(ctx context.Context) error {
 }
 
 func (d *mockAuditDevice) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.closeCalls++
 	return nil
 }
 
