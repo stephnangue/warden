@@ -48,6 +48,10 @@ func (f *FileDeviceFactory) Create(
 	for _, d := range conf.unknownFieldPaths {
 		warnings = append(warnings, "ignored "+d)
 	}
+	if !conf.Enabled {
+		conf.Enabled = true
+		warnings = append(warnings, "ignored "+errNotEnabled.Error()+": the device is enabled; disable it to remove it")
+	}
 
 	// we only support json format for now
 	if conf.Format != "json" {
@@ -109,8 +113,8 @@ func (f *FileDeviceFactory) Create(
 }
 
 // ValidateConfig implements ConfigValidator: it refuses a configuration that
-// Create would not accept, or would accept only by ignoring a salt or omit
-// path that names no field.
+// Create would not accept, or would accept only by ignoring part of it: a
+// salt or omit path that names no field, or enabled set to false.
 func (f *FileDeviceFactory) ValidateConfig(config map[string]any) error {
 	conf, err := mapToFileDeviceConfig(config)
 	if err != nil {
@@ -119,8 +123,18 @@ func (f *FileDeviceFactory) ValidateConfig(config map[string]any) error {
 	if dropped := conf.unknownFieldPaths; len(dropped) > 0 {
 		return errors.New(strings.Join(dropped, "; "))
 	}
+	if !conf.Enabled {
+		return errNotEnabled
+	}
 	return nil
 }
+
+// errNotEnabled refuses a device configured with enabled set to false. Such a
+// device records nothing, and nothing can enable it later. Once a device is
+// registered a request is served only if a device records it: with no other
+// device, every request was refused, the one that would remove it among
+// them, and the device was registered again at every unseal.
+var errNotEnabled = errors.New(`"enabled": false makes a device that records nothing, and refuses every request when it is the only one`)
 
 var _ ConfigValidator = (*FileDeviceFactory)(nil)
 

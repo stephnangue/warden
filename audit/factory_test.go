@@ -2,7 +2,9 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stephnangue/warden/logger"
@@ -86,5 +88,43 @@ func TestFileDeviceFactoryInvalidMode(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error for invalid file mode")
+	}
+}
+
+// A device is not enabled with "enabled": false. One stored that way, by an
+// earlier release, is loaded enabled and the change reported: honoured, it
+// would refuse every request when it is the only device, the one that would
+// remove it among them, after every unseal.
+func TestFileDeviceFactory_NotEnabled(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	f := &FileDeviceFactory{}
+	f.Initialize(log)
+	config := map[string]any{"file_path": filepath.Join(t.TempDir(), "audit.log"), "hmac_key": "k", "enabled": false}
+
+	if err := f.ValidateConfig(config); !errors.Is(err, errNotEnabled) {
+		t.Errorf("ValidateConfig: got %v, want the device refused", err)
+	}
+
+	dev, err := f.Create(context.Background(), "siem/", "", "", config)
+	if err != nil {
+		t.Fatalf("Create refused a stored configuration: %v", err)
+	}
+	defer dev.Close()
+	if !dev.Enabled() {
+		t.Error("the stored device was loaded disabled")
+	}
+	warnings := dev.(WarningReporter).Warnings()
+	if len(warnings) != 1 || !strings.Contains(warnings[0], `"enabled": false`) {
+		t.Errorf("warnings = %q, want the change reported", warnings)
+	}
+
+	for _, enabled := range []any{true, nil} {
+		config := map[string]any{"file_path": "/tmp/x.log"}
+		if enabled != nil {
+			config["enabled"] = enabled
+		}
+		if err := f.ValidateConfig(config); err != nil {
+			t.Errorf("enabled=%v: a valid configuration was refused: %v", enabled, err)
+		}
 	}
 }
