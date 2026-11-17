@@ -1205,6 +1205,61 @@ func TestAudit_DeviceNotEnabled(t *testing.T) {
 	})
 }
 
+// A request on its way through a seal, after the audit teardown, is refused
+// before it reaches its backend: no device is left to record it. It used to be
+// served, unaudited, as on a server that never had a device, until the mounts
+// it reached were unloaded. Once the next unseal has loaded the devices,
+// requests are served and recorded again; a server with no device to load
+// serves them as it did.
+func TestHandleRequest_BetweenTheAuditTeardownAndTheNextLoad(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core, _ := newCoreForAuditPersistTest(t)
+	backend := &mintingBackend{mockProvider: newMockProvider()}
+	mountGateway(t, core, "mintgw/", backend)
+	root, err := core.tokenStore.GenerateRootToken()
+	require.NoError(t, err)
+	handle := func() (*logical.Response, error, bool) {
+		backend.handled.Store(false)
+		hr := httptest.NewRequest(http.MethodGet, "/v1/mintgw/creds", nil)
+		hr.Header.Set(logical.HeaderWardenToken, root)
+		resp, err := core.handleCancelableRequest(ctx, &logical.Request{
+			Path: "mintgw/creds", Operation: logical.ReadOperation, HTTPRequest: hr,
+		})
+		return resp, err, backend.handled.Load()
+	}
+
+	t.Run("a server that audits", func(t *testing.T) {
+		auditPath := filepath.Join(t.TempDir(), "audit.log")
+		require.NoError(t, core.EnableAudit(ctx, &MountEntry{
+			Class: mountClassAudit, Type: "file", Path: "siem/",
+			Config: map[string]any{"file_path": auditPath, "hmac_key": "k", "buffer_size": 1},
+		}, true))
+		_, err, reached := handle()
+		require.NoError(t, err)
+		require.True(t, reached, "the request this test sends does not reach its backend even when audited")
+
+		require.NoError(t, core.teardownAudits(ctx))
+		resp, err, reached := handle()
+		assert.Nil(t, resp)
+		assert.ErrorIs(t, err, ErrInternalError, "a request was served with no device to record it")
+		assert.False(t, reached, "a request reached its backend with no device to record it")
+
+		require.NoError(t, core.loadAudits(ctx))
+		_, err, reached = handle()
+		require.NoError(t, err)
+		assert.True(t, reached, "a request is refused after the devices were loaded again")
+		_, err = core.DisableAudit(ctx, "siem/", true)
+		require.NoError(t, err)
+	})
+
+	t.Run("a server with no device", func(t *testing.T) {
+		require.NoError(t, core.teardownAudits(ctx))
+		_, err, reached := handle()
+		require.NoError(t, err)
+		assert.True(t, reached, "a server with no device refused a request during its seal")
+	})
+}
+
 // auditTableBarrier refuses to store the audit table while failing is set.
 type auditTableBarrier struct {
 	SecurityBarrier

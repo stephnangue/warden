@@ -204,6 +204,11 @@ func (c *Core) loadAudits(ctx context.Context) error {
 		}
 	}
 
+	// The devices are in place: entries are logged to them again, after the
+	// teardown of the last seal refused them. A load that failed leaves them
+	// refused, and the unseal fails with it.
+	c.auditManager.Resume()
+
 	return nil
 }
 
@@ -339,6 +344,13 @@ func (c *Core) persistAuditsLocked(ctx context.Context) error {
 }
 
 func (c *Core) teardownAudits(ctx context.Context) error {
+	// The table and the devices are torn down together, as enabling and
+	// disabling a device change them together: under the lock. A device being
+	// enabled is enabled before the teardown, and closed by it, not
+	// registered after it, to outlive the seal.
+	c.auditLock.Lock()
+	defer c.auditLock.Unlock()
+
 	// Reset the audit mount table to empty instead of nil to avoid
 	// nil pointer dereference when loadAudits is called during next unseal
 	c.audit = NewMountTable()
