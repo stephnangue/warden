@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,6 +31,14 @@ type FileSink struct {
 	// failed part-way, or by a crash before this sink opened it. The next
 	// write ends that line first, so the entry after it is not joined to it.
 	midLine bool
+
+	// closed is set by Close: the sink takes no write from then on. While it
+	// is not, a nil file is one a rotation could not open, and the next
+	// write opens it.
+	closed bool
+
+	// openFile is os.OpenFile, but for tests.
+	openFile func(name string, flag int, perm os.FileMode) (*os.File, error)
 }
 
 // FileSinkConfig contains configuration for file sink
@@ -57,33 +66,39 @@ func NewFileSink(config FileSinkConfig) (*FileSink, error) {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Open file
-	file, err := os.OpenFile(config.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, config.Mode)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-
-	// Get current file size
-	stat, err := file.Stat()
-	if err != nil {
-		file.Close()
-		return nil, fmt.Errorf("failed to stat file: %w", err)
-	}
-
 	sink := &FileSink{
 		path:        config.Path,
-		file:        file,
 		mode:        config.Mode,
-		writer:      file,
 		rotateSize:  config.RotateSize,
 		rotateDaily: config.RotateDaily,
 		maxBackups:  config.MaxBackups,
-		currentSize: stat.Size(),
 		lastRotate:  time.Now(),
-		midLine:     endsMidLine(config.Path, stat.Size()),
+		openFile:    os.OpenFile,
+	}
+	if err := sink.open(); err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 
 	return sink, nil
+}
+
+// open opens the file at the sink's path, creating it if need be, as the file
+// the sink appends to, and reads what the sink needs to know of it: its size,
+// and whether it ends mid-line. The caller holds s.mu, or is NewFileSink.
+func (s *FileSink) open() error {
+	file, err := s.openFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, s.mode)
+	if err != nil {
+		return err
+	}
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return err
+	}
+	s.file, s.writer = file, file
+	s.currentSize = stat.Size()
+	s.midLine = endsMidLine(s.path, stat.Size())
+	return nil
 }
 
 // endsMidLine reports whether the file at path, size bytes long, ends with
@@ -130,6 +145,17 @@ func (s *FileSink) WriteBatch(ctx context.Context, batch []byte) (int, error) {
 // writeLocked writes lines, one entry or more each ended by a newline, and
 // returns how many of its bytes reached the file. The caller holds s.mu.
 func (s *FileSink) writeLocked(lines []byte) (int, error) {
+	if s.closed {
+		return 0, errFileSinkClosed
+	}
+	// A rotation that could not open the file leaves none: it is opened
+	// here, for as many writes as it takes.
+	if s.file == nil {
+		if err := s.open(); err != nil {
+			return 0, fmt.Errorf("failed to open file: %w", err)
+		}
+	}
+
 	// A line cut short is ended before anything follows it. Where that fails
 	// the file is rotated all the same if it is due: with a full disk,
 	// rotation is what can free room, once it has a backup to prune.
@@ -198,51 +224,57 @@ func (s *FileSink) checkRotation() error {
 	return s.rotate()
 }
 
-// rotate performs file rotation
+// rotate moves the file aside as a backup and opens a new one at its path.
+//
+// Whatever fails, the sink is left able to write once the failure clears. The
+// file is let go even when closing it fails: a descriptor whose close failed
+// is not one to write to, and keeping it meant trying to close it again at
+// every write, which could never succeed. When the file cannot be moved, the
+// sink opens it again and the rotation is tried at the next write; when the
+// new one cannot be opened, the next write opens it. Before, either failure
+// left the sink holding a closed file, refusing every write until a restart.
+//
+// A rotation that failed in any way fails the write that set it off.
 func (s *FileSink) rotate() error {
-	// Close current file
-	if err := s.file.Close(); err != nil {
-		return fmt.Errorf("failed to close file: %w", err)
-	}
+	closeErr := s.file.Close()
+	s.file, s.writer = nil, nil
 
-	// Rename current file with timestamp
 	timestamp := time.Now().Format("20060102-150405")
 	backupPath := fmt.Sprintf("%s.%s", s.path, timestamp)
 
-	if err := os.Rename(s.path, backupPath); err != nil {
-		// Try to reopen original file if rename fails
-		file, openErr := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, s.mode)
-		if openErr != nil {
-			return fmt.Errorf("failed to rename file and reopen: %v, %v", err, openErr)
+	renameErr := os.Rename(s.path, backupPath)
+	if renameErr == nil {
+		s.lastRotate = time.Now()
+		// Clean up old backups asynchronously but with proper
+		// synchronization. We capture the path and maxBackups values to
+		// avoid racing with future rotations. Pruning may be what frees the
+		// room the new file needs: it runs whether or not that opens.
+		if s.maxBackups > 0 {
+			path := s.path
+			maxBackups := s.maxBackups
+			go cleanupBackupsAsync(path, maxBackups)
 		}
-		s.file = file
-		s.writer = file
-		return fmt.Errorf("failed to rename file: %w", err)
 	}
 
-	// Create new file
-	file, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, s.mode)
-	if err != nil {
-		return fmt.Errorf("failed to create new file: %w", err)
+	// The sink writes on at its path: to a new file if the old one was moved
+	// away, a line cut short going with it; to the old one if it was not.
+	openErr := s.open()
+
+	var failures []error
+	if closeErr != nil {
+		failures = append(failures, fmt.Errorf("failed to close file: %w", closeErr))
 	}
-
-	s.file = file
-	s.writer = file
-	s.currentSize = 0
-	s.lastRotate = time.Now()
-	// A line cut short stays in the file that was rotated away.
-	s.midLine = false
-
-	// Clean up old backups asynchronously but with proper synchronization.
-	// We capture the path and maxBackups values to avoid racing with future rotations.
-	if s.maxBackups > 0 {
-		path := s.path
-		maxBackups := s.maxBackups
-		go cleanupBackupsAsync(path, maxBackups)
+	if renameErr != nil {
+		failures = append(failures, fmt.Errorf("failed to rename file: %w", renameErr))
 	}
-
-	return nil
+	if openErr != nil {
+		failures = append(failures, fmt.Errorf("failed to open file: %w", openErr))
+	}
+	return errors.Join(failures...)
 }
+
+// errFileSinkClosed refuses a write to a file sink that has been closed.
+var errFileSinkClosed = errors.New("file sink is closed")
 
 // cleanupBackupsAsync removes old backup files.
 // This is a standalone function that takes the path and maxBackups as parameters
@@ -298,8 +330,11 @@ func (s *FileSink) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.closed = true
 	if s.file != nil {
-		return s.file.Close()
+		file := s.file
+		s.file, s.writer = nil, nil
+		return file.Close()
 	}
 
 	return nil
