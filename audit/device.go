@@ -7,21 +7,25 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/stephnangue/warden/logical"
 )
 
-// device implements the Device interface
+// device implements the Device interface.
+//
+// Every entry logged reads it and no lock guards it: all of it is set when
+// the device is created and never written after, except enabled.
 type device struct {
-	mu      sync.RWMutex
 	name    string
 	format  Format
 	sink    Sink
-	enabled bool
 	filters []FilterFunc
 	config  *DeviceConfig
+
+	// enabled is the one field that changes after creation.
+	enabled atomic.Bool
 }
 
 // NewDevice creates a new audit device
@@ -37,26 +41,25 @@ func NewDevice(name string, format Format, sink Sink, config *DeviceConfig) Devi
 		name:    name,
 		format:  format,
 		sink:    sink,
-		enabled: config.Enabled,
 		config:  config,
-		filters: make([]FilterFunc, 0),
+		filters: pathFilters(config),
 	}
-
-	// Setup path filters if configured
-	d.setupPathFilters()
+	d.enabled.Store(config.Enabled)
 
 	return d
 }
 
-// setupPathFilters creates filter functions based on path configuration
-func (d *device) setupPathFilters() {
-	if len(d.config.ExcludePaths) > 0 {
-		d.AddFilter(func(entry *LogEntry) bool {
+// pathFilters creates the filter functions of a device's path configuration.
+func pathFilters(config *DeviceConfig) []FilterFunc {
+	var filters []FilterFunc
+
+	if len(config.ExcludePaths) > 0 {
+		filters = append(filters, func(entry *LogEntry) bool {
 			if entry.Request == nil {
 				return true
 			}
 
-			for _, pattern := range d.config.ExcludePaths {
+			for _, pattern := range config.ExcludePaths {
 				if matched, _ := filepath.Match(pattern, entry.Request.Path); matched {
 					return false
 				}
@@ -69,13 +72,13 @@ func (d *device) setupPathFilters() {
 		})
 	}
 
-	if len(d.config.IncludePaths) > 0 {
-		d.AddFilter(func(entry *LogEntry) bool {
+	if len(config.IncludePaths) > 0 {
+		filters = append(filters, func(entry *LogEntry) bool {
 			if entry.Request == nil {
 				return false
 			}
 
-			for _, pattern := range d.config.IncludePaths {
+			for _, pattern := range config.IncludePaths {
 				if matched, _ := filepath.Match(pattern, entry.Request.Path); matched {
 					return true
 				}
@@ -87,20 +90,12 @@ func (d *device) setupPathFilters() {
 			return false
 		})
 	}
-}
 
-// AddFilter adds a filter function to the device
-func (d *device) AddFilter(filter FilterFunc) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.filters = append(d.filters, filter)
+	return filters
 }
 
 // shouldLog checks if an entry should be logged based on filters
 func (d *device) shouldLog(entry *LogEntry) bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
 	for _, filter := range d.filters {
 		if !filter(entry) {
 			return false
@@ -112,11 +107,7 @@ func (d *device) shouldLog(entry *LogEntry) bool {
 
 // LogRequest logs a request
 func (d *device) LogRequest(ctx context.Context, entry *LogEntry) error {
-	d.mu.RLock()
-	enabled := d.enabled
-	d.mu.RUnlock()
-
-	if !enabled {
+	if !d.enabled.Load() {
 		return nil
 	}
 
@@ -140,11 +131,7 @@ func (d *device) LogRequest(ctx context.Context, entry *LogEntry) error {
 
 // LogResponse logs a response
 func (d *device) LogResponse(ctx context.Context, entry *LogEntry) error {
-	d.mu.RLock()
-	enabled := d.enabled
-	d.mu.RUnlock()
-
-	if !enabled {
+	if !d.enabled.Load() {
 		return nil
 	}
 
@@ -215,9 +202,6 @@ func (d *device) Setup(ctx context.Context, conf *logical.BackendConfig) error {
 }
 
 func (d *device) Config() map[string]any {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
 	if d.config == nil {
 		return map[string]any{}
 	}
@@ -229,7 +213,7 @@ func (d *device) Config() map[string]any {
 		"description":   d.config.Description,
 		"accessor":      d.config.Accessor,
 		"options":       d.config.Options,
-		"enabled":       d.enabled,
+		"enabled":       d.enabled.Load(),
 		"format":        d.config.Format,
 		"prefix":        d.config.Prefix,
 		"hmac_key":      d.config.HMACKey,
@@ -240,16 +224,12 @@ func (d *device) Config() map[string]any {
 
 // Enabled returns whether the device is enabled
 func (d *device) Enabled() bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.enabled
+	return d.enabled.Load()
 }
 
 // SetEnabled sets the enabled state
 func (d *device) SetEnabled(enabled bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.enabled = enabled
+	d.enabled.Store(enabled)
 }
 
 func (d *device) GetType() string {
