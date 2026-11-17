@@ -429,6 +429,17 @@ func (c *Core) EnableAudit(ctx context.Context, entry *MountEntry, updateStorage
 		}
 	}
 
+	// The device is registered, then the table that lists it stored. Either
+	// failing undoes the other: a device listed but not registered made a
+	// server with no other device serve unaudited while it showed audit on,
+	// and refused a retry as "path already in use"; the next change stored
+	// it all the same.
+	if err := c.auditManager.RegisterDevice(entry.Path, backend); err != nil {
+		c.discardAuditBackend(entry.Path, backend)
+		return fmt.Errorf("failed to register audit device: %w", err)
+	}
+
+	previous := c.audit
 	newTable := c.audit.shallowClone()
 	newTable.Entries = append(newTable.Entries, entry)
 	c.audit = newTable
@@ -436,15 +447,15 @@ func (c *Core) EnableAudit(ctx context.Context, entry *MountEntry, updateStorage
 	if updateStorage {
 		if err := c.persistAuditsLocked(ctx); err != nil {
 			c.logger.Error("failed to persist audit table after enable", logger.Err(err))
-			c.discardAuditBackend(entry.Path, backend)
+			c.audit = previous
+			if uerr := c.auditManager.UnregisterDevice(entry.Path); uerr != nil {
+				c.logger.Warn("failed to close an audit device that was not enabled",
+					logger.String("path", entry.Path),
+					logger.Err(uerr),
+				)
+			}
 			return fmt.Errorf("failed to persist audit table: %w", err)
 		}
-	}
-
-	// Register the backend
-	if err := c.auditManager.RegisterDevice(entry.Path, backend); err != nil {
-		c.discardAuditBackend(entry.Path, backend)
-		return fmt.Errorf("failed to register audit device: %w", err)
 	}
 
 	c.logger.Info("audit backend successfully enabled",
@@ -540,12 +551,17 @@ func (c *Core) DisableAudit(ctx context.Context, path string, updateStorage bool
 		newTable.Entries = nil
 	}
 
+	previous := c.audit
 	c.audit = newTable
 
 	if updateStorage {
 		if err := c.persistAuditsLocked(ctx); err != nil {
+			// The device stays enabled, and listed: taken out of the table
+			// and left registered, it went on logging where no one could see
+			// it, list it or disable it.
 			c.logger.Error("failed to persist audit table after disable", logger.Err(err))
-			return true, fmt.Errorf("failed to persist audit table: %w", err)
+			c.audit = previous
+			return true, fmt.Errorf("failed to persist audit table, the device is still enabled: %w", err)
 		}
 	}
 

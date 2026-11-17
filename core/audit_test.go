@@ -1164,6 +1164,88 @@ func TestHandleRequest_OneAuditDeviceFailing(t *testing.T) {
 	})
 }
 
+// auditTableBarrier refuses to store the audit table while failing is set.
+type auditTableBarrier struct {
+	SecurityBarrier
+	failing bool
+}
+
+func (b *auditTableBarrier) Put(ctx context.Context, entry *sdklogical.StorageEntry) error {
+	if b.failing && entry.Key == coreAuditConfigPath {
+		return errors.New("storage unavailable")
+	}
+	return b.SecurityBarrier.Put(ctx, entry)
+}
+
+// newCoreForAuditPersistTest is a core with the real audit manager and file
+// factory, whose storage refuses the audit table on demand.
+func newCoreForAuditPersistTest(t *testing.T) (*Core, *auditTableBarrier) {
+	t.Helper()
+	core := newCoreForLoadAuditsTest(t)
+	core.auditManager = audit.NewAuditManager(core.logger)
+	t.Cleanup(func() { core.auditManager.Reset(context.Background()) })
+	barrier := &auditTableBarrier{SecurityBarrier: core.barrier}
+	core.barrier = barrier
+	return core, barrier
+}
+
+// A device whose table could not be stored is not enabled at all: neither
+// listed nor logged to, and the path free for a retry. It used to stay listed
+// without being registered: shown as enabled while nothing audited, refused
+// as "path already in use" on a retry, and stored by the next change.
+func TestEnableAudit_TableNotStored(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core, barrier := newCoreForAuditPersistTest(t)
+	entry := func() *MountEntry {
+		return &MountEntry{
+			Class: mountClassAudit, Type: "file", Path: "siem/",
+			Config: map[string]any{"file_path": filepath.Join(t.TempDir(), "audit.log"), "hmac_key": "k"},
+		}
+	}
+
+	barrier.failing = true
+	err := core.EnableAudit(ctx, entry(), true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to persist audit table")
+	assert.Empty(t, core.audit.Entries, "listed although not enabled")
+	assert.Empty(t, core.auditManager.ListDevices(), "logged to although not enabled")
+
+	barrier.failing = false
+	require.NoError(t, core.EnableAudit(ctx, entry(), true), "a retry once the storage is back")
+	assert.Len(t, core.audit.Entries, 1)
+	assert.Equal(t, []string{"siem/"}, core.auditManager.ListDevices())
+}
+
+// A device whose removal from the table could not be stored stays enabled:
+// listed, logged to, and disabled by a retry. It used to be taken out of the
+// table and left registered: logging where no one could see it, list it or
+// disable it.
+func TestDisableAudit_TableNotStored(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	core, barrier := newCoreForAuditPersistTest(t)
+	require.NoError(t, core.EnableAudit(ctx, &MountEntry{
+		Class: mountClassAudit, Type: "file", Path: "siem/",
+		Config: map[string]any{"file_path": filepath.Join(t.TempDir(), "audit.log"), "hmac_key": "k"},
+	}, true))
+
+	barrier.failing = true
+	_, err := core.DisableAudit(ctx, "siem/", true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the device is still enabled")
+	require.Len(t, core.audit.Entries, 1, "unlisted although still enabled")
+	assert.Equal(t, "siem/", core.audit.Entries[0].Path)
+	assert.Equal(t, []string{"siem/"}, core.auditManager.ListDevices())
+	ok, err := core.auditManager.LogRequest(ctx, &audit.LogEntry{Timestamp: time.Now(), Request: &audit.Request{ID: "req-1"}})
+	require.NoError(t, err)
+	assert.True(t, ok, "the device still enabled no longer logs")
+
+	barrier.failing = false
+	_, err = core.DisableAudit(ctx, "siem/", true)
+	require.NoError(t, err, "a retry once the storage is back")
+	assert.Empty(t, core.audit.Entries)
+	assert.Empty(t, core.auditManager.ListDevices())
+}
+
 // newCoreForLoadAuditsTest builds a real-barrier Core wired with the real
 // file audit factory so loadAudits' reconcile + register path can be
 // exercised end-to-end with files actually landing on disk.
