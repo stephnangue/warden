@@ -342,6 +342,139 @@ func TestFileSink_CutLineDoesNotHoldRotationBack(t *testing.T) {
 	}
 }
 
+// rotatingSink is a file sink due to rotate at its next write, holding one
+// entry, and the path of its file.
+func rotatingSink(t *testing.T) (*FileSink, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "audit.log")
+	sink, err := NewFileSink(FileSinkConfig{Path: path, RotateDaily: true, MaxBackups: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sink.Close() })
+	if err := sink.Write(context.Background(), sinkEntry(1)); err != nil {
+		t.Fatal(err)
+	}
+	sink.lastRotate = time.Now().Add(-25 * time.Hour)
+	return sink, path
+}
+
+// fileHolds fails the test unless the file at path holds want.
+func fileHolds(t *testing.T, path, want string) {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != want {
+		t.Errorf("%s:\n got %q\nwant %q", filepath.Base(path), content, want)
+	}
+}
+
+// backupHolds fails the test unless there is one backup, holding want.
+func backupHolds(t *testing.T, path, want string) {
+	t.Helper()
+	backups, _ := filepath.Glob(path + ".*")
+	if len(backups) != 1 {
+		t.Fatalf("backups: %q, want one", backups)
+	}
+	fileHolds(t, backups[0], want)
+}
+
+// A rotation that moves the file away and cannot open the new one fails the
+// write that set it off, and the next write opens the file. It used to leave
+// the sink holding the file it had closed: every write after it failed, until
+// a restart.
+func TestFileSink_RotationThatCannotOpenTheNewFile(t *testing.T) {
+	sink, path := rotatingSink(t)
+	ctx := context.Background()
+
+	full := errors.New("no space left on device")
+	sink.openFile = func(string, int, os.FileMode) (*os.File, error) { return nil, full }
+	if err := sink.Write(ctx, sinkEntry(2)); !errors.Is(err, full) {
+		t.Fatalf("the write that rotated: got %v, want the failure to open", err)
+	}
+	if err := sink.Write(ctx, sinkEntry(3)); !errors.Is(err, full) {
+		t.Fatalf("a write while the file cannot be opened: got %v, want the failure to open", err)
+	}
+
+	sink.openFile = os.OpenFile
+	if err := sink.Write(ctx, sinkEntry(4)); err != nil {
+		t.Fatalf("the first write once the file can be opened: %v", err)
+	}
+	backupHolds(t, path, sinkLines(1, 1))
+	fileHolds(t, path, sinkLines(4, 4))
+}
+
+// A rotation whose close of the file fails moves the file away all the same,
+// fails the write that set it off, and leaves the next write a new file. It
+// used to stop at the close, keeping the file and trying to close it again
+// at every write, which could not succeed.
+func TestFileSink_RotationWhoseCloseFails(t *testing.T) {
+	sink, path := rotatingSink(t)
+	ctx := context.Background()
+
+	// Closed under the sink: its own close fails.
+	sink.file.Close()
+	if err := sink.Write(ctx, sinkEntry(2)); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("the write that rotated: got %v, want the failure to close", err)
+	}
+	if err := sink.Write(ctx, sinkEntry(3)); err != nil {
+		t.Fatalf("the write after: %v", err)
+	}
+	backupHolds(t, path, sinkLines(1, 1))
+	fileHolds(t, path, sinkLines(3, 3))
+}
+
+// A rotation that cannot move the file away, nor open it again, leaves the
+// next write to open it, and to rotate it once it can.
+func TestFileSink_RotationThatCannotMoveNorReopenTheFile(t *testing.T) {
+	sink, path := rotatingSink(t)
+	ctx := context.Background()
+
+	// Gone from under the sink: there is nothing to move.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	full := errors.New("no space left on device")
+	sink.openFile = func(string, int, os.FileMode) (*os.File, error) { return nil, full }
+	err := sink.Write(ctx, sinkEntry(2))
+	if !errors.Is(err, os.ErrNotExist) || !errors.Is(err, full) {
+		t.Fatalf("the write that rotated: got %v, want the failures to move and to open", err)
+	}
+
+	sink.openFile = os.OpenFile
+	// The rotation is still due: this write opens a file at the path, and
+	// rotates it, empty, before it writes.
+	if err := sink.Write(ctx, sinkEntry(3)); err != nil {
+		t.Fatalf("the first write once the file can be opened: %v", err)
+	}
+	backupHolds(t, path, "")
+	fileHolds(t, path, sinkLines(3, 3))
+}
+
+// A closed sink takes no write, and does not open its file again: the rotation
+// that reopens a file it could not open must not bring a closed sink back.
+func TestFileSink_WriteAfterClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	sink, err := NewFileSink(FileSinkConfig{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Write(context.Background(), sinkEntry(1)); !errors.Is(err, errFileSinkClosed) {
+		t.Errorf("a write after Close: got %v, want it refused", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the closed sink created its file again: %v", err)
+	}
+}
+
 func TestCleanupBackupsAsync(t *testing.T) {
 	tmpDir := t.TempDir()
 	basePath := filepath.Join(tmpDir, "audit.log")
