@@ -595,14 +595,117 @@ func TestBufferedSink_FailedFlushKeepsOrder(t *testing.T) {
 	}
 }
 
-// While its file fails with the buffer full, a sink refuses every writer,
-// however the writers overlap. A writer that comes while another's attempt is
-// in progress finds the buffer empty, the entries being with the file for as
-// long as the attempt lasts: it is not let through for that, it makes its own
-// attempt and is told.
+// While its file fails, a sink keeps the entries it could not write, up to
+// twice its buffer size; past that an entry is dropped, and the write refused
+// as the ones before it were. A file that fails for long no longer takes the
+// memory of the process. What was kept is written when the file recovers, in
+// order; the server log says when entries started to be dropped and how many
+// were.
+func TestBufferedSink_BoundWhileFailing(t *testing.T) {
+	fileSink, err := NewFileSink(FileSinkConfig{Path: filepath.Join(t.TempDir(), "audit.log")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := &flakyFile{}
+	fileSink.writer = file
+	log, serverLog := serverLogger()
+	sink, err := NewBufferedSink(BufferedSinkConfig{Sink: fileSink, BufferSize: 3, FlushPeriod: time.Hour, Logger: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	ctx := context.Background()
+
+	file.accept(0)
+	for n := 1; n <= 2; n++ {
+		if err := sink.Write(ctx, sinkEntry(n)); err != nil {
+			t.Fatalf("entry %d, below the buffer size: %v", n, err)
+		}
+	}
+	// Refused and kept: the buffer holds up to six entries.
+	for n := 3; n <= 6; n++ {
+		if err := sink.Write(ctx, sinkEntry(n)); !errors.Is(err, errDiskFull) || strings.Contains(err.Error(), "dropped") {
+			t.Fatalf("entry %d: got %v, want the flush failure, the entry kept", n, err)
+		}
+	}
+	// Refused and dropped.
+	for n := 7; n <= 9; n++ {
+		if err := sink.Write(ctx, sinkEntry(n)); !errors.Is(err, errDiskFull) || !strings.Contains(err.Error(), "dropped") {
+			t.Fatalf("entry %d: got %v, want the entry dropped", n, err)
+		}
+	}
+	if got := strings.Count(serverLog.String(), "entries are dropped"); got != 1 {
+		t.Errorf("dropping was reported %d times for 3 entries, want once: %s", got, serverLog)
+	}
+
+	file.recover()
+	if err := sink.Write(ctx, sinkEntry(10)); err != nil {
+		t.Fatalf("first write after recovery: %v", err)
+	}
+	if err := sink.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := file.content(), sinkLines(1, 6)+sinkLines(10, 10); got != want {
+		t.Errorf("file after recovery:\n got %q\nwant %q", got, want)
+	}
+	plain := terminalColours.ReplaceAllString(serverLog.String(), "")
+	if strings.Count(plain, "audit sink recovered") != 1 || !strings.Contains(plain, "entries_dropped=3") {
+		t.Errorf("want one report of the recovery, with 3 entries dropped: %s", plain)
+	}
+}
+
+// A buffer at its bound behind a file that is only slow drops nothing: the
+// writers wait for the file. A device with a buffer of one entry reaches its
+// bound with three requests at once.
+func TestBufferedSink_BoundDoesNotDropBehindASlowFile(t *testing.T) {
+	sink, file := newGatedBufferedSink(t, 1)
+	defer sink.Close()
+
+	const writers = 6
+	results := make([]<-chan error, 0, writers)
+	results = append(results, writeInBackground(sink, 1))
+	<-file.started
+	for n := 2; n <= writers; n++ {
+		results = append(results, writeInBackground(sink, n))
+	}
+	// Wait for the sink to hold as many entries as it may behind the held
+	// write: the writers after that are at the bound.
+	for deadline := time.Now().Add(5 * time.Second); sink.held() < maxBufferedFactor*1; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the sink holds %d entries, the bound was not reached", sink.held())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Every write goes through, however the entries were shared out.
+	for range writers {
+		file.gates <- gate{}
+	}
+	for n, result := range results {
+		if err := within(t, result, "a write behind the slow file"); err != nil {
+			t.Errorf("entry %d: %v", n+1, err)
+		}
+	}
+	got := strings.Split(strings.TrimSuffix(file.content(), "\n"), "\n")
+	slices.Sort(got)
+	want := strings.Split(strings.TrimSuffix(sinkLines(1, writers), "\n"), "\n")
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("entries in the file: %q, want each of %q once", got, want)
+	}
+}
+
+// While its file fails with the buffer full, a sink refuses every writer and
+// holds no more than its bound, however the writers overlap. A writer that
+// comes while another's attempt is in progress finds the buffer empty, the
+// entries being with the file for as long as the attempt lasts: it is not let
+// through for that, it makes its own attempt and is told. Counting only what
+// was buffered, a sink accepted such writers for the whole outage, and grew
+// without limit.
 func TestBufferedSink_FailingSinkRefusesOverlappingWriters(t *testing.T) {
 	sink, file := newGatedBufferedSink(t, 3)
 	ctx := context.Background()
+	const bound = maxBufferedFactor * 3
 	failed := gate{err: errDiskFull}
 	holds := func(want int) {
 		t.Helper()
@@ -636,7 +739,7 @@ func TestBufferedSink_FailingSinkRefusesOverlappingWriters(t *testing.T) {
 	file.attempt(t, "entry 5's flush")
 	sixth := writeInBackground(sink, 6)
 	// Entry 6 is in the buffer, entry 5's attempt still held.
-	for deadline := time.Now().Add(5 * time.Second); sink.held() < 6; {
+	for deadline := time.Now().Add(5 * time.Second); sink.held() < bound; {
 		if time.Now().After(deadline) {
 			t.Fatalf("the sink holds %d entries: entry 6 was not accepted during entry 5's flush", sink.held())
 		}
@@ -648,21 +751,46 @@ func TestBufferedSink_FailingSinkRefusesOverlappingWriters(t *testing.T) {
 	}
 	file.attempt(t, "entry 6's own flush")
 	file.gates <- failed
-	if err := within(t, sixth, "entry 6"); !errors.Is(err, errDiskFull) {
-		t.Fatalf("entry 6: got %v, want the flush failure", err)
+	if err := within(t, sixth, "entry 6"); !errors.Is(err, errDiskFull) || strings.Contains(err.Error(), "dropped") {
+		t.Fatalf("entry 6: got %v, want the flush failure, the entry kept", err)
 	}
-	holds(6)
+	holds(bound)
+
+	// At the bound, the same overlap: entry 8 comes while entry 7's attempt
+	// holds every entry. Both are dropped, and the sink holds no more.
+	seventh := writeInBackground(sink, 7)
+	file.attempt(t, "entry 7's flush")
+	eighth := writeInBackground(sink, 8)
+	// Nothing shows that entry 8 has reached the sink: a writer at the bound
+	// waits without changing it. The pause makes the overlap likely; without
+	// it the test still passes, having shown less.
+	time.Sleep(20 * time.Millisecond)
+	holds(bound)
+	file.gates <- failed
+	if err := within(t, seventh, "entry 7"); !errors.Is(err, errDiskFull) || !strings.Contains(err.Error(), "dropped") {
+		t.Fatalf("entry 7: got %v, want the entry dropped", err)
+	}
+	file.attempt(t, "entry 8's own flush")
+	file.gates <- failed
+	if err := within(t, eighth, "entry 8"); !errors.Is(err, errDiskFull) || !strings.Contains(err.Error(), "dropped") {
+		t.Fatalf("entry 8: got %v, want the entry dropped", err)
+	}
+	holds(bound)
 	if got := file.content(); got != "" {
 		t.Fatalf("written while the file was failing: %q", got)
 	}
 
-	// The file recovers: what was kept is written, in order, by the first
-	// write to find it so.
+	// The file recovers: what was kept is written, in order, and the entry
+	// that found it so is accepted.
 	file.gates <- gate{}
-	if err := within(t, writeInBackground(sink, 7), "the first write after recovery"); err != nil {
-		t.Fatalf("entry 7: %v", err)
+	if err := within(t, writeInBackground(sink, 9), "the first write after recovery"); err != nil {
+		t.Fatalf("entry 9: %v", err)
 	}
-	if got, want := file.content(), sinkLines(1, 7); got != want {
+	file.gates <- gate{}
+	if err := sink.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := file.content(), sinkLines(1, 6)+sinkLines(9, 9); got != want {
 		t.Errorf("file after recovery:\n got %q\nwant %q", got, want)
 	}
 }
