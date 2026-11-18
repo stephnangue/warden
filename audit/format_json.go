@@ -2,7 +2,6 @@ package audit
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -72,26 +71,35 @@ func splitFieldPaths(fields []string) [][]string {
 	return out
 }
 
+// AppendRequest appends entry, formatted as a request, to dst.
+func (f *JSONFormat) AppendRequest(ctx context.Context, dst []byte, entry *LogEntry) ([]byte, error) {
+	return f.append(ctx, dst, entry, EntryTypeRequest)
+}
+
+// AppendResponse appends entry, formatted as a response, to dst.
+func (f *JSONFormat) AppendResponse(ctx context.Context, dst []byte, entry *LogEntry) ([]byte, error) {
+	return f.append(ctx, dst, entry, EntryTypeResponse)
+}
+
 // FormatRequest formats a request entry as JSON
 func (f *JSONFormat) FormatRequest(ctx context.Context, entry *LogEntry) ([]byte, error) {
-	// Clone the entry: it is the one every device is handed, and this format
-	// salts and omits fields of what it encodes.
-	entry = entry.Clone()
-	entry.Type = string(EntryTypeRequest)
-	return f.format(ctx, entry)
+	return f.AppendRequest(ctx, nil, entry)
 }
 
 // FormatResponse formats a response entry as JSON
 func (f *JSONFormat) FormatResponse(ctx context.Context, entry *LogEntry) ([]byte, error) {
-	// Clone the entry, as for a request.
-	entry = entry.Clone()
-	entry.Type = string(EntryTypeResponse)
-	return f.format(ctx, entry)
+	return f.AppendResponse(ctx, nil, entry)
 }
 
-// format salts, then omits, the configured fields of entry, this device's own
-// clone, and encodes it.
-func (f *JSONFormat) format(ctx context.Context, entry *LogEntry) ([]byte, error) {
+// append salts, then omits, the configured fields of a clone of entry, and
+// appends it to dst after the prefix, as an entry of the given type. What it
+// returns with an error is not an entry.
+func (f *JSONFormat) append(ctx context.Context, dst []byte, entry *LogEntry, entryType EntryType) ([]byte, error) {
+	// Clone the entry: it is the one every device is handed, and this format
+	// salts and omits fields of what it encodes.
+	entry = entry.Clone()
+	entry.Type = string(entryType)
+
 	if f.saltFn != nil {
 		// A path that fails is skipped so the others are still salted. Paths
 		// are checked when the device is created.
@@ -103,16 +111,11 @@ func (f *JSONFormat) format(ctx context.Context, entry *LogEntry) ([]byte, error
 		_ = omitField(entry, parts)
 	}
 
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return nil, err
+	enc := jsonEncoder{buf: append(dst, f.prefix...)}
+	if err := enc.entry(entry); err != nil {
+		return dst, err
 	}
-
-	if f.prefix != "" {
-		return append([]byte(f.prefix), data...), nil
-	}
-
-	return data, nil
+	return enc.buf, nil
 }
 
 // Name returns the format name
