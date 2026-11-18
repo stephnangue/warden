@@ -1246,7 +1246,7 @@ func TestCloneCopiesUserAttribution(t *testing.T) {
 		t.Errorf("subject = %q, want alice", clone.Auth.User.Subject)
 	}
 	// Must be a copy, not a shared pointer: entries are cloned precisely so
-	// parallel devices cannot race on them.
+	// that what one device salts or omits does not reach the next.
 	clone.Auth.User.Subject = "mallory"
 	if orig.Auth.User.Subject != "alice" {
 		t.Error("Clone shares the UserAttribution pointer, defeating the race protection it exists for")

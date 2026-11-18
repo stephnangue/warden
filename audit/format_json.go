@@ -74,7 +74,8 @@ func splitFieldPaths(fields []string) [][]string {
 
 // FormatRequest formats a request entry as JSON
 func (f *JSONFormat) FormatRequest(ctx context.Context, entry *LogEntry) ([]byte, error) {
-	// Clone the entry to avoid data races when logging to multiple devices in parallel
+	// Clone the entry: it is the one every device is handed, and this format
+	// salts and omits fields of what it encodes.
 	entry = entry.Clone()
 	entry.Type = string(EntryTypeRequest)
 	return f.format(ctx, entry)
@@ -82,7 +83,7 @@ func (f *JSONFormat) FormatRequest(ctx context.Context, entry *LogEntry) ([]byte
 
 // FormatResponse formats a response entry as JSON
 func (f *JSONFormat) FormatResponse(ctx context.Context, entry *LogEntry) ([]byte, error) {
-	// Clone the entry to avoid data races when logging to multiple devices in parallel
+	// Clone the entry, as for a request.
 	entry = entry.Clone()
 	entry.Type = string(EntryTypeResponse)
 	return f.format(ctx, entry)

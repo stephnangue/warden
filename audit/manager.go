@@ -6,49 +6,47 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/stephnangue/warden/logger"
 )
 
-const (
-	// MaxParallelDevices limits the number of concurrent goroutines for parallel logging
-	// to prevent resource exhaustion with many audit devices
-	MaxParallelDevices = 32
-)
-
 // manager implements the Manager interface
 type manager struct {
-	mu       sync.RWMutex
-	devices  map[string]Device
-	log      *logger.GatedLogger
-	parallel bool // Whether to log to devices in parallel
+	// mu guards devices and serialises the changes to it. Logging does not
+	// take it: it reads published.
+	mu      sync.RWMutex
+	devices map[string]Device
+
+	// published is devices as a list, replaced whole at every change, so that
+	// logging an entry takes no lock and allocates nothing to find its devices.
+	published atomic.Pointer[deviceList]
+
+	log *logger.GatedLogger
 }
 
-// AuditManagerConfig contains configuration for the audit manager
-type AuditManagerConfig struct {
-	// Parallel enables concurrent logging to multiple devices (default: true)
-	// Set to false if you need strict ordering across all devices
-	Parallel bool
-
-	Logger *logger.GatedLogger
+// deviceList is the devices to log to, in the order of their names. Once
+// published it is never written again.
+type deviceList struct {
+	devices []Device
 }
 
 // NewAuditManager creates a new audit manager
 func NewAuditManager(log *logger.GatedLogger) AuditManager {
 	return &manager{
-		devices:  make(map[string]Device),
-		log:      log,
-		parallel: true,
+		devices: make(map[string]Device),
+		log:     log,
 	}
 }
 
-// NewAuditManagerWithConfig creates a new audit manager with custom configuration
-func NewAuditManagerWithConfig(config AuditManagerConfig) AuditManager {
-	return &manager{
-		devices:  make(map[string]Device),
-		parallel: config.Parallel,
-		log:      config.Logger,
+// publishLocked replaces the list logging reads with the devices registered
+// now. The caller holds m.mu.
+func (m *manager) publishLocked() {
+	list := &deviceList{devices: make([]Device, 0, len(m.devices))}
+	for _, name := range slices.Sorted(maps.Keys(m.devices)) {
+		list.devices = append(list.devices, m.devices[name])
 	}
+	m.published.Store(list)
 }
 
 // RegisterDevice registers a new audit device
@@ -61,25 +59,33 @@ func (m *manager) RegisterDevice(name string, device Device) error {
 	}
 
 	m.devices[name] = device
+	m.publishLocked()
 	return nil
 }
 
-// UnregisterDevice unregisters an audit device
+// UnregisterDevice unregisters an audit device and closes it.
+//
+// The device is out of the published list before it is closed, and closed
+// outside the lock. Closing flushes it, which lasts as long as its file takes:
+// requests do not wait for that, and those that come after are not handed a
+// device that refuses their entries because it is closed. A request that had
+// already read the list may still be: it is refused if no other device takes
+// its entry. A device that fails to close is unregistered all the same, and
+// the failure is returned.
 func (m *manager) UnregisterDevice(name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	device, exists := m.devices[name]
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("device %q not found", name)
 	}
+	delete(m.devices, name)
+	m.publishLocked()
+	m.mu.Unlock()
 
-	// Close the device
 	if err := device.Close(); err != nil {
 		return fmt.Errorf("failed to close device: %w", err)
 	}
-
-	delete(m.devices, name)
 	return nil
 }
 
@@ -104,12 +110,19 @@ func (m *manager) GetDevice(name string) (Device, error) {
 //
 // A device that fails to close is unregistered all the same, so that the next
 // unseal can register its successor. The failures are returned.
+//
+// The devices stay listed until they are closed. A request still on its way
+// through a seal is then refused by a device that takes no more entries; with
+// the list emptied first it would find no device at all, which is the state
+// of a server that has none yet, and be served unaudited for as long as the
+// devices take to close.
 func (m *manager) Reset(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	err := closeDevices(m.devices)
 	m.devices = make(map[string]Device)
+	m.publishLocked()
 
 	return err
 }
@@ -146,120 +159,36 @@ func (m *manager) LogResponse(ctx context.Context, entry *LogEntry) (bool, error
 // long enough for the operator to bootstrap one. Once any device is
 // registered the broker becomes fail-closed (at least one device must
 // succeed per request).
+//
+// The devices are logged to in turn, in the order of their names. The caller
+// waits for every device either way, and a device takes an entry in about the
+// time it takes to start a goroutine for it, so handing each device its own
+// cost more than twice what the turn does.
+//
+// It takes no lock and allocates nothing unless a device fails: the list it
+// reads is replaced whole when a device is registered or unregistered.
 func (m *manager) logToDevices(ctx context.Context, entry *LogEntry, isRequest bool) (bool, error) {
-	// Get enabled devices with minimal lock time
-	m.mu.RLock()
-	if len(m.devices) == 0 {
-		m.mu.RUnlock()
+	list := m.published.Load()
+	if list == nil || len(list.devices) == 0 {
 		return true, nil
 	}
 
-	devices := make([]Device, 0, len(m.devices))
-	parallel := m.parallel
-	for _, device := range m.devices {
-		if device.Enabled() {
-			devices = append(devices, device)
-		}
-	}
-	m.mu.RUnlock()
-
-	// Devices are registered but all currently disabled. Treat as
-	// fail-closed (the operator explicitly disabled them; we should
-	// not pretend audit happened). Distinct from the zero-registered
+	// With devices registered and all of them disabled, nothing succeeds and
+	// nothing fails: fail-closed (the operator explicitly disabled them; we
+	// should not pretend audit happened). Distinct from the zero-registered
 	// case above, which fails open for bootstrap.
-	if len(devices) == 0 {
-		return false, nil
-	}
-
-	// Single device optimization - no need for goroutines or channels
-	if len(devices) == 1 {
-		var err error
-		if isRequest {
-			err = devices[0].LogRequest(ctx, entry)
-		} else {
-			err = devices[0].LogResponse(ctx, entry)
-		}
-		if err != nil {
-			return false, fmt.Errorf("device %q: %w", devices[0].Name(), err)
-		}
-		return true, nil
-	}
-
-	// Multiple devices - use parallel or sequential based on configuration
-	if parallel {
-		return m.logParallel(ctx, devices, entry, isRequest)
-	}
-	return m.logSequential(ctx, devices, entry, isRequest)
-}
-
-// logParallel logs to all devices concurrently with bounded parallelism
-// Returns (continue, error) where continue is true if at least one device succeeded
-func (m *manager) logParallel(ctx context.Context, devices []Device, entry *LogEntry, isRequest bool) (bool, error) {
-	type result struct {
-		name    string
-		err     error
-		success bool
-	}
-
-	results := make(chan result, len(devices))
-
-	// Use a semaphore to limit concurrent goroutines
-	semaphore := make(chan struct{}, MaxParallelDevices)
-
-	var wg sync.WaitGroup
-	for _, device := range devices {
-		wg.Add(1)
-		go func(d Device) {
-			defer wg.Done()
-
-			// Acquire semaphore slot
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			var err error
-			if isRequest {
-				err = d.LogRequest(ctx, entry)
-			} else {
-				err = d.LogResponse(ctx, entry)
-			}
-			results <- result{name: d.Name(), err: err, success: err == nil}
-		}(device)
-	}
-
-	// Close results channel when all goroutines complete
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// Fan-in: collect all results
 	var errs []error
 	atLeastOneSuccess := false
-	for res := range results {
-		if res.success {
-			atLeastOneSuccess = true
-		} else {
-			errs = append(errs, fmt.Errorf("device %q: %w", res.name, res.err))
+	for _, device := range list.devices {
+		if !device.Enabled() {
+			continue
 		}
-	}
-
-	return atLeastOneSuccess, m.formatErrors(errs)
-}
-
-// logSequential logs to all devices one by one
-// Returns (continue, error) where continue is true if at least one device succeeded
-func (m *manager) logSequential(ctx context.Context, devices []Device, entry *LogEntry, isRequest bool) (bool, error) {
-	var errs []error
-	atLeastOneSuccess := false
-
-	for _, device := range devices {
 		var err error
 		if isRequest {
 			err = device.LogRequest(ctx, entry)
 		} else {
 			err = device.LogResponse(ctx, entry)
 		}
-
 		if err != nil {
 			errs = append(errs, fmt.Errorf("device %q: %w", device.Name(), err))
 		} else {

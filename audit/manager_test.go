@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,28 +17,25 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-func TestManagerParallelVsSequential(t *testing.T) {
-	// Create multiple slow devices
-	numDevices := 5
-	devices := make([]Device, numDevices)
+// An entry is written once by every registered device.
+func TestManagerLogsToEveryDevice(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	manager := NewAuditManager(log)
 
-	for i := 0; i < numDevices; i++ {
-		tmpDir := t.TempDir()
-		logPath := filepath.Join(tmpDir, fmt.Sprintf("audit-%d.log", i))
-
-		sink, err := NewFileSink(FileSinkConfig{
-			Path: logPath,
-		})
+	paths := make([]string, 5)
+	for i := range paths {
+		paths[i] = filepath.Join(t.TempDir(), fmt.Sprintf("audit-%d.log", i))
+		sink, err := NewFileSink(FileSinkConfig{Path: paths[i]})
 		if err != nil {
 			t.Fatalf("Failed to create sink: %v", err)
 		}
-
-		format := NewJSONFormat()
-		devices[i] = NewDevice(fmt.Sprintf("device-%d", i), format, sink, &DeviceConfig{
-			Name:    fmt.Sprintf("device-%d", i),
-			Enabled: true,
-		})
+		name := fmt.Sprintf("device-%d", i)
+		device := NewDevice(name, NewJSONFormat(), sink, &DeviceConfig{Name: name, Enabled: true})
+		if err := manager.RegisterDevice(name, device); err != nil {
+			t.Fatalf("Failed to register device: %v", err)
+		}
 	}
+	defer manager.Close()
 
 	entry := &LogEntry{
 		Timestamp: time.Now(),
@@ -47,57 +46,23 @@ func TestManagerParallelVsSequential(t *testing.T) {
 			ClientIP:  "192.168.1.100",
 		},
 	}
+	continued, err := manager.LogRequest(context.Background(), entry)
+	if err != nil {
+		t.Errorf("LogRequest failed: %v", err)
+	}
+	if !continued {
+		t.Error("Expected continue=true but got false")
+	}
 
-	ctx := context.Background()
-
-	// Test parallel execution
-	t.Run("Parallel", func(t *testing.T) {
-		log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-		manager := NewAuditManager(log)
-		for i, device := range devices {
-			if err := manager.RegisterDevice(fmt.Sprintf("device-%d", i), device); err != nil {
-				t.Fatalf("Failed to register device: %v", err)
-			}
-		}
-
-		start := time.Now()
-		continued, err := manager.LogRequest(ctx, entry)
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
 		if err != nil {
-			t.Errorf("LogRequest failed: %v", err)
+			t.Fatal(err)
 		}
-		if !continued {
-			t.Error("Expected continue=true but got false")
+		if strings.Count(string(content), "\n") != 1 || !strings.Contains(string(content), "req-test") {
+			t.Errorf("%s: want the entry, once: %q", filepath.Base(path), content)
 		}
-		parallelDuration := time.Since(start)
-
-		t.Logf("Parallel execution took: %v", parallelDuration)
-	})
-
-	// Test sequential execution
-	t.Run("Sequential", func(t *testing.T) {
-		log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-		manager := NewAuditManagerWithConfig(AuditManagerConfig{
-			Logger:   log,
-			Parallel: false,
-		})
-		for i, device := range devices {
-			if err := manager.RegisterDevice(fmt.Sprintf("device-%d", i), device); err != nil {
-				t.Fatalf("Failed to register device: %v", err)
-			}
-		}
-
-		start := time.Now()
-		continued, err := manager.LogRequest(ctx, entry)
-		if err != nil {
-			t.Errorf("LogRequest failed: %v", err)
-		}
-		if !continued {
-			t.Error("Expected continue=true but got false")
-		}
-		sequentialDuration := time.Since(start)
-
-		t.Logf("Sequential execution took: %v", sequentialDuration)
-	})
+	}
 }
 
 func TestManagerSingleDeviceOptimization(t *testing.T) {
@@ -496,51 +461,12 @@ func BenchmarkManagerSingleDevice(b *testing.B) {
 	}
 }
 
-func BenchmarkManagerMultiDeviceParallel(b *testing.B) {
-	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManager(log)
-	defer manager.Close()
-
-	numDevices := 5
-	for i := 0; i < numDevices; i++ {
-		tmpDir := b.TempDir()
-		logPath := filepath.Join(tmpDir, fmt.Sprintf("bench-%d.log", i))
-
-		sink, _ := NewFileSink(FileSinkConfig{
-			Path: logPath,
-		})
-		format := NewJSONFormat()
-		device := NewDevice(fmt.Sprintf("bench-%d", i), format, sink, &DeviceConfig{
-			Name:    fmt.Sprintf("bench-%d", i),
-			Enabled: true,
-		})
-		manager.RegisterDevice(fmt.Sprintf("bench-%d", i), device)
-	}
-
-	entry := &LogEntry{
-		Timestamp: time.Now(),
-		Request: &Request{
-			ID:        "req-bench",
-			Operation: "read",
-			Path:      "/test",
-			ClientIP:  "192.168.1.100",
-		},
-	}
-
-	ctx := context.Background()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		manager.LogRequest(ctx, entry)
-	}
-}
-
+// BenchmarkManagerMultiDeviceSequential logs one entry to five devices. The
+// devices are written in turn, the only way the manager has; the name is kept
+// so that results compare with those taken when it could also fan out.
 func BenchmarkManagerMultiDeviceSequential(b *testing.B) {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	manager := NewAuditManagerWithConfig(AuditManagerConfig{
-		Logger:   log,
-		Parallel: false,
-	})
+	manager := NewAuditManager(log)
 	defer manager.Close()
 
 	numDevices := 5
@@ -794,34 +720,7 @@ func TestManagerFormatErrors(t *testing.T) {
 	}
 }
 
-func TestManagerSequentialLogResponse(t *testing.T) {
-	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
-	mgr := NewAuditManagerWithConfig(AuditManagerConfig{Logger: log, Parallel: false})
-
-	tmpDir := t.TempDir()
-	for i := 0; i < 3; i++ {
-		sink, _ := NewFileSink(FileSinkConfig{Path: filepath.Join(tmpDir, fmt.Sprintf("a%d.log", i))})
-		dev := NewDevice(fmt.Sprintf("dev%d", i), NewJSONFormat(), sink, &DeviceConfig{Name: fmt.Sprintf("dev%d", i), Enabled: true})
-		mgr.RegisterDevice(fmt.Sprintf("dev%d", i), dev)
-	}
-	defer mgr.Close()
-
-	entry := &LogEntry{
-		Timestamp: time.Now(),
-		Request:   &Request{ID: "req-1", Path: "/test"},
-		Response:  &Response{StatusCode: 200},
-	}
-
-	continued, err := mgr.LogResponse(context.Background(), entry)
-	if err != nil {
-		t.Errorf("LogResponse failed: %v", err)
-	}
-	if !continued {
-		t.Error("expected continue=true")
-	}
-}
-
-func TestManagerParallelLogResponse(t *testing.T) {
+func TestManagerMultiDeviceLogResponse(t *testing.T) {
 	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
 	mgr := NewAuditManager(log)
 
@@ -948,6 +847,257 @@ func gatewayResponseEntry() *LogEntry {
 			UpstreamURL: "https://api.githubcopilot.com/mcp/",
 		},
 	}
+}
+
+// writeLog is the order in which the sinks sharing it were written to.
+type writeLog struct {
+	mu    sync.Mutex
+	names []string
+}
+
+func (l *writeLog) written() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.names)
+}
+
+// recordingSink notes each write it receives in a log it shares.
+type recordingSink struct {
+	discardSink
+	name string
+	log  *writeLog
+}
+
+func (s recordingSink) Write(context.Context, []byte) error {
+	s.log.mu.Lock()
+	defer s.log.mu.Unlock()
+	s.log.names = append(s.log.names, s.name)
+	return nil
+}
+
+// recordingDevice is an enabled device named name that writes to log.
+func recordingDevice(name string, log *writeLog) Device {
+	return NewDevice(name, NewJSONFormat(), recordingSink{name: name, log: log}, &DeviceConfig{Name: name, Enabled: true})
+}
+
+// Devices are written in the order of their names, whatever the order they
+// were registered in: the same on every node and after every restart.
+func TestManagerLogsInNameOrder(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+	writes := &writeLog{}
+	for _, name := range []string{"siem/", "archive/", "file/"} {
+		if err := mgr.RegisterDevice(name, recordingDevice(name, writes)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx := context.Background()
+	entry := &LogEntry{Timestamp: time.Now(), Request: &Request{ID: "req-1"}}
+	if ok, err := mgr.LogRequest(ctx, entry); err != nil || !ok {
+		t.Fatalf("LogRequest: ok=%v err=%v", ok, err)
+	}
+	if got, want := writes.written(), []string{"archive/", "file/", "siem/"}; !slices.Equal(got, want) {
+		t.Errorf("devices written in the order %q, want %q", got, want)
+	}
+
+	// A device unregistered is written no more, and the rest keep their order.
+	if err := mgr.UnregisterDevice("file/"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := mgr.LogResponse(ctx, entry); err != nil || !ok {
+		t.Fatalf("LogResponse: ok=%v err=%v", ok, err)
+	}
+	if got, want := writes.written()[3:], []string{"archive/", "siem/"}; !slices.Equal(got, want) {
+		t.Errorf("after the unregister, devices written in the order %q, want %q", got, want)
+	}
+}
+
+// slowCloseSink is a sink whose Close waits to be released.
+type slowCloseSink struct {
+	recordingSink
+	closing chan struct{}
+	release chan struct{}
+}
+
+func (s slowCloseSink) Close() error {
+	close(s.closing)
+	<-s.release
+	return nil
+}
+
+// A device being unregistered is out of the way before it is closed. Closing
+// one flushes it, which can take as long as its file does; requests neither
+// wait for that nor write to the device meanwhile, which would refuse them.
+func TestManagerUnregister_DoesNotStallLogging(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+	writes := &writeLog{}
+	slow := slowCloseSink{
+		recordingSink: recordingSink{name: "leaving/", log: writes},
+		closing:       make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+	if err := mgr.RegisterDevice("leaving/", NewDevice("leaving/", NewJSONFormat(), slow, &DeviceConfig{Name: "leaving/", Enabled: true})); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.RegisterDevice("staying/", recordingDevice("staying/", writes)); err != nil {
+		t.Fatal(err)
+	}
+
+	unregistered := make(chan error, 1)
+	go func() { unregistered <- mgr.UnregisterDevice("leaving/") }()
+	<-slow.closing
+
+	logged := make(chan error, 1)
+	go func() {
+		ok, err := mgr.LogRequest(context.Background(), &LogEntry{Timestamp: time.Now(), Request: &Request{ID: "req-1"}})
+		if err == nil && !ok {
+			err = errors.New("no device took the entry")
+		}
+		logged <- err
+	}()
+	select {
+	case err := <-logged:
+		if err != nil {
+			t.Errorf("LogRequest while a device closes: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("LogRequest waits for the device being closed")
+	}
+	if got, want := writes.written(), []string{"staying/"}; !slices.Equal(got, want) {
+		t.Errorf("written while a device closes: %q, want %q", got, want)
+	}
+
+	close(slow.release)
+	if err := <-unregistered; err != nil {
+		t.Errorf("UnregisterDevice: %v", err)
+	}
+}
+
+// A device that fails to close is unregistered all the same, and the failure
+// returned: left registered, a closed device refuses every request.
+func TestManagerUnregister_DropsADeviceThatFailsToClose(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+	device := NewDevice("bad/", NewJSONFormat(), failingCloseSink{}, &DeviceConfig{Name: "bad/", Enabled: true})
+	if err := mgr.RegisterDevice("bad/", device); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mgr.UnregisterDevice("bad/"); err == nil {
+		t.Error("the close failure was not returned")
+	}
+	if devices := mgr.ListDevices(); len(devices) != 0 {
+		t.Errorf("devices left: %q", devices)
+	}
+	if ok, err := mgr.LogRequest(context.Background(), &LogEntry{Timestamp: time.Now(), Request: &Request{ID: "req-1"}}); err != nil || !ok {
+		t.Errorf("LogRequest with no device left: ok=%v err=%v", ok, err)
+	}
+}
+
+// Choosing the devices to log to allocates nothing: what a request allocates
+// to be audited is what its devices allocate.
+func TestManagerDispatchAllocatesNothing(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation counts are not meaningful under the race detector")
+	}
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+	ctx := context.Background()
+	entry := gatewayRequestEntry()
+
+	device := NewDevice("a/", NewJSONFormat(), discardSink{}, &DeviceConfig{Name: "a/", Enabled: true})
+	perDevice := testing.AllocsPerRun(200, func() { device.LogRequest(ctx, entry) })
+
+	for devices := 1; devices <= 3; devices++ {
+		name := fmt.Sprintf("device-%d/", devices)
+		if err := mgr.RegisterDevice(name, NewDevice(name, NewJSONFormat(), discardSink{}, &DeviceConfig{Name: name, Enabled: true})); err != nil {
+			t.Fatal(err)
+		}
+		got := testing.AllocsPerRun(200, func() { mgr.LogRequest(ctx, entry) })
+		if want := perDevice * float64(devices); got != want {
+			t.Errorf("%d device(s): %v allocations per entry, want the devices' own %v", devices, got, want)
+		}
+	}
+}
+
+// Devices are registered, unregistered, enabled and disabled while requests
+// are logged: every request still reaches the device that stays.
+func TestManagerConcurrentChanges(t *testing.T) {
+	log, _ := logger.NewGatedLogger(logger.DefaultConfig(), logger.GatedWriterConfig{})
+	mgr := NewAuditManager(log)
+	staying := &countingSink{}
+	if err := mgr.RegisterDevice("staying/", NewDevice("staying/", NewJSONFormat(), staying, &DeviceConfig{Name: "staying/", Enabled: true})); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	entry := &LogEntry{Timestamp: time.Now(), Request: &Request{ID: "req-1"}}
+
+	stop := make(chan struct{})
+	var changers, loggers sync.WaitGroup
+	for c := 0; c < 2; c++ {
+		changers.Add(1)
+		go func() {
+			defer changers.Done()
+			name := fmt.Sprintf("coming-and-going-%d/", c)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				device := NewDevice(name, NewJSONFormat(), discardSink{}, &DeviceConfig{Name: name, Enabled: true})
+				if err := mgr.RegisterDevice(name, device); err != nil {
+					t.Errorf("RegisterDevice: %v", err)
+					return
+				}
+				device.SetEnabled(false)
+				device.SetEnabled(true)
+				mgr.ListDevices()
+				if err := mgr.UnregisterDevice(name); err != nil {
+					t.Errorf("UnregisterDevice: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	for l := 0; l < 4; l++ {
+		loggers.Add(1)
+		go func() {
+			defer loggers.Done()
+			for n := 0; n < 2000; n++ {
+				if ok, err := mgr.LogRequest(ctx, entry); err != nil || !ok {
+					t.Errorf("LogRequest: ok=%v err=%v", ok, err)
+					return
+				}
+				if ok, err := mgr.LogResponse(ctx, entry); err != nil || !ok {
+					t.Errorf("LogResponse: ok=%v err=%v", ok, err)
+					return
+				}
+			}
+		}()
+	}
+	loggers.Wait()
+	close(stop)
+	changers.Wait()
+
+	// A manager with no device also says an entry is audited: only the
+	// device's own count shows it was handed every one.
+	if got, want := staying.entries.Load(), int64(4*2000*2); got != want {
+		t.Errorf("the device that stays was handed %d entries, want %d", got, want)
+	}
+}
+
+// countingSink is a sink that counts the entries it is handed.
+type countingSink struct {
+	discardSink
+	entries atomic.Int64
+}
+
+func (s *countingSink) Write(context.Context, []byte) error {
+	s.entries.Add(1)
+	return nil
 }
 
 // discardSink accepts every entry and writes nothing.
