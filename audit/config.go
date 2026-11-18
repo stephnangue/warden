@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 )
 
@@ -90,8 +89,8 @@ func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
 	salt, unknownSalt := knownFieldPaths(config.SaltFields, true, "salt_fields")
 	omit, unknownOmit := knownFieldPaths(config.OmitFields, false, "omit_fields")
 	config.unknownFieldPaths = append(unknownSalt, unknownOmit...)
-	config.SaltFields = fieldPaths(defaultSaltFields, salt, true)
-	config.OmitFields = fieldPaths(nil, omit, false)
+	config.SaltFields = fieldPaths(defaultSaltFields, salt)
+	config.OmitFields = fieldPaths(nil, omit)
 
 	// Validate configuration
 	if err := config.Validate(); err != nil {
@@ -105,11 +104,15 @@ func mapToFileDeviceConfig(data map[string]any) (*FileDeviceConfig, error) {
 // their order, each once and empty ones dropped. It never appends to floor,
 // which is shared by every device being created.
 //
-// With collapseCovered, a path below another listed path is dropped too: for
-// salt paths, response.credential.data.secret_key under the floor's
-// response.credential.data would otherwise be hashed twice, and its hash
-// would no longer match the value's.
-func fieldPaths(floor, operator []string, collapseCovered bool) []string {
+// A path below another listed path is kept. It used to be dropped from the
+// salt paths, when a value was hashed once for each path that reached it:
+// response.credential.data.secret_key under the floor's
+// response.credential.data gave a hash that matched nothing. A value is
+// salted once now, whatever reaches it. And "below" was read off the text of
+// the path, which says nothing for the inputs of a condition: their keys are
+// dotted, so inputs.agent.metadata.env is not below inputs.agent, it is
+// another key, and dropping it left its value in clear.
+func fieldPaths(floor, operator []string) []string {
 	// Sized from the operator's list alone: no arithmetic on a length that
 	// comes from configuration; the floor is a path or two.
 	out := make([]string, 0, len(operator))
@@ -120,16 +123,7 @@ func fieldPaths(floor, operator []string, collapseCovered bool) []string {
 			}
 		}
 	}
-	if !collapseCovered {
-		return out
-	}
-	kept := make([]string, 0, len(out))
-	for _, p := range out {
-		if !slices.ContainsFunc(out, func(q string) bool { return strings.HasPrefix(p, q+".") }) {
-			kept = append(kept, p)
-		}
-	}
-	return kept
+	return out
 }
 
 // knownFieldPaths keeps the paths that name a field an entry records, and

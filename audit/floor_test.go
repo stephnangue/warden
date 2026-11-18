@@ -23,8 +23,11 @@ func TestMapToFileDeviceConfig_SaltFloor(t *testing.T) {
 		{"empty", []any{}, []string{"response.credential.data"}},
 		{"one path", []any{"auth.token_id"}, []string{"response.credential.data", "auth.token_id"}},
 		{"the floor again", []any{"response.credential.data", "auth.token_id", "auth.token_id"}, []string{"response.credential.data", "auth.token_id"}},
-		{"a key under the floor", []any{"response.credential.data.secret_key"}, []string{"response.credential.data"}},
-		{"a key, then its parent", []any{"auth.policy_results.condition.inputs.agent.metadata.env", "auth.policy_results.condition.inputs"}, []string{"response.credential.data", "auth.policy_results.condition.inputs"}},
+		// A path below another is kept: a value is salted once whatever
+		// reaches it, and what looks like a path below another may be a key
+		// of its own.
+		{"a key under the floor", []any{"response.credential.data.secret_key"}, []string{"response.credential.data", "response.credential.data.secret_key"}},
+		{"a key, then its parent", []any{"auth.policy_results.condition.inputs.agent.metadata.env", "auth.policy_results.condition.inputs"}, []string{"response.credential.data", "auth.policy_results.condition.inputs.agent.metadata.env", "auth.policy_results.condition.inputs"}},
 		{"empty strings dropped", []any{"", "auth.principal_id"}, []string{"response.credential.data", "auth.principal_id"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,6 +189,44 @@ func TestJSONFormatFor_NoKeyOmitsSaltFields(t *testing.T) {
 	}
 	if !strings.Contains(out, `"req-1"`) {
 		t.Errorf("fields not listed were dropped too: %s", out)
+	}
+}
+
+// The keys of a condition's inputs are dotted, so one can be the start of
+// another: agent and agent.metadata.env are two inputs, as a condition that
+// reads the whole of agent.metadata and one value in it has. Listing both
+// hides both. The longer one used to be taken for a path below the shorter,
+// dropped from the list, and written in clear, with a key and without.
+func TestJSONFormatFor_InputKeyThatStartsWithAnother(t *testing.T) {
+	const inputs = "auth.policy_results.condition.inputs."
+	for _, tc := range []struct {
+		name   string
+		config map[string]any
+	}{
+		{"salted", map[string]any{"hmac_key": "k"}},
+		{"omitted for want of a key", map[string]any{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.config["salt_fields"] = []any{inputs + "agent.metadata", inputs + "agent.metadata.env"}
+			conf, err := mapToFileDeviceConfig(tc.config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			format, _ := jsonFormatFor(conf)
+			entry := secretEntry()
+			entry.Auth.PolicyResults.Condition.Inputs = map[string]string{
+				"agent.metadata":     "S-WHOLE-METADATA",
+				"agent.metadata.env": "S-ONE-VALUE",
+				"request.path":       "visible",
+			}
+			out := formatBoth(t, format, entry)
+			if strings.Contains(out, "S-WHOLE-METADATA") || strings.Contains(out, "S-ONE-VALUE") {
+				t.Errorf("an input listed to be hidden was written: %s", out)
+			}
+			if !strings.Contains(out, "visible") {
+				t.Errorf("an input not listed was hidden too: %s", out)
+			}
+		})
 	}
 }
 
