@@ -1164,6 +1164,47 @@ func TestHandleRequest_OneAuditDeviceFailing(t *testing.T) {
 	})
 }
 
+// A device enabled with "enabled": false was the only device, refused every
+// request, the one that would remove it among them, and was registered again
+// at every unseal. Enabling one is refused; one stored that way loads enabled,
+// so that a server already locked out serves again after its next unseal.
+func TestAudit_DeviceNotEnabled(t *testing.T) {
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	config := func() map[string]any {
+		return map[string]any{"file_path": filepath.Join(t.TempDir(), "audit.log"), "hmac_key": "k", "enabled": false}
+	}
+
+	t.Run("enabling it is refused", func(t *testing.T) {
+		core, _ := newCoreForAuditPersistTest(t)
+		err := core.EnableAudit(ctx, &MountEntry{Class: mountClassAudit, Type: "file", Path: "siem/", Config: config()}, true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `"enabled": false`)
+		assert.Empty(t, core.audit.Entries)
+		assert.Empty(t, core.auditManager.ListDevices())
+	})
+
+	t.Run("one stored that way loads enabled", func(t *testing.T) {
+		core, _ := newCoreForAuditPersistTest(t)
+		var serverLog bytes.Buffer
+		cfg := logger.DefaultConfig()
+		cfg.Outputs = nil
+		core.logger, _ = logger.NewGatedLogger(cfg, logger.GatedWriterConfig{Underlying: &serverLog, InitialState: logger.GateOpen})
+		core.audit.Entries = append(core.audit.Entries, &MountEntry{
+			Class: mountClassAudit, Type: "file", Path: "siem/", Accessor: "audit_file_test",
+			NamespaceID: namespace.RootNamespaceID, namespace: namespace.RootNamespace,
+			Config: config(),
+		})
+		require.NoError(t, core.persistAudits(ctx))
+		core.audit = NewMountTable()
+
+		require.NoError(t, core.loadAudits(ctx))
+		ok, err := core.auditManager.LogRequest(ctx, &audit.LogEntry{Timestamp: time.Now(), Request: &audit.Request{ID: "req-1"}})
+		require.NoError(t, err)
+		assert.True(t, ok, "a request is refused: the stored device was loaded disabled")
+		assert.Contains(t, serverLog.String(), `\"enabled\": false`)
+	})
+}
+
 // auditTableBarrier refuses to store the audit table while failing is set.
 type auditTableBarrier struct {
 	SecurityBarrier
