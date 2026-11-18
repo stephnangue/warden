@@ -324,6 +324,51 @@ func TestDevice_EntriesDoNotShareABuffer(t *testing.T) {
 	}
 }
 
+// Auditing a request allocates nothing once its device has run: the entry is
+// redacted as it is encoded, in a buffer the device reuses, salted with a hash
+// it reuses, and copied into a buffer its sink reuses. What a request costs to
+// audit does not grow the heap, whatever the device salts and omits.
+func TestDevice_AuditsWithoutAllocating(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation counts are not meaningful under the race detector")
+	}
+	conf, err := mapToFileDeviceConfig(map[string]any{
+		"hmac_key": "0123456789abcdef0123456789abcdef",
+		"salt_fields": []string{
+			"auth.principal_id", "auth.alias_name", "request.client_ip",
+			"auth.policy_results.granting_policies", "response.credential.metadata.subject",
+		},
+		"omit_fields": []string{"auth.policy_results.mcp_client", "auth.groups", "response.upstream_url"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	format, warnings := jsonFormatFor(conf)
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %q", warnings)
+	}
+	sink, err := NewBufferedSink(BufferedSinkConfig{Sink: batchDiscardSink{}, BufferSize: 10, FlushPeriod: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := NewDevice("file/", format, sink, &DeviceConfig{Name: "file/", Enabled: true})
+	defer device.Close()
+
+	ctx := context.Background()
+	request, response := gatewayRequestEntry(), gatewayResponseEntry()
+	got := testing.AllocsPerRun(200, func() {
+		if err := device.LogRequest(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+		if err := device.LogResponse(ctx, response); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if got != 0 {
+		t.Errorf("%v allocations to audit a request, want none", got)
+	}
+}
+
 func TestDevicePathFilters(t *testing.T) {
 	tmpDir := t.TempDir()
 

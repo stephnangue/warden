@@ -1173,11 +1173,11 @@ func TestJSONFormatCredentialMetadata(t *testing.T) {
 }
 
 // TestJSONFormatPreservesUserAttribution guards a whole class of silent data
-// loss: the formatter clones every entry before serialising, so any field
-// Clone() forgets is set correctly in memory and then dropped on the way to
-// disk. Per-user attribution was lost this way from the day it was added —
-// invisible to tests that assert on the in-memory entry, because those sit
-// above the layer that loses it.
+// loss: a field the format forgets is set correctly in memory and then
+// dropped on the way to disk. Per-user attribution was lost this way from the
+// day it was added, when the format copied each entry and the copy left it
+// out — invisible to tests that assert on the in-memory entry, because those
+// sit above the layer that loses it.
 func TestJSONFormatPreservesUserAttribution(t *testing.T) {
 	format := NewJSONFormat()
 
@@ -1229,29 +1229,6 @@ func TestJSONFormatPreservesUserAttribution(t *testing.T) {
 				t.Errorf("agent principal lost: %s", string(data))
 			}
 		})
-	}
-}
-
-// TestCloneCopiesUserAttribution pins the specific omission at its source, so a
-// future field added to Auth without a matching Clone() line fails here rather
-// than silently vanishing from every audit log.
-func TestCloneCopiesUserAttribution(t *testing.T) {
-	orig := &LogEntry{
-		Auth: &Auth{User: &UserAttribution{Subject: "alice", TokenID: "t", NamespaceID: "root"}},
-	}
-	clone := orig.Clone()
-
-	if clone.Auth == nil || clone.Auth.User == nil {
-		t.Fatal("Clone dropped Auth.User")
-	}
-	if clone.Auth.User.Subject != "alice" {
-		t.Errorf("subject = %q, want alice", clone.Auth.User.Subject)
-	}
-	// Must be a copy, not a shared pointer: entries are cloned precisely so
-	// that what one device salts or omits does not reach the next.
-	clone.Auth.User.Subject = "mallory"
-	if orig.Auth.User.Subject != "alice" {
-		t.Error("Clone shares the UserAttribution pointer, defeating the race protection it exists for")
 	}
 }
 
@@ -1558,8 +1535,9 @@ func goldenFormats(t *testing.T) []goldenFormat {
 			"hmac_key": goldenKey, "salt_fields": []string{inputs + ".agent", inputs + ".agent.metadata.env"},
 		})},
 
-		// A path and a path below it, and a path listed twice: each value is
-		// salted once per path that reaches it. The factory never builds this.
+		// A path and a path below it, and a path listed twice: a value is
+		// salted once, however many paths reach it, and its salted form is
+		// the one sys/audit-hash computes. The factory never builds this.
 		{name: "direct-overlapping-salt-paths", broad: true, format: NewJSONFormat(
 			WithSaltFunc(hmac),
 			WithSaltFields([]string{
@@ -1580,6 +1558,7 @@ func goldenFormats(t *testing.T) []goldenFormat {
 			WithSaltFields([]string{"agent.metadata.env", "auth.token_id", "auth"}),
 			WithOmitFields([]string{"request.headers", "no.such.field", "request.client_ip"}),
 		)},
+		// A value its salt function fails on is written empty, not in clear.
 		{name: "direct-salt-function-fails", broad: true, format: NewJSONFormat(
 			WithSaltFunc(func(context.Context, string) (string, error) { return "", errors.New("no salt") }),
 			WithSaltFields([]string{"auth.token_id", credentialData}),
@@ -1905,8 +1884,9 @@ func TestEncoderMatchesEncodingJSON(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: encoding/json: %v", name, err)
 		}
-		enc := jsonEncoder{}
-		if err := enc.entry(entry); err != nil {
+		// With nothing to redact: what is compared is the encoding.
+		enc := jsonEncoder{red: &redaction{}}
+		if err := enc.entry(entry, entry.Type); err != nil {
 			t.Fatalf("%s: the encoder: %v", name, err)
 		}
 		if string(enc.buf) != string(want) {
@@ -1937,8 +1917,8 @@ func TestEncoder_RefusesWhatEncodingJSONRefuses(t *testing.T) {
 	if _, err := json.Marshal(entry); err == nil {
 		t.Fatal("encoding/json accepts a five-digit year, so this test shows nothing")
 	}
-	enc := jsonEncoder{}
-	if err := enc.entry(entry); err == nil {
+	enc := jsonEncoder{red: &redaction{}}
+	if err := enc.entry(entry, entry.Type); err == nil {
 		t.Errorf("the encoder wrote %s", enc.buf)
 	}
 }

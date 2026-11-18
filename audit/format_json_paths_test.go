@@ -152,6 +152,85 @@ func TestOmit_EveryFieldIsOmittable(t *testing.T) {
 	}
 }
 
+// Every field a path can name is one the encoder acts on. A field given a
+// number and a name, and forgotten where entries are written, would be
+// accepted in a device's configuration and then written in clear all the
+// same: here, omitting it or salting it would leave the entry as it was.
+func TestRedaction_EveryFieldIsHonoured(t *testing.T) {
+	ctx := context.Background()
+	entry := goldenFull()
+	format := func(red redaction) string {
+		t.Helper()
+		enc := jsonEncoder{red: &red, ctx: ctx}
+		if err := enc.entry(entry, "response"); err != nil {
+			t.Fatal(err)
+		}
+		return string(enc.buf)
+	}
+	unredacted := format(redaction{})
+
+	const marker = "SALTED-BY-THE-TEST"
+	for f := field(0); f < numFields; f++ {
+		if fieldNames[f] == "" {
+			t.Errorf("field %d has no name", f)
+			continue
+		}
+
+		var omitting redaction
+		omitting.omit.add(f)
+		if format(omitting) == unredacted {
+			t.Errorf("omitting %s (field %d) changes nothing", fieldNames[f], f)
+		}
+
+		if !saltable.has(f) {
+			continue
+		}
+		salting := redaction{saltFn: func(context.Context, string) (string, error) { return marker, nil }}
+		salting.salt.add(f)
+		if !strings.Contains(format(salting), marker) {
+			t.Errorf("salting %s (field %d) salts nothing", fieldNames[f], f)
+		}
+	}
+}
+
+// A salt path salts identifiers and addresses, never a field that describes
+// the request: no path, accepted or not, leaves in the redaction a field to
+// salt that is not a saltable one.
+func TestRedaction_SaltPathsReachOnlySaltableFields(t *testing.T) {
+	var paths []string
+	for _, p := range entryFieldPaths() {
+		paths = append(paths, p, p+".x")
+	}
+	paths = append(paths, acceptedSaltPaths...)
+	for _, path := range paths {
+		var red redaction
+		err := red.compile(true, path)
+		for f := field(0); f < numFields; f++ {
+			if red.salt.has(f) && (err != nil || !saltable.has(f)) {
+				t.Errorf("salt path %q (error: %v) salts %s (field %d)", path, err, fieldNames[f], f)
+			}
+		}
+		if red.omit != (fieldSet{}) {
+			t.Errorf("salt path %q omits fields", path)
+		}
+	}
+}
+
+// What a path names is found by its name, among the fields of its structure:
+// two fields of one structure under the same name would make one of them
+// unreachable.
+func TestRedaction_FieldNamesAreUniqueInTheirStructure(t *testing.T) {
+	for _, group := range []fieldGroup{requestFields, responseFields, credentialFields, authResultFields, authFields, policyFields} {
+		seen := map[string]field{}
+		for f := group.first; f <= group.last; f++ {
+			if other, dup := seen[fieldNames[f]]; dup {
+				t.Errorf("fields %d and %d are both named %q", other, f, fieldNames[f])
+			}
+			seen[fieldNames[f]] = f
+		}
+	}
+}
+
 // entryFieldPaths is the path of every field an audit entry records, found by
 // walking its structures, so a field added later is part of it. It leaves out
 // the fields no omit path removes and those inside a structure omitted only

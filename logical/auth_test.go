@@ -68,52 +68,6 @@ func TestMCPDecision_OmitEmpty(t *testing.T) {
 	assert.Contains(t, s, `"rule_type":"allowed_methods"`)
 }
 
-func TestMCPDecision_Clone_Nil(t *testing.T) {
-	var d *MCPDecision
-	assert.Nil(t, d.Clone())
-}
-
-func TestMCPDecision_Clone_DeepCopy(t *testing.T) {
-	original := &MCPDecision{
-		Method:      "tools/call",
-		Name:        "delete_repository",
-		Decision:    "deny",
-		MatchedRule: "delete_*",
-		RuleType:    "denied_tools",
-		ParamName:   "path",
-		ParamValue:  ".env.production",
-	}
-
-	clone := original.Clone()
-	require.NotNil(t, clone)
-	assert.Equal(t, *original, *clone)
-
-	// Mutating the clone must not affect the original.
-	clone.Name = "mutated"
-	clone.MatchedRule = "mutated"
-	assert.Equal(t, "delete_repository", original.Name)
-	assert.Equal(t, "delete_*", original.MatchedRule)
-}
-
-func TestConditionResult_Clone(t *testing.T) {
-	assert.Nil(t, (*ConditionResult)(nil).Clone())
-
-	original := &ConditionResult{
-		Decision:   "deny",
-		Expression: "call.args.amount <= 1500",
-		Inputs:     map[string]string{"call.args.amount": "2000"},
-	}
-	clone := original.Clone()
-	require.NotNil(t, clone)
-	assert.Equal(t, *original, *clone)
-
-	// Mutating the clone's map must not affect the original.
-	clone.Inputs["call.args.amount"] = "0"
-	clone.Decision = "allow"
-	assert.Equal(t, "2000", original.Inputs["call.args.amount"])
-	assert.Equal(t, "deny", original.Decision)
-}
-
 func TestConditionResult_Sanitize(t *testing.T) {
 	(*ConditionResult)(nil).Sanitize() // nil-safe
 
