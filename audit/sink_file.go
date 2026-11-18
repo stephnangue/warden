@@ -25,6 +25,11 @@ type FileSink struct {
 
 	currentSize int64
 	lastRotate  time.Time
+
+	// midLine: the file ends with the start of an entry, cut by a write that
+	// failed part-way, or by a crash before this sink opened it. The next
+	// write ends that line first, so the entry after it is not joined to it.
+	midLine bool
 }
 
 // FileSinkConfig contains configuration for file sink
@@ -75,9 +80,30 @@ func NewFileSink(config FileSinkConfig) (*FileSink, error) {
 		maxBackups:  config.MaxBackups,
 		currentSize: stat.Size(),
 		lastRotate:  time.Now(),
+		midLine:     endsMidLine(config.Path, stat.Size()),
 	}
 
 	return sink, nil
+}
+
+// endsMidLine reports whether the file at path, size bytes long, ends with
+// something other than a newline. A file that cannot be read is taken to end
+// cleanly: the sink only needs to write to it.
+func endsMidLine(path string, size int64) bool {
+	if size == 0 {
+		return false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	var last [1]byte
+	if _, err := file.ReadAt(last[:], size-1); err != nil {
+		return false
+	}
+	return last[0] != '\n'
 }
 
 // Write writes an entry to the file
@@ -85,19 +111,65 @@ func (s *FileSink) Write(ctx context.Context, entry []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Write entry with newline
+	_, err := s.writeLocked(append(entry, '\n'))
+	return err
+}
+
+// WriteBatch writes batch, a run of entries each ended by a newline, in one
+// write, and returns how many of its bytes reached the file. The file is
+// checked for rotation once, before the write: a batch is never split between
+// two files, and the file may pass its rotation size by one batch.
+func (s *FileSink) WriteBatch(ctx context.Context, batch []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.writeLocked(batch)
+}
+
+// writeLocked writes lines, one entry or more each ended by a newline, and
+// returns how many of its bytes reached the file. The caller holds s.mu.
+func (s *FileSink) writeLocked(lines []byte) (int, error) {
+	// A line cut short is ended before anything follows it. Where that fails
+	// the file is rotated all the same if it is due: with a full disk,
+	// rotation is what can free room, once it has a backup to prune.
+	endErr := s.endCutLine()
+
 	// Check if rotation is needed
 	if err := s.checkRotation(); err != nil {
-		return fmt.Errorf("rotation check failed: %w", err)
+		return 0, fmt.Errorf("rotation check failed: %w", err)
+	}
+	if s.midLine {
+		return 0, fmt.Errorf("failed to write to file: %w", endErr)
 	}
 
-	// Write entry with newline
-	n, err := s.writer.Write(append(entry, '\n'))
-	if err != nil {
-		return fmt.Errorf("failed to write to file: %w", err)
-	}
-
+	n, err := s.writer.Write(lines)
 	s.currentSize += int64(n)
+	if n > 0 {
+		s.midLine = lines[n-1] != '\n'
+	}
+	if err != nil {
+		return n, fmt.Errorf("failed to write to file: %w", err)
+	}
 
+	return n, nil
+}
+
+// endCutLine ends the line a failed write left unfinished at the end of the
+// file, if there is one. A fragment stays, as a line of its own that no
+// parser reads; the entry it was the start of is written again whole. A line
+// that lacked only its newline is an entry, and now a whole one: its writer
+// counts it as written.
+func (s *FileSink) endCutLine() error {
+	if !s.midLine {
+		return nil
+	}
+	n, err := s.writer.Write([]byte{'\n'})
+	s.currentSize += int64(n)
+	if err != nil {
+		return err
+	}
+	s.midLine = false
 	return nil
 }
 
@@ -158,6 +230,8 @@ func (s *FileSink) rotate() error {
 	s.writer = file
 	s.currentSize = 0
 	s.lastRotate = time.Now()
+	// A line cut short stays in the file that was rotated away.
+	s.midLine = false
 
 	// Clean up old backups asynchronously but with proper synchronization.
 	// We capture the path and maxBackups values to avoid racing with future rotations.
