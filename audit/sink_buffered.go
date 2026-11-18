@@ -79,7 +79,7 @@ func (bs *BufferedSink) Write(ctx context.Context, entry []byte) error {
 	defer bs.mu.Unlock()
 
 	if bs.closed {
-		return fmt.Errorf("sink is closed")
+		return errSinkClosed
 	}
 
 	// Make a copy of the entry since it might be reused
@@ -95,6 +95,9 @@ func (bs *BufferedSink) Write(ctx context.Context, entry []byte) error {
 
 	return nil
 }
+
+// errSinkClosed refuses a write to a sink that has been closed.
+var errSinkClosed = errors.New("sink is closed")
 
 // Flush flushes the buffer to the underlying sink
 func (bs *BufferedSink) Flush(ctx context.Context) error {
