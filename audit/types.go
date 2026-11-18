@@ -465,8 +465,14 @@ type AuditManager interface {
 	// LogRequest does.
 	LogResponse(ctx context.Context, entry *LogEntry) (bool, error)
 
-	// Unregister all registered audit devices
+	// Reset closes and unregisters every device: the teardown before a seal.
+	// If it closed any, the manager refuses every entry from then on, until
+	// Resume.
 	Reset(ctx context.Context) error
+
+	// Resume lets entries through again after a Reset, once the devices of
+	// the next unseal are registered.
+	Resume()
 
 	// Close closes all devices
 	Close() error

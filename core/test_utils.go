@@ -202,13 +202,15 @@ func newMockAuditManagerFull() *mockAuditManagerFull {
 }
 
 func (m *mockAuditManagerFull) Reset(ctx context.Context) error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	m.devices = nil
 
 	return nil
 }
+
+func (m *mockAuditManagerFull) Resume() {}
 
 func (m *mockAuditManagerFull) RegisterDevice(name string, device audit.Device) error {
 	m.mu.Lock()
@@ -296,6 +298,8 @@ func (m *mockAuditManager) Close() error {
 func (m *mockAuditManager) Reset(ctx context.Context) error {
 	return nil
 }
+
+func (m *mockAuditManager) Resume() {}
 
 // mockTokenStore implements token store methods for testing
 type mockTokenStore struct{}

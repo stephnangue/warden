@@ -699,10 +699,84 @@ func TestManagerReset_RefusesRequestsWhileItCloses(t *testing.T) {
 		t.Errorf("the held write, once the file answered: %v", err)
 	}
 
-	// Sealed: the list is empty, as before any device was registered.
-	if ok, err := mgr.LogRequest(ctx, entry); err != nil || !ok {
-		t.Errorf("after the reset: ok=%v err=%v", ok, err)
+	// Sealed: no device is left, and requests are still refused.
+	if ok, err := mgr.LogRequest(ctx, entry); ok || !errors.Is(err, errSealed) {
+		t.Errorf("after the reset: ok=%v err=%v, want it refused", ok, err)
 	}
+}
+
+// After a reset that closed devices, every entry is refused until Resume,
+// though no device is left: a server with no device serves every request,
+// and a request that came after the teardown of a seal, before the mounts it
+// reaches were unloaded, was served unaudited. Devices registered meanwhile,
+// as the next unseal registers them, take entries once the manager resumes.
+// A manager that had no device to close goes on serving as it was.
+func TestManagerReset_RefusesUntilResumed(t *testing.T) {
+	ctx := context.Background()
+	entry := &LogEntry{Timestamp: time.Now(), Request: &Request{ID: "req-1"}}
+	logged := func(mgr AuditManager) (bool, error) {
+		okRequest, errRequest := mgr.LogRequest(ctx, entry)
+		okResponse, errResponse := mgr.LogResponse(ctx, entry)
+		if okRequest != okResponse || !errors.Is(errResponse, errRequest) && !errors.Is(errRequest, errResponse) {
+			t.Fatalf("request and response told apart: (%v, %v) and (%v, %v)", okRequest, errRequest, okResponse, errResponse)
+		}
+		return okRequest, errRequest
+	}
+
+	t.Run("a manager that audited", func(t *testing.T) {
+		mgr, _ := managerWithServerLog(t)
+		writes := &writeLog{}
+		if err := mgr.RegisterDevice("old/", recordingDevice("old/", writes)); err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.Reset(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := logged(mgr); ok || !errors.Is(err, errSealed) {
+			t.Fatalf("after the reset: ok=%v err=%v, want it refused", ok, err)
+		}
+
+		// The next unseal registers its devices, then resumes.
+		if err := mgr.RegisterDevice("new/", recordingDevice("new/", writes)); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := logged(mgr); ok || !errors.Is(err, errSealed) {
+			t.Fatalf("a device registered, not yet resumed: ok=%v err=%v, want it refused", ok, err)
+		}
+		mgr.Resume()
+		if ok, err := logged(mgr); !ok || err != nil {
+			t.Fatalf("resumed: ok=%v err=%v", ok, err)
+		}
+		if got, want := writes.written(), []string{"new/", "new/"}; !slices.Equal(got, want) {
+			t.Errorf("devices written: %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a manager that audited, resumed with no device", func(t *testing.T) {
+		mgr, _ := managerWithServerLog(t)
+		if err := mgr.RegisterDevice("old/", recordingDevice("old/", &writeLog{})); err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.Reset(ctx); err != nil {
+			t.Fatal(err)
+		}
+		// The devices were disabled meanwhile: the server has none, and
+		// serves as one that never had any.
+		mgr.Resume()
+		if ok, err := logged(mgr); !ok || err != nil {
+			t.Fatalf("resumed with no device: ok=%v err=%v", ok, err)
+		}
+	})
+
+	t.Run("a manager that had no device", func(t *testing.T) {
+		mgr, _ := managerWithServerLog(t)
+		if err := mgr.Reset(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := logged(mgr); !ok || err != nil {
+			t.Fatalf("after the reset: ok=%v err=%v, want it let through as before", ok, err)
+		}
+	})
 }
 
 // failingCloseSink is a sink that cannot be closed.

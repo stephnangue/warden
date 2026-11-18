@@ -23,6 +23,10 @@ type manager struct {
 	// registered. A device keeps its own through every change to the others.
 	health map[string]*deviceHealth
 
+	// sealed is set by a Reset that closed devices, and cleared by Resume.
+	// Guarded by mu.
+	sealed bool
+
 	// published is devices as a list, replaced whole at every change, so that
 	// logging an entry takes no lock and allocates nothing to find its devices.
 	published atomic.Pointer[deviceList]
@@ -34,7 +38,13 @@ type manager struct {
 // published it is never written again.
 type deviceList struct {
 	devices []listedDevice
+	// sealed: the manager takes no entry, whatever devices it lists.
+	sealed bool
 }
+
+// errSealed refuses an entry between the teardown before a seal and the
+// setup after the next unseal.
+var errSealed = errors.New("audit devices are closed: the server is sealing or stepping down")
 
 // listedDevice is a device to log to, with its health.
 type listedDevice struct {
@@ -60,7 +70,7 @@ func NewAuditManager(log *logger.GatedLogger) AuditManager {
 // publishLocked replaces the list logging reads with the devices registered
 // now. The caller holds m.mu.
 func (m *manager) publishLocked() {
-	list := &deviceList{devices: make([]listedDevice, 0, len(m.devices))}
+	list := &deviceList{devices: make([]listedDevice, 0, len(m.devices)), sealed: m.sealed}
 	for _, name := range slices.Sorted(maps.Keys(m.devices)) {
 		list.devices = append(list.devices, listedDevice{device: m.devices[name], health: m.health[name]})
 	}
@@ -131,21 +141,37 @@ func (m *manager) GetDevice(name string) (Device, error) {
 // A device that fails to close is unregistered all the same, so that the next
 // unseal can register its successor. The failures are returned.
 //
-// The devices stay listed until they are closed. A request still on its way
-// through a seal is then refused by a device that takes no more entries; with
-// the list emptied first it would find no device at all, which is the state
-// of a server that has none yet, and be served unaudited for as long as the
-// devices take to close.
+// A request still on its way through the seal is refused from then on, until
+// Resume. The devices stay listed until they are closed, and are refused by
+// them; then the manager refuses every entry itself. An empty list would be
+// the state of a server that has no device yet, which serves every request:
+// a request that came after the teardown, and before the mounts it reaches
+// were unloaded, was served unaudited.
+//
+// A manager that had no device to close goes on as it was: the server
+// audited nothing, and serves what is still on its way as it did.
 func (m *manager) Reset(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	err := closeDevices(m.devices)
+	m.sealed = m.sealed || len(m.devices) > 0
 	m.devices = make(map[string]Device)
 	m.health = make(map[string]*deviceHealth)
 	m.publishLocked()
 
 	return err
+}
+
+// Resume ends what Reset began: once the devices of the next unseal are
+// registered, entries are logged to them again, and with none registered are
+// let through, as on a server that has none yet.
+func (m *manager) Resume() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.sealed = false
+	m.publishLocked()
 }
 
 // ListDevices returns all registered devices
@@ -196,6 +222,9 @@ func (m *manager) LogResponse(ctx context.Context, entry *LogEntry) (bool, error
 // reads is replaced whole when a device is registered or unregistered.
 func (m *manager) logToDevices(ctx context.Context, entry *LogEntry, isRequest bool) (bool, error) {
 	list := m.published.Load()
+	if list != nil && list.sealed {
+		return false, errSealed
+	}
 	if list == nil || len(list.devices) == 0 {
 		return true, nil
 	}
