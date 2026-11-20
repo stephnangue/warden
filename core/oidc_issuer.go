@@ -32,7 +32,7 @@ import (
 // The private signing key never leaves Warden. Key generation and rotation
 // happen only on the active node; a promoted standby loads the key from storage.
 // The issuer is inert until an active signing key is installed, so the
-// warden_identity mint path fails closed when it is not ready.
+// warden_identity and warden_entity mint paths fail closed when it is not ready.
 type OIDCIssuer struct {
 	mu sync.RWMutex
 
@@ -395,6 +395,11 @@ type AssertionClaims struct {
 	// build does not have fails closed in buildAssertionSetup, before any cache
 	// interaction, so nil here only ever means "no caller opinion".
 	Profile credential.AssertionProfile
+	// EntityID, when set, makes the assertion name the caller's entity of record
+	// (a warden_entity slot) rather than its native identity. It is captured once
+	// at setup, beside the cache identity it heads, so a mint run later or apart
+	// from the request names the same subject the cache entry was keyed on.
+	EntityID string
 }
 
 // MintIdentityAssertion signs a short-lived JWT with the alg-selected signing key,
@@ -472,9 +477,19 @@ func (i *OIDCIssuer) MintIdentityAssertion(ctx context.Context, te *logical.Toke
 	// The time fields and jti are the ISSUER's to compute; the profile only formats
 	// them. That is what lets validateProfileClaims below compare them exactly.
 	now := time.Now()
+	identity := identityFromTokenEntry(te)
+	if c.EntityID != "" {
+		// The assertion speaks for the entity: the native principal and mount it
+		// authenticated through are withheld from the profile, so no shape can
+		// render them under a subject every native identity of the agent shares
+		// (and whose cache entry they would not key). Actors stay: a profile reads
+		// them only to refuse.
+		identity.EntityID = c.EntityID
+		identity.PrincipalID, identity.MountAccessor = "", ""
+	}
 	req := credential.AssertionRequest{
 		Issuer:     issuerURL,
-		Identity:   identityFromTokenEntry(te),
+		Identity:   identity,
 		Audience:   c.Audience,
 		IssuedAt:   now,
 		NotBefore:  now.Add(-leeway),
@@ -623,14 +638,6 @@ func requireTimeClaim(claims map[string]any, name string, want time.Time, requir
 		return fmt.Errorf("claim %q must be %d, got %d", name, want.Unix(), got)
 	}
 	return nil
-}
-
-// wardenSubject builds the globally-unique subject of a minted assertion. The
-// implementation and its rationale now live on credential.AssertionIdentity, which
-// is where a profile reaches it; this stays as the core-side spelling used by
-// cacheIdentity.
-func wardenSubject(te *logical.TokenEntry) string {
-	return identityFromTokenEntry(te).WardenSubject()
 }
 
 // JWKS returns the JSON Web Key Set (the active key, the pre-published next key,

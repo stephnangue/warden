@@ -251,11 +251,12 @@ func TestKeylessLeftovers_RevealNothingMasked(t *testing.T) {
 }
 
 var testTrustEnv = credential.TrustEnv{
-	IssuerURL:      "https://warden.example.com",
-	JWKSURL:        "https://warden.example.com/oidc/jwks",
-	SubjectPrefix:  "wid:root:",
-	NamespaceID:    "root",
-	NamespaceClaim: "root",
+	IssuerURL:           "https://warden.example.com",
+	JWKSURL:             "https://warden.example.com/oidc/jwks",
+	SubjectPrefix:       "wid:root:",
+	EntitySubjectPrefix: "wfe:root:",
+	NamespaceID:         "root",
+	NamespaceClaim:      "root",
 }
 
 // The rendered JSON bodies parse, and carry the issuer, the audience and the
@@ -359,6 +360,94 @@ func TestKeylessPrerequisites_Shapes(t *testing.T) {
 		specs := []credential.PlannedSpec{{Name: "fwd", Config: credential.NewConfig(map[string]string{"subject_token_source": "agent_identity"})}}
 		prereqs := (&KubernetesDriverFactory{}).KeylessPrerequisites(credential.NewConfig(map[string]string{"audience": "k"}), specs, testTrustEnv)
 		assert.Equal(t, "fwd", prereqs[len(prereqs)-1].Where)
+	})
+}
+
+// A spec presenting the caller's entity is trusted on the entity's subject,
+// "wfe:<namespace>:…", and a source whose specs present both kinds is trusted on
+// both. A source with native specs only renders exactly what it did before.
+func TestKeylessPrerequisites_EntitySubjects(t *testing.T) {
+	entitySpec := func(name string, extra map[string]string) credential.PlannedSpec {
+		cfg := map[string]string{"subject_token_source": "warden_entity"}
+		for k, v := range extra {
+			cfg[k] = v
+		}
+		return credential.PlannedSpec{Name: name, Config: credential.NewConfig(cfg)}
+	}
+	nativeSpec := func(name string, extra map[string]string) credential.PlannedSpec {
+		cfg := map[string]string{"subject_token_source": "warden_identity"}
+		for k, v := range extra {
+			cfg[k] = v
+		}
+		return credential.PlannedSpec{Name: name, Config: credential.NewConfig(cfg)}
+	}
+
+	t.Run("aws trust per role", func(t *testing.T) {
+		keyless := credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "region": "us-east-1"})
+		specs := []credential.PlannedSpec{
+			entitySpec("entity-only", map[string]string{"role_arn": "arn:aws:iam::111122223333:role/Agents"}),
+			entitySpec("mixed-a", map[string]string{"role_arn": "arn:aws:iam::111122223333:role/Mixed"}),
+			nativeSpec("mixed-b", map[string]string{"role_arn": "arn:aws:iam::111122223333:role/Mixed"}),
+		}
+		prereqs := (&AWSDriverFactory{}).KeylessPrerequisites(keyless, specs, testTrustEnv)
+		sub := func(i int) any {
+			var policy struct {
+				Statement []struct{ Condition map[string]map[string]any }
+			}
+			require.NoError(t, json.Unmarshal([]byte(prereqs[i].Body), &policy))
+			return policy.Statement[0].Condition["StringLike"]["warden.example.com:sub"]
+		}
+		assert.Equal(t, "arn:aws:iam::111122223333:role/Agents", strings.TrimPrefix(prereqs[1].Where, "IAM role "))
+		assert.Equal(t, "wfe:root:*", sub(1), "a role only entity specs use trusts the entity subject alone")
+		assert.Equal(t, []any{"wid:root:*", "wfe:root:*"}, sub(2), "a role both kinds use trusts both")
+		assert.Contains(t, prereqs[len(prereqs)-1].Body, "to one agent with wfe:root:<entity_id>")
+	})
+
+	t.Run("vault role", func(t *testing.T) {
+		keyless := credential.NewConfig(map[string]string{"jwt_role": "warden-agents", "audience": "https://vault.example/warden"})
+		prereqs := (&VaultDriverFactory{}).KeylessPrerequisites(keyless,
+			[]credential.PlannedSpec{entitySpec("e", nil), nativeSpec("n", nil)}, testTrustEnv)
+		assert.Contains(t, prereqs[0].Body, `"sub": [
+      "wid:root:*",
+      "wfe:root:*"
+    ]`)
+	})
+
+	t.Run("azure credential per family", func(t *testing.T) {
+		keyless := credential.NewConfig(map[string]string{"auth_method": "oidc_federation", "client_id": "app-1"})
+		prereqs := (&AzureDriverFactory{}).KeylessPrerequisites(keyless, []credential.PlannedSpec{entitySpec("e", nil)}, testTrustEnv)
+		require.Len(t, prereqs, 2, "an app only entity specs use needs the entity credential alone")
+		assert.Contains(t, prereqs[0].Title, "warden_entity")
+		assert.Contains(t, prereqs[0].Body, `"subject": "wfe:root:<entity_id>"`)
+		assert.Contains(t, prereqs[1].Body, "one credential covers all of an agent's native identities")
+	})
+
+	t.Run("gcp attribute condition", func(t *testing.T) {
+		keyless := credential.NewConfig(map[string]string{"workload_identity_provider": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/prov"})
+		prereqs := (&GCPDriverFactory{}).KeylessPrerequisites(keyless,
+			[]credential.PlannedSpec{entitySpec("e", nil), nativeSpec("n", nil)}, testTrustEnv)
+		assert.Contains(t, prereqs[0].Body,
+			`--attribute-condition="assertion.sub.startsWith('wid:root:') || assertion.sub.startsWith('wfe:root:')"`)
+	})
+
+	t.Run("kubernetes claim rule", func(t *testing.T) {
+		prereqs := (&KubernetesDriverFactory{}).KeylessPrerequisites(credential.NewConfig(map[string]string{"audience": "k"}),
+			[]credential.PlannedSpec{entitySpec("e", nil)}, testTrustEnv)
+		assert.Contains(t, prereqs[0].Body, `expression: 'claims.sub.startsWith("wfe:root:")'`)
+		assert.Contains(t, prereqs[1].Body, `"warden:wfe:root:<entity_id>"`)
+	})
+
+	t.Run("alicloud trust policy", func(t *testing.T) {
+		keyless := credential.NewConfig(map[string]string{"oidc_provider_arn": "acs:ram::1:oidc-provider/warden", "audience": "sts.aliyuncs.com"})
+		prereqs := (&AlicloudDriverFactory{}).KeylessPrerequisites(keyless,
+			[]credential.PlannedSpec{entitySpec("r", map[string]string{"role_arn": "acs:ram::1:role/r"})}, testTrustEnv)
+		var policy struct {
+			Statement []struct {
+				Condition map[string]map[string][]string
+			}
+		}
+		require.NoError(t, json.Unmarshal([]byte(prereqs[1].Body), &policy))
+		assert.Equal(t, []string{"wfe:root:*"}, policy.Statement[0].Condition["StringLike"]["oidc:sub"])
 	})
 }
 

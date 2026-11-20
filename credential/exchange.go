@@ -52,8 +52,9 @@ const (
 	// ConfigSubjectTokenSource selects the subject-token source: "agent_identity"
 	// reuses the agent's verified inbound JWT, "user_identity" forwards the
 	// secondary user's validated credential (delegation; token_exchange sources
-	// only), "warden_identity" mints a Warden-signed assertion of the agent, "none"
-	// (or absent) disables exchange.
+	// only), "warden_identity" mints a Warden-signed assertion of the agent's native
+	// identity, "warden_entity" one of its entity of record, "none" (or absent)
+	// disables exchange.
 	ConfigSubjectTokenSource = "subject_token_source"
 	// ConfigSubjectTokenType overrides the subject token's RFC 8693 type, named by its
 	// short name ("id_token") or its URN (TokenTypeURN). The default is TokenTypeJWT,
@@ -61,7 +62,8 @@ const (
 	ConfigSubjectTokenType = "subject_token_type"
 	// ConfigActorTokenSource selects the actor-token source for the delegation shape
 	// (subject_token_source=user_identity): "agent_identity" (the agent's inbound
-	// JWT), "warden_identity" (a Warden-signed assertion of the agent), or "none".
+	// JWT), "warden_identity" (a Warden-signed assertion of the agent),
+	// "warden_entity" (one of its entity of record), or "none".
 	ConfigActorTokenSource = "actor_token_source"
 	// ConfigActorTokenType overrides the actor token's RFC 8693 type, named by its
 	// short name or its URN (TokenTypeURN; default TokenTypeJWT).
@@ -90,6 +92,13 @@ const (
 	// carried in the user_identity subject — so actor=warden_identity requires
 	// subject_token_source=user_identity).
 	SourceWardenIdentity = "warden_identity"
+	// SourceWardenEntity mints the same assertion for the caller's entity of
+	// record rather than the native identity it presented: the subject is
+	// "wfe:{namespaceID}:{entityID}", one per agent whichever of its native
+	// identities authenticated, and the claims are the entity's subject and role
+	// alone (no login metadata). Only a caller claimed by a governed, active entity
+	// can present it; any other is refused, never asserted as its native identity.
+	SourceWardenEntity = "warden_entity"
 )
 
 // subjectTokenSources and actorTokenSources are the accepted values of the two
@@ -98,8 +107,8 @@ const (
 // drift test, so a value added here cannot become a registrable profile name
 // without failing that test. Unexported so they cannot be widened at runtime.
 var (
-	subjectTokenSources = []string{SourceAgentIdentity, SourceUserIdentity, SourceNone, SourceWardenIdentity}
-	actorTokenSources   = []string{SourceAgentIdentity, SourceWardenIdentity, SourceNone}
+	subjectTokenSources = []string{SourceAgentIdentity, SourceUserIdentity, SourceNone, SourceWardenIdentity, SourceWardenEntity}
+	actorTokenSources   = []string{SourceAgentIdentity, SourceWardenIdentity, SourceWardenEntity, SourceNone}
 )
 
 // MintsWardenAssertion reports whether a *_token_source value has Warden mint and
@@ -111,7 +120,7 @@ var (
 // all of them at once, instead of silently escaping the ones nobody remembered to
 // extend. TestSourceWardenIdentity_ComparedOnlyThroughThePredicate holds the line.
 func MintsWardenAssertion(src string) bool {
-	return src == SourceWardenIdentity
+	return src == SourceWardenIdentity || src == SourceWardenEntity
 }
 
 // SpecMintsWardenAssertion reports whether either slot of a spec's config has
@@ -122,10 +131,17 @@ func SpecMintsWardenAssertion(config Config) bool {
 		MintsWardenAssertion(config.Get(ConfigActorTokenSource))
 }
 
+// SpecAssertsEntity reports whether either slot of a spec's config is
+// warden_entity: the assertion Warden mints for it names the caller's entity.
+func SpecAssertsEntity(config Config) bool {
+	return config.Get(ConfigSubjectTokenSource) == SourceWardenEntity ||
+		config.Get(ConfigActorTokenSource) == SourceWardenEntity
+}
+
 // ConfigAssertionAudience is the spec-config key naming the `aud` of a
-// warden_identity assertion — the upstream the assertion is minted for. Required
-// and non-empty whenever subject_token_source=warden_identity: it is the control
-// that stops an assertion for one upstream being replayed at another.
+// Warden-minted assertion (warden_identity or warden_entity) — the upstream the
+// assertion is minted for. Required and non-empty whenever a slot mints one: it is
+// the control that stops an assertion for one upstream being replayed at another.
 const ConfigAssertionAudience = "assertion_audience"
 
 // ConfigAssertionMetadataClaims is the spec-config key naming which of the
@@ -138,7 +154,8 @@ const ConfigAssertionAudience = "assertion_audience"
 // operator-chosen, never the whole metadata map. On both warden_identity and
 // agent_identity the same list also names which claims a request path may template
 // via {{agent.<claim>}}; there the list is what keeps a templated value inside the
-// cache key, since only the projected set is fingerprinted.
+// cache key, since only the projected set is fingerprinted. It is refused beside
+// warden_entity, whose assertion and templates speak for the entity alone.
 //
 // The values are the operator's assertion that a claim is fit to select a secret
 // by. Warden verifies them at login and no caller can supply them, but whether a
@@ -187,7 +204,7 @@ func splitClaimKeys(raw string) []string {
 // when set it must name at least one claim — list "sub" alone for identity only.
 // Under the default profile, a set value makes the assertion a delegation token
 // naming the user as sub, where the core discloses the user to the profile (see
-// buildAssertionSetup). Valid only when subject_token_source=warden_identity.
+// buildAssertionSetup). Valid only when a slot is warden_identity or warden_entity.
 const ConfigAssertionUserClaims = "assertion_user_claims"
 
 // AssertionUserClaimKeys parses the comma-separated ConfigAssertionUserClaims value
@@ -210,8 +227,8 @@ const (
 )
 
 // ConfigAssertionAlgorithm is the spec-config key selecting the JWS algorithm a
-// warden_identity assertion is signed with. Absent/empty defaults to RS256. Valid
-// only when subject_token_source=warden_identity.
+// Warden-minted assertion is signed with. Absent/empty defaults to RS256. Valid
+// only when a slot is warden_identity or warden_entity.
 const ConfigAssertionAlgorithm = "assertion_algorithm"
 
 // AssertionAlgorithm returns the spec's configured assertion signing algorithm,
@@ -228,8 +245,8 @@ func AssertionAlgorithm(config Config) string {
 // `warden_resource` claim so a verifier evaluating arbitrary bound claims can
 // pin the assertion to one resource. Three modes: unset derives the resource
 // from the source/spec config; AssertionResourceNone suppresses the claim; any
-// other value is emitted verbatim. Valid only when
-// subject_token_source=warden_identity.
+// other value is emitted verbatim. Valid only when a slot is warden_identity or
+// warden_entity.
 const ConfigAssertionResource = "assertion_resource"
 
 // ConfigAssertionTTL is the spec-config key requesting the lifetime of this spec's
@@ -250,7 +267,7 @@ const ConfigAssertionResource = "assertion_resource"
 // reduced at mint rather than refused; spec create and update return a warning when
 // that will happen, so the reduction is not silent. Spec-create checks only that the
 // value is a duration of at least MinAssertionTTL. Valid only when
-// subject_token_source or actor_token_source is warden_identity.
+// subject_token_source or actor_token_source is warden_identity or warden_entity.
 const ConfigAssertionTTL = "assertion_ttl"
 
 // MinAssertionTTL is the shortest assertion lifetime a spec may request.
@@ -528,6 +545,18 @@ func ValidateExchangeSpecConfig(config Config) error {
 	// ({{agent.<claim>}}), and that holds for a forwarded agent token too: the values
 	// are login-derived and Warden-verified whichever way the subject travels. So
 	// agent_identity is permitted, where it gates templating alone.
+	//
+	// Neither job applies to warden_entity. Its assertion speaks for the entity, and
+	// login metadata is the native credential's: it differs with each native identity
+	// an entity has, so projecting it would give one agent several claim sets under
+	// one subject. The entity's own metadata is free text whoever may write the
+	// entity sets, attested by no one, so signing it would make an unreviewed write
+	// an authorization attribute upstream. What warden_entity asserts is the entity's
+	// subject and role, and what it templates is {{agent.entity_id}}.
+	if config.Get(ConfigAssertionMetadataClaims) != "" && SpecAssertsEntity(config) {
+		return fmt.Errorf("field '%s': is not available with '%s': the entity's claims are its subject and role",
+			ConfigAssertionMetadataClaims, SourceWardenEntity)
+	}
 	if config.Get(ConfigAssertionMetadataClaims) != "" &&
 		!mintsAssertion && config.Get(ConfigSubjectTokenSource) != SourceAgentIdentity {
 		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s', or the subject is '%s'",
@@ -537,8 +566,8 @@ func ValidateExchangeSpecConfig(config Config) error {
 	// secret_path) only makes sense when Warden mints the assertion.
 	if raw := config.Get(ConfigAssertionUserClaims); raw != "" {
 		if !mintsAssertion {
-			return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
-				ConfigAssertionUserClaims, SourceWardenIdentity)
+			return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s' or '%s'",
+				ConfigAssertionUserClaims, SourceWardenIdentity, SourceWardenEntity)
 		}
 		// A set-but-empty value (e.g. " , ") parses to zero keys and would silently
 		// disclose nothing while looking configured — reject it. "sub" is allowed: it
@@ -550,13 +579,13 @@ func ValidateExchangeSpecConfig(config Config) error {
 	}
 	// The assertion algorithm only applies to a Warden-minted assertion.
 	if config.Get(ConfigAssertionAlgorithm) != "" && !mintsAssertion {
-		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
-			ConfigAssertionAlgorithm, SourceWardenIdentity)
+		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s' or '%s'",
+			ConfigAssertionAlgorithm, SourceWardenIdentity, SourceWardenEntity)
 	}
 	// Naming a resource in the assertion only makes sense when Warden mints it.
 	if config.Get(ConfigAssertionResource) != "" && !mintsAssertion {
-		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
-			ConfigAssertionResource, SourceWardenIdentity)
+		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s' or '%s'",
+			ConfigAssertionResource, SourceWardenIdentity, SourceWardenEntity)
 	}
 	if strings.HasPrefix(config.Get(ConfigAssertionResource), GCPDelegationResourcePrefix) {
 		return fmt.Errorf("field '%s': the prefix %q is reserved for the resource Warden derives for a domain-wide delegation spec",
@@ -568,8 +597,8 @@ func ValidateExchangeSpecConfig(config Config) error {
 	// registry and the source type, which this source-agnostic validator has
 	// neither of.
 	if config.Get(ConfigAssertionProfile) != "" && !mintsAssertion {
-		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
-			ConfigAssertionProfile, SourceWardenIdentity)
+		return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s' or '%s'",
+			ConfigAssertionProfile, SourceWardenIdentity, SourceWardenEntity)
 	}
 	// Requesting an assertion lifetime only makes sense when Warden mints one. The
 	// value must be a positive duration; whether it exceeds the issuer's own
@@ -577,8 +606,8 @@ func ValidateExchangeSpecConfig(config Config) error {
 	// and its value can change after this spec is stored (see ConfigAssertionTTL).
 	if raw := config.Get(ConfigAssertionTTL); raw != "" {
 		if !mintsAssertion {
-			return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s'",
-				ConfigAssertionTTL, SourceWardenIdentity)
+			return fmt.Errorf("field '%s': is valid only when the subject or actor is '%s' or '%s'",
+				ConfigAssertionTTL, SourceWardenIdentity, SourceWardenEntity)
 		}
 		d, err := time.ParseDuration(raw)
 		if err != nil {

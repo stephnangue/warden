@@ -511,6 +511,37 @@ func TestResolveExchangeInputs_GCPDelegatedAccess(t *testing.T) {
 		"a changed address under the same user keys apart")
 }
 
+// Domain-wide delegation never read the agent's native identity — the pool binds
+// the resource and the user — so the entity can act as well: the user stays the
+// subject, the resource the same, and act names the entity.
+func TestResolveExchangeInputs_GCPDelegatedAccess_Entity(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	createGCPDelegationSources(t, ctx, c.credConfigStore)
+	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name: "workspace-user", Type: credential.TypeGCPDelegatedToken, Source: "gcp-fed",
+		Config: dwdSpecConfig(map[string]string{credential.ConfigSubjectTokenSource: credential.SourceWardenEntity}),
+	}))
+
+	req := requestWith("s.opaque-session", nil)
+	req.User = &logical.UserPrincipal{
+		TokenEntry: &logical.TokenEntry{PrincipalID: "user-a", Metadata: map[string]string{"email": "a@example.com"}},
+		RawToken:   "eyJ.user-a",
+	}
+	inputs, err := resolveExchangeInputsForTest(c, ctx, req, entityCaller("workspace-user", "auth_jwt_1", "agent-1"))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"sub": "user-a", "email": "a@example.com"}, inputs.UserClaims)
+
+	tok, err := inputs.ResolveSubjectToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+	assert.Equal(t, "user-a", claims["sub"])
+	assert.Equal(t, credential.GCPDelegationResourcePrefix+testDWDServiceAccount, claims["warden_resource"])
+	act, ok := claims["act"].(map[string]any)
+	require.True(t, ok, "act missing: %v", claims["act"])
+	assert.Equal(t, "wfe:k3Rb9Q:"+testEntityID, act["sub"])
+}
+
 // Only the derivation for a gcp delegation spec may put the gcp-dwd: prefix in an
 // assertion. Writes refuse it, but another source's derivation can produce it (a
 // vault jwt_role is emitted bare) and a spec stored before the rule can name it,

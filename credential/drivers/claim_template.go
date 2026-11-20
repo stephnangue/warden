@@ -74,16 +74,22 @@ func resolveClaimTemplate(raw string, userClaims, agentClaims map[string]string,
 		groups := claimTemplate.FindStringSubmatch(match)
 		principal, claim := groups[1], groups[2]
 
-		claims, fix := userClaims, "list it in assertion_user_claims, which requires subject_token_source=warden_identity"
+		claims, fix := userClaims, "list it in assertion_user_claims, which requires subject_token_source=warden_identity or warden_entity"
 		if principal == "agent" {
 			claims = agentClaims
+			_, hasSub := agentClaims["sub"]
 			switch {
 			case len(agentClaims) == 0:
 				// Nothing was projected at all, so the subject source is the fault,
 				// not the list — and for "sub", which needs no listing, it is the
 				// only possible fault. Sending an operator to the allow-list here
 				// would have them add an entry that changes nothing.
-				fix = "the agent's claims are projected only when subject_token_source is agent_identity or warden_identity"
+				fix = "the agent's claims are projected only when subject_token_source is agent_identity, warden_identity or warden_entity"
+			case !hasSub:
+				// Every projection writes sub except a warden_entity slot's, which
+				// carries the entity alone: the native principal and login
+				// metadata differ between an agent's native identities.
+				fix = "with warden_entity only {{agent.entity_id}} is available: the native principal and login metadata are not the entity's"
 			case claim == "sub":
 				// Projection ran and still produced no sub. It is written
 				// unconditionally from the principal, so this is unreachable

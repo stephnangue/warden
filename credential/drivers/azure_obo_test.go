@@ -215,6 +215,26 @@ func TestAzureOBO_Guards(t *testing.T) {
 	assert.Contains(t, err.Error(), "subject_token_source=user_identity")
 }
 
+// A keyless on_behalf_of spec authenticates the app with any assertion Warden
+// signs: of the agent's native identity, or of its entity, which one exact
+// federated credential then covers whatever native identity the agent presents.
+func TestAzureOBO_SpecAcceptsEitherWardenActor(t *testing.T) {
+	keyless := credential.NewConfig(map[string]string{"auth_method": azureAuthMethodOIDCFederation})
+	spec := func(actor string) credential.Config {
+		return credential.NewConfig(map[string]string{
+			"mint_method":                       azureMintMethodOnBehalfOf,
+			credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
+			credential.ConfigActorTokenSource:   actor,
+		})
+	}
+	require.NoError(t, AzureOnBehalfOfSpecError(spec(credential.SourceWardenIdentity), keyless))
+	require.NoError(t, AzureOnBehalfOfSpecError(spec(credential.SourceWardenEntity), keyless))
+
+	err := AzureOnBehalfOfSpecError(spec(credential.SourceAgentIdentity), keyless)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "set actor_token_source=warden_identity or warden_entity")
+}
+
 func TestAzureOBO_ErrorClassification(t *testing.T) {
 	claims := `{"access_token":{"polids":{"essential":true,"values":["00aa00aa-bb11-cc22-dd33-44ee44ee44ee"]}}}`
 	claimsJSON, _ := json.Marshal(claims)

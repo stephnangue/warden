@@ -500,7 +500,7 @@ func TestCredentialConfigStore_SecretSpecReference_Restrictions(t *testing.T) {
 		Config: credential.NewConfig(map[string]string{credential.ConfigSecretSpec: "user-secret"}),
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "session-pinned")
+	assert.Contains(t, err.Error(), "minted as the calling identity")
 
 	// A valid warden_identity referenced spec.
 	require.NoError(t, store.CreateSpec(ctx, &credential.CredSpec{
@@ -1249,6 +1249,14 @@ func TestCredentialConfigStore_ValidateSpec_IDJAGSubject(t *testing.T) {
 			}),
 			errorMsg: "subject_token_source=warden_identity cannot be used with grant=id_jag",
 		},
+		{
+			name: "a subject Warden signs for the entity",
+			spec: spec("xaa-wfe", "xaa", map[string]string{
+				credential.ConfigSubjectTokenSource: credential.SourceWardenEntity,
+				credential.ConfigAssertionAudience:  "https://idp.example",
+			}),
+			errorMsg: "subject_token_source=warden_entity cannot be used with grant=id_jag",
+		},
 		{name: "another grant is unaffected", spec: spec("sts-jwt", "sts-src", map[string]string{credential.ConfigSubjectTokenType: credential.TokenTypeJWT})},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1267,6 +1275,10 @@ func TestCredentialConfigStore_ValidateSpec_IDJAGSubject(t *testing.T) {
 			credential.ConfigActorTokenSource:  credential.SourceWardenIdentity,
 			credential.ConfigAssertionAudience: "https://idp.example",
 		})))
+		require.NoError(t, store.CreateSpec(ctx, spec("xaa-obo-entity", "xaa", map[string]string{
+			credential.ConfigActorTokenSource:  credential.SourceWardenEntity,
+			credential.ConfigAssertionAudience: "https://idp.example",
+		})), "the entity may act, as the native identity may")
 	})
 
 	t.Run("a spec updated to a jwt subject", func(t *testing.T) {
@@ -3649,7 +3661,7 @@ func TestCredentialConfigStore_AnthropicSpec(t *testing.T) {
 			name: "another identity is refused",
 			spec: anthropicStoreSpec("agent-subject", "with-aud",
 				map[string]string{credential.ConfigSubjectTokenSource: credential.SourceAgentIdentity}),
-			errorMsg: "must be 'warden_identity' for an anthropic source",
+			errorMsg: "must be 'warden_identity' or 'warden_entity' for an anthropic source",
 		},
 		{
 			name:     "the federation rule is required",
@@ -3806,7 +3818,7 @@ func TestCredentialConfigStore_OpenAISpec(t *testing.T) {
 			name: "another identity is refused",
 			spec: openaiStoreSpec("agent-subject", "with-aud",
 				map[string]string{credential.ConfigSubjectTokenSource: credential.SourceAgentIdentity}),
-			errorMsg: "must be 'warden_identity' for an openai source",
+			errorMsg: "must be 'warden_identity' or 'warden_entity' for an openai source",
 		},
 		{
 			name:     "the service account is required",
@@ -4066,6 +4078,69 @@ func TestCredentialConfigStore_CreateSpec_DefaultsAWSProfile(t *testing.T) {
 		"mint_method": "secrets_manager",
 		"secret_id":   "prod/db",
 	})), "an AWS spec that mints no Warden assertion gets no profile — it could not use one")
+}
+
+// warden_entity is a minting source to every spec-write rule a warden_identity
+// spec meets — the create-time profile default, the audience requirement, the
+// chaining allow-list — and meets one of its own: no login metadata, in either slot.
+func TestCredentialConfigStore_WardenEntitySpecs(t *testing.T) {
+	store, ctx := setupTestCredentialConfigStore(t)
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{Name: "src", Type: "local"}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "aws-fed", Type: credential.SourceTypeAWS,
+		Config: credential.NewConfig(map[string]string{"auth_method": "oidc_federation"}),
+	}))
+	require.NoError(t, store.CreateSource(ctx, &credential.CredSource{
+		Name: "sts-src", Type: credential.SourceTypeTokenExchange,
+		Config: credential.NewConfig(map[string]string{"token_url": "https://sts.example/token", "grant": "rfc8693"}),
+	}))
+	create := func(name, source string, cfg map[string]string) error {
+		return store.CreateSpec(ctx, &credential.CredSpec{Name: name, Type: "vault_token", Source: source, Config: credential.NewConfig(cfg)})
+	}
+
+	require.NoError(t, create("aws-entity", "aws-fed", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenEntity,
+		credential.ConfigAssertionAudience:  "sts.amazonaws.com",
+		"mint_method":                       "secrets_manager",
+		"secret_id":                         "prod/db",
+	}))
+	stored, err := store.GetSpec(ctx, "aws-entity")
+	require.NoError(t, err)
+	assert.Equal(t, profiles.AWSProfileName, stored.Config.Get(credential.ConfigAssertionProfile),
+		"a new AWS spec minting the entity's assertion gets the aws profile, as a warden_identity one does")
+
+	err = create("no-aud", "src", map[string]string{credential.ConfigSubjectTokenSource: credential.SourceWardenEntity})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "assertion_audience")
+
+	err = create("subject-md", "src", map[string]string{
+		credential.ConfigSubjectTokenSource:      credential.SourceWardenEntity,
+		credential.ConfigAssertionAudience:       "kv.example.com",
+		credential.ConfigAssertionMetadataClaims: "team",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "assertion_metadata_claims': is not available with 'warden_entity'")
+	err = create("actor-md", "sts-src", map[string]string{
+		credential.ConfigSubjectTokenSource:      credential.SourceUserIdentity,
+		credential.ConfigActorTokenSource:        credential.SourceWardenEntity,
+		credential.ConfigAssertionAudience:       "https://sts.example/aud",
+		credential.ConfigAssertionMetadataClaims: "team",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not available with 'warden_entity'", "the entity acting carries no metadata either")
+
+	require.NoError(t, create("user-claims", "src", map[string]string{
+		credential.ConfigSubjectTokenSource:  credential.SourceWardenEntity,
+		credential.ConfigAssertionAudience:   "kv.example.com",
+		credential.ConfigAssertionUserClaims: "email",
+	}), "the user's claims are the user's IdP facts, so they stay available")
+
+	require.NoError(t, create("entity-secret", "src", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenEntity,
+		credential.ConfigAssertionAudience:  "kv.example.com",
+	}))
+	require.NoError(t, create("consumer", "src", map[string]string{credential.ConfigSecretSpec: "entity-secret"}),
+		"a chained secret minted as the caller's entity is pinned to the calling identity")
 }
 
 // A spec valid under default but not under the aws profile it would be defaulted to

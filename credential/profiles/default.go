@@ -38,6 +38,8 @@ import (
 //     method that asserts any principal id; the composite carries the Warden-
 //     generated namespace and mount, which no namespace can forge, so it is a tenant
 //     boundary even for a verifier that binds sub alone (AWS, Entra, Alibaba RAM).
+//     Under warden_entity the agent is its entity, "wfe:{nsID}:{entityID}", a
+//     boundary on the same terms.
 //     The agent level therefore carries no warden_namespace.
 //   - The USER is named by its raw id: the id the user's IdP asserted in the token
 //     the agent presented, as the auth role's user_claim selects it — the same
@@ -120,8 +122,8 @@ func (DefaultProfile) CheckIdentities(agent credential.AssertionIdentity, user *
 	if user == nil {
 		return nil
 	}
-	if credential.HasReservedSubjectPrefix(user.PrincipalID) {
-		return credential.ErrReservedPrincipal
+	if err := credential.ReservedPrincipalError(user.PrincipalID); err != nil {
+		return err
 	}
 	if len(agent.Actors) > 0 {
 		return errAgentActChain
@@ -163,7 +165,7 @@ func (p DefaultProfile) Claims(req credential.AssertionRequest) (map[string]any,
 // role, and its metadata when there is any. metadata is embedded as-is and never
 // written to.
 func agentClaims(m map[string]any, agent credential.AssertionIdentity, metadata map[string]string) {
-	m["sub"] = agent.WardenSubject()
+	m["sub"] = agent.Subject()
 	m["warden_role"] = agent.QualifiedRole()
 	if len(metadata) > 0 {
 		m["warden_metadata"] = metadata

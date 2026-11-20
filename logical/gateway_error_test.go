@@ -65,6 +65,12 @@ func TestCredentialIssueError(t *testing.T) {
 		GetErrorCode(&CredentialIssueError{Err: fmt.Errorf("x: %w", credential.ErrUserRequired)}))
 	assert.Equal(t, http.StatusForbidden,
 		GetErrorCode(&CredentialIssueError{Err: fmt.Errorf("x: %w", credential.ErrUserNotAllowed)}))
+	// A chained secret_spec resolves its inputs inside the manager, so a principal
+	// refused for what it is arrives here wrapped, with no status of its own.
+	assert.Equal(t, http.StatusForbidden,
+		GetErrorCode(&CredentialIssueError{Err: fmt.Errorf("x: %w", credential.ErrEntityRequired)}))
+	assert.Equal(t, http.StatusForbidden,
+		GetErrorCode(&CredentialIssueError{Err: fmt.Errorf("x: %w", credential.ErrReservedPrincipal)}))
 }
 
 // timeoutErr is a net.Error that timed out, as a dial or read does.

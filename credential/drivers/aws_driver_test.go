@@ -588,7 +588,7 @@ func TestAWSDriver_MintGuards(t *testing.T) {
 	for _, mm := range []string{"secrets_manager", "sts_assume_role"} {
 		_, _, _, _, err := wifDrv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": mm})})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "requires subject_token_source on the spec (warden_identity or agent_identity)")
+		assert.Contains(t, err.Error(), "requires subject_token_source on the spec (warden_identity, warden_entity or agent_identity)")
 	}
 }
 

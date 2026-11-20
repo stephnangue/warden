@@ -16,8 +16,8 @@ var (
 		Long: `
 Usage: warden oidc-issuer disable
 
-  Disable the OIDC issuer. The warden_identity mint path fails closed until it
-  is re-enabled. The rest of the configuration (issuer URL, timings, publisher)
+  Disable the OIDC issuer. The warden_identity and warden_entity mint paths fail
+  closed until it is re-enabled. The rest of the configuration (issuer URL, timings, publisher)
   is retained, so a later 'configure' can re-enable without re-supplying it.
   Root namespace only.
 

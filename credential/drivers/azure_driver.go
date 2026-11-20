@@ -726,7 +726,7 @@ func (d *AzureDriver) MintCredential(ctx context.Context, spec *credential.CredS
 	// caller-scoped assertion. Fail closed here to avoid silently minting with
 	// no credential material.
 	if credential.GetString(d.sourceConfig(), "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
-		return nil, nil, 0, "", fmt.Errorf("azure: source uses auth_method=oidc_federation; the spec must set subject_token_source (warden_identity or agent_identity)")
+		return nil, nil, 0, "", fmt.Errorf("azure: source uses auth_method=oidc_federation; the spec must set subject_token_source (warden_identity, warden_entity or agent_identity)")
 	}
 
 	mintMethod := credential.GetString(spec.Config, "mint_method", "bearer_token")

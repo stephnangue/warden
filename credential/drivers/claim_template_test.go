@@ -117,6 +117,21 @@ func TestResolveSecretPath_AgentGuidanceMatchesTheFailure(t *testing.T) {
 		assert.NotContains(t, err.Error(), "assertion_metadata_claims",
 			"entity_id never comes from metadata, so listing it there changes nothing")
 	})
+	t.Run("under warden_entity only entity_id resolves, and the hint says so", func(t *testing.T) {
+		entityOnly := map[string]string{"entity_id": "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b"}
+		got, err := resolveSecretPath("kv/agents/{{agent.entity_id}}", nil, entityOnly)
+		require.NoError(t, err)
+		assert.Equal(t, "kv/agents/7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b", got)
+
+		for _, claim := range []string{"sub", "team"} {
+			_, err := resolveSecretPath("kv/{{agent."+claim+"}}", nil, entityOnly)
+			require.Error(t, err, claim)
+			assert.Contains(t, err.Error(), "with warden_entity only {{agent.entity_id}} is available", claim)
+			assert.NotContains(t, err.Error(), "internal error", claim)
+			assert.NotContains(t, err.Error(), "list it in assertion_metadata_claims",
+				"that key is refused beside warden_entity, so pointing at it is a dead end")
+		}
+	})
 }
 
 // A path with no template must come back byte-identical whatever the claim maps
