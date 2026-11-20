@@ -1881,21 +1881,38 @@ func projectAgentClaims(te *logical.TokenEntry, keys []string) (map[string]strin
 	if err != nil {
 		return nil, err
 	}
-	return agentTemplateClaims(projected, te.PrincipalID), nil
+	return agentTemplateClaims(projected, te), nil
 }
 
 // agentTemplateClaims composes the {{agent.<claim>}} map from an allow-listed
 // metadata projection. Both subject sources compose through here so they cannot
 // drift apart. The identity sub is authoritative and set last: a metadata key
 // literally named "sub" still reaches the assertion, but never the template.
-func agentTemplateClaims(projected map[string]string, principalID string) map[string]string {
-	claims := make(map[string]string, len(projected)+1)
+//
+// entity_id is authoritative too, and stricter: a metadata key of that name is
+// never copied, so for a caller no entity claims the claim is absent and a
+// template naming it fails closed, rather than resolving to whatever the login
+// put under that key. projected itself is never written: it is also the
+// assertion's metadata, where such a key still belongs.
+func agentTemplateClaims(projected map[string]string, te *logical.TokenEntry) map[string]string {
+	claims := make(map[string]string, len(projected)+2)
 	for k, v := range projected {
+		if k == agentEntityIDClaim {
+			continue
+		}
 		claims[k] = v
 	}
-	claims["sub"] = principalID
+	claims["sub"] = te.PrincipalID
+	if te.Entity != nil {
+		claims[agentEntityIDClaim] = te.Entity.ID
+	}
 	return claims
 }
+
+// agentEntityIDClaim names the caller's entity of record in {{agent.<claim>}}
+// templates: its ID, which a rename leaves unchanged, so a templated path never
+// moves under an agent.
+const agentEntityIDClaim = "entity_id"
 
 // projectUserClaims selects the operator-allowlisted keys from the secondary
 // (user) principal's metadata for the assertion's user level and for per-user
@@ -2233,7 +2250,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// The same projection serves the assertion claim and {{agent.<claim>}}
 	// templating, so a template resolves exactly the value a downstream policy can
 	// bind — the property the user side states below for the user's claims.
-	agentClaims := agentTemplateClaims(projected, te.PrincipalID)
+	agentClaims := agentTemplateClaims(projected, te)
 
 	// Project the secondary (user) principal, but only when the spec opts in via
 	// assertion_user_claims — like assertion_metadata_claims, a spec that does not
@@ -2354,8 +2371,10 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// ONE fragment is enough, and it is worth saying why. Every input a profile can
 	// read is already fingerprinted: identity and audience directly, role via
 	// "role=", resource via "res=", projected metadata via mdFingerprint, the
-	// user's projected claims via "user=", and the user via the Manager's ":u:"
-	// token-id dimension. That last one covers the user's IDENTITY: namespace,
+	// user's projected claims via "user=", the caller's entity via the Manager's
+	// ":e:" dimension (keyed there, beside the token id, because a native identity
+	// keeps its token id when it moves to another entity), and the user via the
+	// Manager's ":u:" token-id dimension. That last one covers the user's IDENTITY: namespace,
 	// mount, principal and act chain are all fixed for the life of the user's token
 	// entry, and a transparent user token's id hashes the very credential the act
 	// chain was read from. (The agent's own act chain is read only to refuse, never rendered, so it
@@ -2447,9 +2466,14 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 // reconstructed from anything less than the live one — losing the role, say — would
 // hand a caller a secret fetched under an identity it never presented.
 func (c *Core) callerFor(req *logical.Request, te *logical.TokenEntry, tokenTTL time.Duration, userCtx *credential.UserContext) credential.Caller {
+	var entityID string
+	if te.Entity != nil {
+		entityID = te.Entity.ID
+	}
 	return credential.Caller{
 		TokenID:  te.ID,
 		TokenTTL: tokenTTL,
+		EntityID: entityID,
 		User:     userCtx,
 		ResolveInputs: func(ctx context.Context, specName string) (*credential.ExchangeInputs, error) {
 			return c.resolveExchangeInputs(ctx, req, te, specName)

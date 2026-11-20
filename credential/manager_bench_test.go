@@ -8,6 +8,16 @@ import (
 // BenchmarkIssueCredentialHit measures the cache-hit path, which every gateway
 // request with a warm credential takes.
 func BenchmarkIssueCredentialHit(b *testing.B) {
+	benchmarkIssueCredentialHit(b, Caller{TokenID: "token-bench", TokenTTL: time.Hour})
+}
+
+// BenchmarkIssueCredentialHitEntity is the same hit path for a caller an entity
+// claims, whose key carries the ":e:" dimension.
+func BenchmarkIssueCredentialHitEntity(b *testing.B) {
+	benchmarkIssueCredentialHit(b, Caller{TokenID: "token-bench", TokenTTL: time.Hour, EntityID: "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b"})
+}
+
+func benchmarkIssueCredentialHit(b *testing.B, caller Caller) {
 	manager, configStore, _ := createTestManager(b)
 	defer manager.Stop()
 
@@ -15,7 +25,6 @@ func BenchmarkIssueCredentialHit(b *testing.B) {
 	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
 
 	ctx := createNamespaceContext()
-	caller := Caller{TokenID: "token-bench", TokenTTL: time.Hour}
 	if _, err := manager.IssueCredential(ctx, caller, "test-spec", nil); err != nil {
 		b.Fatal(err)
 	}

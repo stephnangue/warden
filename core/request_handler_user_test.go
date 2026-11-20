@@ -431,12 +431,51 @@ func TestProjectAgentClaims(t *testing.T) {
 // spec would template differently depending on how its subject travels.
 func TestAgentTemplateClaims_ComposesIdenticallyForBothSources(t *testing.T) {
 	projected := map[string]string{"team": "platform"}
+	te := &logical.TokenEntry{
+		PrincipalID: "build-runner",
+		Metadata:    map[string]string{"team": "platform"},
+		Entity:      &logical.Entity{ID: "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b"},
+	}
 
-	fromAssertion := agentTemplateClaims(projected, "build-runner")
+	fromAssertion := agentTemplateClaims(projected, te)
 
-	te := &logical.TokenEntry{PrincipalID: "build-runner", Metadata: map[string]string{"team": "platform"}}
 	fromForwardedToken, err := projectAgentClaims(te, []string{"team"})
 	require.NoError(t, err)
 
 	assert.Equal(t, fromAssertion, fromForwardedToken)
+}
+
+// {{agent.entity_id}} names the caller's entity, on either subject source, and
+// only the entity can supply it: a login metadata key of the same name never
+// stands in for it, so an unclaimed caller has none and a template naming it
+// fails closed. That key still reaches the assertion's metadata untouched.
+func TestAgentTemplateClaims_EntityID(t *testing.T) {
+	const entityID = "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b"
+
+	t.Run("claimed caller", func(t *testing.T) {
+		te := &logical.TokenEntry{PrincipalID: "build-runner", Entity: &logical.Entity{ID: entityID}}
+		got, err := projectAgentClaims(te, nil)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"sub": "build-runner", "entity_id": entityID}, got)
+	})
+
+	t.Run("unclaimed caller has none, whatever its login says", func(t *testing.T) {
+		te := &logical.TokenEntry{
+			PrincipalID: "build-runner",
+			Metadata:    map[string]string{"entity_id": "spoofed"},
+		}
+		got, err := projectAgentClaims(te, []string{"entity_id"})
+		require.NoError(t, err)
+		assert.NotContains(t, got, "entity_id")
+	})
+
+	t.Run("claimed caller's entity wins over a metadata key of that name", func(t *testing.T) {
+		projected := map[string]string{"entity_id": "spoofed", "team": "platform"}
+		te := &logical.TokenEntry{PrincipalID: "build-runner", Entity: &logical.Entity{ID: entityID}}
+		got := agentTemplateClaims(projected, te)
+		assert.Equal(t, entityID, got["entity_id"])
+		assert.Equal(t, "platform", got["team"])
+		assert.Equal(t, "spoofed", projected["entity_id"],
+			"the projection is also the assertion's metadata, so it is never written")
+	})
 }

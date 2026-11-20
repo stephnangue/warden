@@ -358,6 +358,14 @@ func (m *Manager) IssueCredential(ctx context.Context, caller Caller, specName s
 		cacheKey += ":u:" + caller.User.TokenID
 	}
 
+	// Scope the entry to the caller's entity. The token id hashes the native
+	// credential, so it survives that identity moving to another entity, while
+	// what the mint may read ({{agent.entity_id}}, the entity's subject) does not.
+	// Byte-identical for a caller no entity claims.
+	if caller.EntityID != "" {
+		cacheKey += ":e:" + caller.EntityID
+	}
+
 	// Check cache first. A cached credential that has outlived its lease is
 	// treated as a miss and re-minted: the cache carries no read-time expiry of
 	// its own, and non-revocable credentials (e.g. exchanged bearer tokens) are
@@ -1040,6 +1048,12 @@ func chainedSecretCacheKey(nsID, secretRef, refFP string, caller Caller, inputsB
 	agent := ""
 	if len(inputsB.AgentClaims) > 0 {
 		agent = ":a:" + claimsFingerprint(inputsB.AgentClaims)
+	}
+	// The entity keys the entry on its own, not only through the claims it may
+	// show up in, so no entry answers for two entities however the claims and
+	// the subject are composed.
+	if caller.EntityID != "" {
+		agent += ":e:" + caller.EntityID
 	}
 
 	// The user's claims select a path the same way the agent's do, so they key the
