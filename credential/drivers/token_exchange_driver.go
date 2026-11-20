@@ -686,8 +686,8 @@ func (d *TokenExchangeDriver) Type() string {
 // means a spec without a subject source slipped past validation; never forward
 // without caller identity.
 func (d *TokenExchangeDriver) MintCredential(_ context.Context, _ *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	return nil, nil, 0, "", fmt.Errorf("token_exchange requires caller exchange inputs; set %s=%s|%s|%s on the spec",
-		credential.ConfigSubjectTokenSource, credential.SourceAgentIdentity, credential.SourceUserIdentity, credential.SourceWardenIdentity)
+	return nil, nil, 0, "", fmt.Errorf("token_exchange requires caller exchange inputs; set %s=%s|%s|%s|%s on the spec",
+		credential.ConfigSubjectTokenSource, credential.SourceAgentIdentity, credential.SourceUserIdentity, credential.SourceWardenIdentity, credential.SourceWardenEntity)
 }
 
 // MintCredentialWithExchange exchanges the caller-derived subject for a scoped

@@ -1909,12 +1909,14 @@ func TestTokenExchangeDriver_IDJAG_SubjectTokenType(t *testing.T) {
 	}
 
 	t.Run("refuses a subject Warden signs", func(t *testing.T) {
-		p := newIDJAGPair(t)
-		_, _, _, _, err := p.driver(nil).MintCredentialWithExchange(ctx,
-			p.spec(map[string]string{credential.ConfigSubjectTokenSource: credential.SourceWardenIdentity}), subjectInputs(idToken))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "subject_token_source=warden_identity cannot be used with grant=id_jag")
-		assert.Zero(t, p.idpCalls)
+		for _, src := range []string{credential.SourceWardenIdentity, credential.SourceWardenEntity} {
+			p := newIDJAGPair(t)
+			_, _, _, _, err := p.driver(nil).MintCredentialWithExchange(ctx,
+				p.spec(map[string]string{credential.ConfigSubjectTokenSource: src}), subjectInputs(idToken))
+			require.Error(t, err, src)
+			assert.Contains(t, err.Error(), "subject_token_source="+src+" cannot be used with grant=id_jag")
+			assert.Zero(t, p.idpCalls, src)
+		}
 	})
 
 	header := func(json string) string {

@@ -514,11 +514,12 @@ func (c *Core) trustEnv(ctx context.Context, keyless credential.Config) (env *cr
 	}
 	issuerURL := strings.TrimRight(issuer.IssuerURL(), "/")
 	return &credential.TrustEnv{
-		IssuerURL:      issuerURL,
-		JWKSURL:        issuerOrigin(issuerURL) + "/oidc/jwks",
-		SubjectPrefix:  credential.WardenSubjectPrefix + nsID + ":",
-		NamespaceID:    nsID,
-		NamespaceClaim: credential.NamespaceClaim(nsPath),
+		IssuerURL:           issuerURL,
+		JWKSURL:             issuerOrigin(issuerURL) + "/oidc/jwks",
+		SubjectPrefix:       credential.WardenSubjectPrefix + nsID + ":",
+		EntitySubjectPrefix: credential.EntitySubjectPrefix + nsID + ":",
+		NamespaceID:         nsID,
+		NamespaceClaim:      credential.NamespaceClaim(nsPath),
 	}, federated
 }
 

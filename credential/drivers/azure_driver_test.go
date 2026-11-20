@@ -466,7 +466,7 @@ func TestAzureDriver_MintCredential_Federation_FailsClosed(t *testing.T) {
 	}
 	_, _, _, _, err := drv.MintCredential(context.TODO(), &credential.CredSpec{Name: "s", Config: credential.NewConfig(map[string]string{"mint_method": "bearer_token"})})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "subject_token_source (warden_identity or agent_identity)")
+	assert.Contains(t, err.Error(), "subject_token_source (warden_identity, warden_entity or agent_identity)")
 }
 
 // TestAzureDriver_MintCredentialWithExchange_Guards covers the exchange-path guards

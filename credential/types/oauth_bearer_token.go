@@ -167,8 +167,8 @@ func validateAnthropicSpec(config credential.Config) error {
 		return fmt.Errorf("'%s' is required for an anthropic source: set it to '%s'",
 			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity)
 	default:
-		return fmt.Errorf("'%s' must be '%s' for an anthropic source, got %q: the exchange presents a Warden-signed assertion, which is what the federation rules trust",
-			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity, src)
+		return fmt.Errorf("'%s' must be '%s' or '%s' for an anthropic source, got %q: the exchange presents a Warden-signed assertion, which is what the federation rules trust",
+			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity, credential.SourceWardenEntity, src)
 	}
 
 	for _, key := range []string{"federation_rule_id", "service_account_id"} {
@@ -227,8 +227,8 @@ func validateOpenAISpec(config credential.Config) error {
 		return fmt.Errorf("'%s' is required for an openai source: set it to '%s'",
 			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity)
 	default:
-		return fmt.Errorf("'%s' must be '%s' for an openai source, got %q: the exchange presents a Warden-signed assertion, which is what the identity provider trusts",
-			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity, src)
+		return fmt.Errorf("'%s' must be '%s' or '%s' for an openai source, got %q: the exchange presents a Warden-signed assertion, which is what the identity provider trusts",
+			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity, credential.SourceWardenEntity, src)
 	}
 
 	if config.Get("service_account_id") == "" {
@@ -285,8 +285,8 @@ func (t *OAuthBearerTokenCredType) ValidateConfig(config credential.Config, sour
 		// or "none") has no identity to exchange, so reject it here rather than
 		// failing opaquely at mint time.
 		if src := config.Get(credential.ConfigSubjectTokenSource); src == "" || src == credential.SourceNone {
-			return fmt.Errorf("'%s' is required for a token_exchange source (set '%s', '%s', or '%s')",
-				credential.ConfigSubjectTokenSource, credential.SourceAgentIdentity, credential.SourceUserIdentity, credential.SourceWardenIdentity)
+			return fmt.Errorf("'%s' is required for a token_exchange source (set '%s', '%s', '%s', or '%s')",
+				credential.ConfigSubjectTokenSource, credential.SourceAgentIdentity, credential.SourceUserIdentity, credential.SourceWardenIdentity, credential.SourceWardenEntity)
 		}
 	case credential.SourceTypeAnthropic:
 		if err := validateAnthropicSpec(config); err != nil {

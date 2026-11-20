@@ -1881,7 +1881,7 @@ func projectAgentClaims(te *logical.TokenEntry, keys []string) (map[string]strin
 	if err != nil {
 		return nil, err
 	}
-	return agentTemplateClaims(projected, te), nil
+	return agentTemplateClaims(projected, te, false), nil
 }
 
 // agentTemplateClaims composes the {{agent.<claim>}} map from an allow-listed
@@ -1894,7 +1894,20 @@ func projectAgentClaims(te *logical.TokenEntry, keys []string) (map[string]strin
 // template naming it fails closed, rather than resolving to whatever the login
 // put under that key. projected itself is never written: it is also the
 // assertion's metadata, where such a key still belongs.
-func agentTemplateClaims(projected map[string]string, te *logical.TokenEntry) map[string]string {
+//
+// For a warden_entity slot (entity) the map is the entity alone: entity_id, and
+// no sub (the native principal) or login metadata, so nothing a template selects
+// differs between the native identities of one agent. That a non-empty map lacks
+// sub is also how the template resolver tells this case apart when it words a
+// missing claim.
+func agentTemplateClaims(projected map[string]string, te *logical.TokenEntry, entity bool) map[string]string {
+	if entity {
+		claims := make(map[string]string, 1)
+		if te.Entity != nil {
+			claims[agentEntityIDClaim] = te.Entity.ID
+		}
+		return claims
+	}
 	claims := make(map[string]string, len(projected)+2)
 	for k, v := range projected {
 		if k == agentEntityIDClaim {
@@ -1956,11 +1969,12 @@ func projectUserClaims(md map[string]string, keys []string) (map[string]string, 
 // the driver forwards it without re-validating. Every configured-but-missing input
 // fails the request closed rather than silently minting a non-exchange credential.
 //
-// A warden_identity subject or actor defers its assertion mint to a
-// credential-cache miss (via inputs.ResolveSubjectToken / ResolveActorToken) so a
-// cache hit pays no signing cost; the issuer-ready and audience checks stay eager
-// and fail closed. The subject and actor resolve independently — an eager
-// user_identity subject can pair with a lazily-minted warden_identity actor.
+// A Warden-minted subject or actor (warden_identity, warden_entity) defers its
+// assertion mint to a credential-cache miss (via inputs.ResolveSubjectToken /
+// ResolveActorToken) so a cache hit pays no signing cost; the issuer-ready,
+// entity and audience checks stay eager and fail closed. The subject and actor
+// resolve independently — an eager user_identity subject can pair with a
+// lazily-minted Warden actor.
 func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, te *logical.TokenEntry, specName string) (*credential.ExchangeInputs, error) {
 	spec, err := c.credConfigStore.GetSpec(ctx, specName)
 	if err != nil {
@@ -2003,6 +2017,15 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		userTE = req.User.TokenEntry
 	}
 
+	// An entity that cannot act is refused before the subject is resolved: the
+	// user_identity subject beside it would otherwise send the user through an
+	// OAuth round trip whose retry was always going to be refused.
+	if spec.Config.Get(credential.ConfigActorTokenSource) == credential.SourceWardenEntity {
+		if err := entityAssertionError(assertionActorSlot, te); err != nil {
+			return nil, fmt.Errorf("spec %q: %w", specName, err)
+		}
+	}
+
 	switch src := spec.Config.Get(credential.ConfigSubjectTokenSource); {
 	case src == credential.SourceAgentIdentity:
 		// Reuse the JWT Warden verified during inbound authentication. It lives
@@ -2036,7 +2059,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// identity as the subject (Workload Identity Federation) — Warden signed it.
 		// Minted lazily on a cache miss; fails closed if the issuer is
 		// disabled/not-ready or no audience is available.
-		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, userTE, assertionSubjectSlot, loadSource)
+		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, userTE, assertionSubjectSlot, src, loadSource)
 		if err != nil {
 			return nil, err
 		}
@@ -2078,7 +2101,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		// miss, like the subject assertion. The actor slot never discloses the user
 		// to the profile: the token service builds act from this token's sub, so it
 		// must name the agent.
-		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, userTE, assertionActorSlot, loadSource)
+		setup, err := c.buildAssertionSetup(ctx, specName, spec, te, userTE, assertionActorSlot, src, loadSource)
 		if err != nil {
 			return nil, err
 		}
@@ -2103,7 +2126,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 }
 
 // assertionSetup holds the parts resolveExchangeInputs needs to configure a
-// warden_identity slot (subject or actor): a stable cache fragment that keys the
+// Warden-minted slot (subject or actor): a stable cache fragment that keys the
 // credential cache in place of the per-request-volatile assertion bytes, the
 // closure that mints the assertion lazily on a cache miss, and the projected
 // secondary-user claims (empty when the spec discloses no user) that a driver
@@ -2118,12 +2141,14 @@ type assertionSetup struct {
 	// depends on the claim shape. Nil when the spec sets no assertion_user_claims.
 	userClaims map[string]string
 	// agentClaims is the primary principal's template map: the projected
-	// assertion_metadata_claims plus "sub" (the raw principal). The metadata is
-	// what the assertion's agent level carries as warden_metadata, and the raw
-	// principal is the trailing segment of the agent's composite sub; both are
-	// already inside cacheIdentity, via mdFingerprint and wardenSubject
-	// respectively, so templating from it discloses nothing the assertion does not
-	// and needs no cache dimension of its own. Never nil: "sub" is unconditional.
+	// assertion_metadata_claims plus "sub" (the raw principal), and "entity_id" for
+	// a claimed caller. The metadata is what the assertion's agent level carries as
+	// warden_metadata, and the raw principal is the trailing segment of the agent's
+	// composite sub; both are already inside cacheIdentity, via mdFingerprint and
+	// its subject head respectively, and the entity is keyed by the manager's ":e:",
+	// so templating from it discloses nothing the cache does not key. Under
+	// warden_entity it is "entity_id" alone, inside the head's entity subject.
+	// Never nil.
 	agentClaims map[string]string
 }
 
@@ -2136,6 +2161,51 @@ const (
 	assertionSubjectSlot assertionSlot = iota
 	assertionActorSlot
 )
+
+// configKey is the spec-config key that selects the slot's token source.
+func (s assertionSlot) configKey() string {
+	if s == assertionActorSlot {
+		return credential.ConfigActorTokenSource
+	}
+	return credential.ConfigSubjectTokenSource
+}
+
+// entityAssertionError returns why a warden_entity slot cannot be minted for te,
+// wrapping credential.ErrEntityRequired, or nil when te carries a governed, active
+// entity to assert. The caller is told about itself only: the native identity it
+// presented, or that it is a human or presented none.
+//
+// The entity's state and governance are checked here even though a role grant
+// already refused a suspended or retired entity and gave an ungoverned one no
+// role: under unknown_aliases=observe the entity is resolved before that verdict,
+// and an assertion is not the place to rely on another layer's order.
+func entityAssertionError(slot assertionSlot, te *logical.TokenEntry) error {
+	var why string
+	adm := te.Admission
+	switch {
+	case te.Entity != nil && te.Entity.ID != "" && te.Entity.State == logical.EntityStateActive && te.Entity.GovernedBy() != "":
+		return nil
+	case adm == nil:
+		why = "this token has no entity"
+	// A ticket records the kind it was admitted as; any other admission is
+	// human when its mount names humans, as identityVerdict reads it.
+	case adm.Kind == logical.EntityKindHuman || isHumanMount(adm):
+		why = "a human has no entity; " + credential.SourceWardenEntity + " is for agents"
+	case te.Entity == nil:
+		why = fmt.Sprintf("native identity (%s, %s) is not claimed by an entity", adm.MountPath, adm.AliasName)
+	default:
+		why = fmt.Sprintf("native identity (%s, %s) belongs to entity %q, which is not active and governed",
+			adm.MountPath, adm.AliasName, te.Entity.Name)
+	}
+	return fmt.Errorf("%s=%s: %s: %w", slot.configKey(), credential.SourceWardenEntity, why, credential.ErrEntityRequired)
+}
+
+// isHumanMount reports whether the mount that admitted adm names humans, by
+// the naming in force.
+func isHumanMount(adm *logical.Admission) bool {
+	n := adm.Mount.Load()
+	return n != nil && n.Kind == logical.EntityKindHuman
+}
 
 // resolveAssertionProfile maps a spec's assertion_profile name onto a registered
 // profile, failing closed on a name this build does not have.
@@ -2160,8 +2230,9 @@ func (c *Core) resolveAssertionProfile(name string) (credential.AssertionProfile
 }
 
 // buildAssertionSetup validates the OIDC issuer is ready and derives the
-// audience, resource, and projected metadata for a warden_identity assertion of
-// te, returning a stable cache fragment (identity + audience [+ role]
+// audience, resource, and projected metadata for a Warden-minted assertion of te
+// (its native identity, or under src=warden_entity its entity), returning a
+// stable cache fragment (subject + audience [+ role]
 // [+ resource] [+ metadata]) and a lazy mint closure. The same setup serves a WIF
 // subject (the agent IS the identity) and a delegation actor (the agent acts for
 // the subject-header user); slot says which, and — with the source's type — decides
@@ -2173,10 +2244,10 @@ func (c *Core) resolveAssertionProfile(name string) (credential.AssertionProfile
 // derived from the source; resource is unset→derived, "none"→omitted, else
 // verbatim; metadata is the operator-allowlisted projection (empty→no claim, so
 // the cache key is byte-identical to the no-metadata case).
-func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *credential.CredSpec, te *logical.TokenEntry, userTE *logical.TokenEntry, slot assertionSlot, loadSource func() (*credential.CredSource, error)) (*assertionSetup, error) {
+func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *credential.CredSpec, te *logical.TokenEntry, userTE *logical.TokenEntry, slot assertionSlot, src string, loadSource func() (*credential.CredSource, error)) (*assertionSetup, error) {
 	issuer := c.OIDCIssuer()
 	if issuer == nil || !issuer.Ready() {
-		return nil, fmt.Errorf("spec %q requires warden_identity but the OIDC issuer is not enabled/ready", specName)
+		return nil, fmt.Errorf("spec %q requires %s but the OIDC issuer is not enabled/ready", specName, src)
 	}
 
 	// Resolve the claim shape ONCE per request, here — off the signing path. The
@@ -2187,6 +2258,27 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	profile, err := c.resolveAssertionProfile(profileName)
 	if err != nil {
 		return nil, fmt.Errorf("spec %q: %w", specName, err)
+	}
+
+	// A warden_entity slot asserts the caller's entity of record, so it is refused
+	// for a caller without a governed, active one — here, before anything is
+	// projected and before any cache is read, and never by falling back to the
+	// native identity: a downstream trusting wfe: subjects trusts governed agents
+	// only. It asserts the entity's subject and role alone; the spec write refuses
+	// assertion_metadata_claims beside it, and that is checked again here so a spec
+	// that reached storage any other way cannot put native facts under an entity's
+	// subject.
+	agent := identityFromTokenEntry(te)
+	entity := src == credential.SourceWardenEntity
+	if entity {
+		if err := entityAssertionError(slot, te); err != nil {
+			return nil, fmt.Errorf("spec %q: %w", specName, err)
+		}
+		if len(credential.AssertionMetadataKeys(spec.Config)) > 0 {
+			return nil, fmt.Errorf("spec %q: %s is not available with %s: the entity's claims are its subject and role",
+				specName, credential.ConfigAssertionMetadataClaims, credential.SourceWardenEntity)
+		}
+		agent.EntityID = te.Entity.ID
 	}
 
 	// The assertion audience: an explicit spec value wins; otherwise derive it
@@ -2201,7 +2293,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 		audience, _ = drivers.DeriveAssertionAudience(src.Type, src.Config, spec.Config)
 	}
 	if audience == "" {
-		return nil, fmt.Errorf("spec %q with warden_identity requires %s", specName, credential.ConfigAssertionAudience)
+		return nil, fmt.Errorf("spec %q with %s requires %s", specName, src, credential.ConfigAssertionAudience)
 	}
 
 	// Resolve the single downstream resource to name in the assertion so a
@@ -2250,7 +2342,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// The same projection serves the assertion claim and {{agent.<claim>}}
 	// templating, so a template resolves exactly the value a downstream policy can
 	// bind — the property the user side states below for the user's claims.
-	agentClaims := agentTemplateClaims(projected, te)
+	agentClaims := agentTemplateClaims(projected, te, entity)
 
 	// Project the secondary (user) principal, but only when the spec opts in via
 	// assertion_user_claims — like assertion_metadata_claims, a spec that does not
@@ -2284,8 +2376,8 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 		// The raw principal becomes the assertion's sub once disclosed, and feeds
 		// {{user.sub}} either way. Refused before both, so no slot, source or cache
 		// path can let a user present an agent's subject.
-		if credential.HasReservedSubjectPrefix(userTE.PrincipalID) {
-			return nil, fmt.Errorf("spec %q: %w", specName, credential.ErrReservedPrincipal)
+		if err := credential.ReservedPrincipalError(userTE.PrincipalID); err != nil {
+			return nil, fmt.Errorf("spec %q: %w", specName, err)
 		}
 		// "sub" names the user's identity principal, not a metadata key — exclude it
 		// from the metadata projection so an operator can list it (to template
@@ -2328,7 +2420,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// identity-keyed and shared across an agent's sessions, so a session the
 	// profile must refuse could be served what an acceptable session cached.
 	if checker, ok := profile.(credential.AssertionProfileIdentityChecker); ok {
-		if err := checker.CheckIdentities(identityFromTokenEntry(te), userIdentity); err != nil {
+		if err := checker.CheckIdentities(agent, userIdentity); err != nil {
 			return nil, fmt.Errorf("spec %q: assertion profile %q: %w", specName, profile.Name(), err)
 		}
 	}
@@ -2391,7 +2483,11 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 	// Appended only for a non-default profile, so every cache key that predates this
 	// fragment stays byte-for-byte identical — the same discipline as the fragments
 	// above.
-	cacheIdentity := wardenSubject(te) + "\x00" + audience
+	// Headed by the subject the assertion names: the native identity's, or under
+	// warden_entity the entity's, so every native identity of one agent shares the
+	// head as it shares the subject. (Nothing native is left to tell them apart: a
+	// warden_entity slot projects no login metadata and templates no sub.)
+	cacheIdentity := agent.Subject() + "\x00" + audience
 	if te.RoleName != "" {
 		cacheIdentity += "\x00role=" + te.RoleName
 	}
@@ -2449,6 +2545,7 @@ func (c *Core) buildAssertionSetup(ctx context.Context, specName string, spec *c
 				UserClaims: userClaims,
 				User:       userIdentity,
 				Profile:    profile,
+				EntityID:   agent.EntityID,
 			})
 		},
 	}, nil
@@ -2567,6 +2664,14 @@ func (c *Core) mintSpecForRequest(ctx context.Context, req *logical.Request, te 
 	// Credentials are cache-only (not persisted) - ExpirationEntry handles lease revocation
 	cred, err := c.credentialManager.IssueCredential(ctx, caller, specName, inputs)
 	if err != nil {
+		// A chained secret_spec resolves its own inputs inside the manager, so a
+		// principal it refuses for what it is surfaces here. Nothing was issued
+		// or asked of an upstream: it is answered as the request's own spec
+		// would answer it, not as an issuance failure a renderer would blame on
+		// the upstream.
+		if errors.Is(err, credential.ErrEntityRequired) || errors.Is(err, credential.ErrReservedPrincipal) {
+			return exchangeInputError(err)
+		}
 		// Typed so a gateway error renderer can tell a credential-issuance
 		// failure from the others that share its status; Error() is unchanged.
 		return &logical.CredentialIssueError{Spec: specName, Err: err}

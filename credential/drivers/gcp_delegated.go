@@ -87,8 +87,8 @@ func GCPDelegatedAccessSpecError(specCfg, sourceCfg credential.Config) error {
 			types.GCPMintMethodDelegated, gcpAuthMethodOIDCFederation)
 	}
 	if !credential.MintsWardenAssertion(specCfg.Get(credential.ConfigSubjectTokenSource)) {
-		return fmt.Errorf("mint_method=%s acts as the verified user projected into Warden's assertion: set %s=%s",
-			types.GCPMintMethodDelegated, credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity)
+		return fmt.Errorf("mint_method=%s acts as the verified user projected into Warden's assertion: set %s=%s or %s",
+			types.GCPMintMethodDelegated, credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity, credential.SourceWardenEntity)
 	}
 	if actor := specCfg.Get(credential.ConfigActorTokenSource); actor != "" && actor != credential.SourceNone {
 		return fmt.Errorf("'%s' does not apply to mint_method=%s", credential.ConfigActorTokenSource, types.GCPMintMethodDelegated)

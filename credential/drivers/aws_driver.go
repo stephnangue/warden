@@ -590,7 +590,7 @@ func (d *AWSDriver) MintCredential(ctx context.Context, spec *credential.CredSpe
 	// clearly rather than falling into authenticate() with empty keys and a misleading
 	// "invalid AWS credentials" error.
 	if authMethod == awsAuthMethodOIDCFederation {
-		return nil, nil, 0, "", fmt.Errorf("auth_method=oidc_federation requires subject_token_source on the spec (warden_identity or agent_identity); federated minting runs through the token-exchange path")
+		return nil, nil, 0, "", fmt.Errorf("auth_method=oidc_federation requires subject_token_source on the spec (warden_identity, warden_entity or agent_identity); federated minting runs through the token-exchange path")
 	}
 
 	// Re-authenticate if needed. The returned generation is this mint's for the

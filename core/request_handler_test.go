@@ -3672,7 +3672,7 @@ func (s shapeProfile) ValidateSpec(credential.Config) error { return nil }
 func (s shapeProfile) Claims(req credential.AssertionRequest) (map[string]any, error) {
 	return map[string]any{
 		"iss": req.Issuer,
-		"sub": req.Identity.WardenSubject(),
+		"sub": req.Identity.Subject(),
 		"aud": req.Audience,
 		"iat": req.IssuedAt.Unix(),
 		"nbf": req.NotBefore.Unix(),
@@ -4190,4 +4190,367 @@ func TestResolveExchangeInputs_UnknownProfileFailsClosed(t *testing.T) {
 	_, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.opaque", nil), te)
 	require.Error(t, err, "a spec naming an absent profile must fail closed, not mint the default shape")
 	assert.Contains(t, err.Error(), "unknown assertion profile: retired")
+}
+
+const testEntityID = "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b"
+
+// entityCaller is an agent request through native identity (mount, principal),
+// claimed by the governed, active entity billing-agent and granted role billing.
+func entityCaller(spec, mount, principal string) *logical.TokenEntry {
+	return &logical.TokenEntry{
+		CredentialSpec: spec, PrincipalID: principal, NamespaceID: "k3Rb9Q", MountAccessor: mount, RoleName: "billing",
+		Metadata:  map[string]string{"repository": "corp/billing-agent"},
+		Admission: &logical.Admission{MountPath: "auth/" + mount + "/", MountAccessor: mount, AliasName: principal, Kind: logical.EntityKindAgent},
+		Entity: &logical.Entity{
+			ID: testEntityID, Name: "billing-agent", Description: "Bills customers", State: logical.EntityStateActive,
+			Sponsor: &logical.EntitySponsor{Type: logical.SponsorTypeGroup},
+		},
+	}
+}
+
+// A warden_entity subject names the entity, not the native identity: two native
+// identities of one agent get the same subject, claims and cache identity, and
+// nothing native — the login metadata, the principal — reaches the assertion or
+// the templates.
+func TestResolveExchangeInputs_WardenEntity_OneSubjectPerAgent(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "billing-kv", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenEntity,
+		credential.ConfigAssertionAudience:  "kv.example.com",
+	})
+
+	viaCI, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.ci", nil),
+		entityCaller("billing-kv", "auth_jwt_8f3a", "repo:corp/billing-agent:ref:refs/heads/main"))
+	require.NoError(t, err)
+	viaK8s, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.k8s", nil),
+		entityCaller("billing-kv", "auth_kubernetes_5d2e", "system:serviceaccount:billing:agent"))
+	require.NoError(t, err)
+
+	assert.True(t, strings.HasPrefix(viaCI.SubjectCacheIdentity, "wfe:k3Rb9Q:"+testEntityID+"\x00"),
+		"the cache identity is headed by the subject the assertion names: %q", viaCI.SubjectCacheIdentity)
+	assert.Equal(t, viaCI.SubjectCacheIdentity, viaK8s.SubjectCacheIdentity)
+	assert.Equal(t, viaCI.Fingerprint(), viaK8s.Fingerprint())
+	assert.Equal(t, map[string]string{"entity_id": testEntityID}, viaCI.AgentClaims,
+		"templates see the entity alone, never the native principal")
+	assert.Equal(t, viaCI.AgentClaims, viaK8s.AgentClaims)
+
+	for _, inputs := range []*credential.ExchangeInputs{viaCI, viaK8s} {
+		tok, err := inputs.ResolveSubjectToken(ctx)
+		require.NoError(t, err)
+		claims := decodeAssertionClaims(t, tok)
+		assert.Equal(t, "wfe:k3Rb9Q:"+testEntityID, claims["sub"])
+		assert.Equal(t, "k3Rb9Q/billing", claims["warden_role"])
+		assert.NotContains(t, claims, "warden_metadata", "no login metadata under an entity's subject")
+		assert.NotContains(t, claims, "warden_entity", "the entity's name is not a claim: a rename would change it under a cached subject")
+	}
+}
+
+// warden_entity never falls back to the native identity: a caller without a
+// governed, active entity is refused before anything is minted or keyed, with a
+// 403 that says why in terms of the caller itself.
+func TestResolveExchangeInputs_WardenEntity_RefusesWithoutAnEntity(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "billing-kv", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenEntity,
+		credential.ConfigAssertionAudience:  "kv.example.com",
+	})
+
+	unclaimed := entityCaller("billing-kv", "auth_jwt_8f3a", "repo:corp/scratch:ref:refs/heads/test")
+	unclaimed.Entity = nil
+	// A human admitted on the request carries no recorded kind: its mount's naming
+	// says it is human. A ticket records the kind it was admitted as.
+	humanMount := &logical.MountFacts{}
+	humanMount.Publish(&logical.MountNaming{Kind: logical.EntityKindHuman})
+	human := entityCaller("billing-kv", "auth_oidc_1", "ada@example.com")
+	human.Entity = nil
+	human.Admission.Kind = ""
+	human.Admission.Mount = humanMount
+	humanTicket := entityCaller("billing-kv", "auth_oidc_1", "ada@example.com")
+	humanTicket.Entity = nil
+	humanTicket.Admission.Kind = logical.EntityKindHuman
+	noID := entityCaller("billing-kv", "auth_jwt_8f3a", "repo:corp/billing-agent:ref:refs/heads/main")
+	noID.Entity.ID = ""
+	root := &logical.TokenEntry{CredentialSpec: "billing-kv", PrincipalID: "root", NamespaceID: "root"}
+	suspended := entityCaller("billing-kv", "auth_jwt_8f3a", "repo:corp/billing-agent:ref:refs/heads/main")
+	suspended.Entity.State = logical.EntityStateSuspended
+	ungoverned := entityCaller("billing-kv", "auth_jwt_8f3a", "repo:corp/billing-agent:ref:refs/heads/main")
+	ungoverned.Entity.Sponsor = nil
+
+	for name, tc := range map[string]struct {
+		te   *logical.TokenEntry
+		want string
+	}{
+		"unclaimed":    {unclaimed, "subject_token_source=warden_entity: native identity (auth/auth_jwt_8f3a/, repo:corp/scratch:ref:refs/heads/test) is not claimed by an entity"},
+		"human":        {human, "subject_token_source=warden_entity: a human has no entity; warden_entity is for agents"},
+		"human ticket": {humanTicket, "subject_token_source=warden_entity: a human has no entity; warden_entity is for agents"},
+		"no entity id": {noID, "which is not active and governed"},
+		"root":         {root, "subject_token_source=warden_entity: this token has no entity"},
+		"suspended":    {suspended, `belongs to entity "billing-agent", which is not active and governed`},
+		"ungoverned":   {ungoverned, `belongs to entity "billing-agent", which is not active and governed`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inputs, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.x", nil), tc.te)
+			require.Error(t, err)
+			assert.Nil(t, inputs, "nothing is resolved, so nothing can be keyed or served")
+			assert.ErrorIs(t, err, credential.ErrEntityRequired)
+			assert.Contains(t, err.Error(), tc.want)
+			assert.Equal(t, http.StatusForbidden, logical.GetErrorCode(exchangeInputError(err)))
+			assert.Equal(t, http.StatusForbidden, logical.GetErrorCode(err),
+				"a chained secret_spec surfaces the bare error, so it must map to 403 on its own")
+		})
+	}
+}
+
+// The spec write refuses assertion_metadata_claims beside warden_entity; a spec
+// that reached storage any other way is refused again where the assertion is
+// built, before anything native is projected under the entity's subject.
+func TestBuildAssertionSetup_WardenEntity_RefusesStoredMetadataClaims(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	spec := &credential.CredSpec{Name: "stored", Type: "vault_token", Source: "local-src", Config: credential.NewConfig(map[string]string{
+		credential.ConfigSubjectTokenSource:      credential.SourceWardenEntity,
+		credential.ConfigAssertionAudience:       "kv.example.com",
+		credential.ConfigAssertionMetadataClaims: "repository",
+	})}
+	noSource := func() (*credential.CredSource, error) { return nil, errors.New("not loaded") }
+
+	for _, slot := range []assertionSlot{assertionSubjectSlot, assertionActorSlot} {
+		_, err := c.buildAssertionSetup(ctx, "stored", spec, entityCaller("stored", "auth_jwt_8f3a", "p"), nil,
+			slot, credential.SourceWardenEntity, noSource)
+		require.Error(t, err, slot.configKey())
+		assert.Contains(t, err.Error(), "assertion_metadata_claims is not available with warden_entity", slot.configKey())
+	}
+}
+
+// Concurrent mints for two entities each name their own: the entity is captured
+// per request, at setup, and the mint reads nothing shared that could cross them.
+// Run under -race.
+func TestResolveExchangeInputs_WardenEntity_ConcurrentEntitiesNeverCross(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedSpec(t, c, ctx, "billing-kv", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceWardenEntity,
+		credential.ConfigAssertionAudience:  "kv.example.com",
+	})
+	callerOf := func(id string) *logical.TokenEntry {
+		te := entityCaller("billing-kv", "auth_jwt_8f3a", "agent-"+id)
+		te.Entity = &logical.Entity{ID: id, Name: id, Description: "d", State: logical.EntityStateActive,
+			Sponsor: &logical.EntitySponsor{Type: logical.SponsorTypeGroup}}
+		return te
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		id := []string{"entity-a", "entity-b"}[i%2]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			inputs, err := resolveExchangeInputsForTest(c, ctx, requestWith("s.x", nil), callerOf(id))
+			if !assert.NoError(t, err) {
+				return
+			}
+			tok, err := inputs.ResolveSubjectToken(ctx)
+			if !assert.NoError(t, err) {
+				return
+			}
+			assert.Equal(t, "wfe:k3Rb9Q:"+id, decodeAssertionClaims(t, tok)["sub"])
+			assert.Equal(t, map[string]string{"entity_id": id}, inputs.AgentClaims)
+		}()
+	}
+	wg.Wait()
+}
+
+// entityKVDriver is a referenced spec's driver that reads a secret as the caller,
+// through its exchange inputs, and counts the reads.
+type entityKVDriver struct{ fetches *sync.Map }
+
+func (d entityKVDriver) MintCredential(context.Context, *credential.CredSpec) (map[string]any, map[string]any, time.Duration, string, error) {
+	return nil, nil, 0, "", errors.New("entitykv: exchange required")
+}
+func (d entityKVDriver) MintCredentialWithExchange(_ context.Context, _ *credential.CredSpec, inputs *credential.ExchangeInputs) (map[string]any, map[string]any, time.Duration, string, error) {
+	n, _ := d.fetches.LoadOrStore("n", new(int))
+	*(n.(*int))++
+	return map[string]any{"token": "kv-secret"}, nil, 0, "", nil
+}
+func (d entityKVDriver) Revoke(context.Context, string) error { return nil }
+func (d entityKVDriver) Type() string                         { return "entitykv" }
+func (d entityKVDriver) Cleanup(context.Context) error        { return nil }
+
+// entityConsumerDriver is a chained consumer: it mints from the secret its
+// secret_spec fetched.
+type entityConsumerDriver struct{}
+
+func (entityConsumerDriver) MintCredential(context.Context, *credential.CredSpec) (map[string]any, map[string]any, time.Duration, string, error) {
+	return nil, nil, 0, "", errors.New("entityconsumer: chained only")
+}
+func (entityConsumerDriver) MintFromSecret(_ context.Context, _ *credential.CredSpec, material credential.SecretMaterial) (map[string]any, map[string]any, time.Duration, string, error) {
+	return map[string]any{"token": "consumer:" + material.Secret()}, nil, 0, "", nil
+}
+func (entityConsumerDriver) Revoke(context.Context, string) error { return nil }
+func (entityConsumerDriver) Type() string                         { return "entityconsumer" }
+func (entityConsumerDriver) Cleanup(context.Context) error        { return nil }
+
+// entityChainFactory builds one of the two drivers above.
+type entityChainFactory struct{ driver credential.SourceDriver }
+
+func (f entityChainFactory) Type() string                                          { return f.driver.Type() }
+func (f entityChainFactory) ValidateConfig(credential.Config) error                { return nil }
+func (f entityChainFactory) SensitiveConfigFields() []string                       { return nil }
+func (f entityChainFactory) StoredSecrets(credential.Config) []string              { return nil }
+func (f entityChainFactory) InferCredentialType(credential.Config) (string, error) { return "", nil }
+func (f entityChainFactory) Create(credential.Config, *logger.GatedLogger) (credential.SourceDriver, error) {
+	return f.driver, nil
+}
+
+// A chained secret_spec minted as the caller's entity, driven through the mint
+// pipeline: a caller without a governed, active entity is refused with a 403 —
+// before the referenced secret is read, and even when the same native identity
+// warmed both caches as an entity a moment before — and answered as a refusal,
+// not as an issuance failure an upstream would be blamed for. The entity's
+// fetch is keyed by role and by user, so neither is served another's.
+func TestMintSpecForRequest_ChainedWardenEntity(t *testing.T) {
+	c := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	fetches := &sync.Map{}
+	require.NoError(t, c.credentialDriverRegistry.RegisterFactory(entityChainFactory{entityKVDriver{fetches}}))
+	require.NoError(t, c.credentialDriverRegistry.RegisterFactory(entityChainFactory{entityConsumerDriver{}}))
+	require.NoError(t, c.credentialTypeRegistry.Register(&testCredentialType{typeName: "entity_test"}))
+	fetched := func() int {
+		n, ok := fetches.Load("n")
+		if !ok {
+			return 0
+		}
+		return *(n.(*int))
+	}
+
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{Name: "kv-src", Type: "entitykv"}))
+	require.NoError(t, c.credConfigStore.CreateSource(ctx, &credential.CredSource{Name: "consumer-src", Type: "entityconsumer"}))
+	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name: "agent-secret", Type: "entity_test", Source: "kv-src",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource: credential.SourceWardenEntity,
+			credential.ConfigAssertionAudience:  "kv.example.com",
+		}),
+	}))
+	require.NoError(t, c.credConfigStore.CreateSpec(ctx, &credential.CredSpec{
+		Name: "consumer", Type: "entity_test", Source: "consumer-src",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSecretSpec:     "agent-secret",
+			credential.ConfigSecretCacheTTL: "5m",
+		}),
+	}))
+	mint := func(te *logical.TokenEntry) (*logical.Request, error) {
+		req := requestWith("s.x", nil)
+		return req, c.mintSpecForRequest(ctx, req, te, "consumer")
+	}
+	caller := func(tokenID, role string) *logical.TokenEntry {
+		te := entityCaller("consumer", "auth_jwt_8f3a", "repo:corp/billing-agent:ref:refs/heads/main")
+		te.ID, te.RoleName = tokenID, role
+		return te
+	}
+
+	// The entity reads its secret, and the consumer mints from it.
+	req, err := mint(caller("tok-ci", "billing"))
+	require.NoError(t, err)
+	assert.Equal(t, "consumer:kv-secret", req.Credential.Data["token"])
+	require.Equal(t, 1, fetched())
+
+	// Refused, and nothing read, though the entity's fetch is warm in the chained
+	// cache: the same native identity released from its entity (the same token,
+	// whose primary entry ":e:" no longer matches), and callers whose entity is
+	// suspended or ungoverned. Those two never reach the mint with a warm primary
+	// entry of their own: the role grant refuses a suspended entity in every mode
+	// and gives an ungoverned one no role, so no spec, before any cache is read.
+	released := caller("tok-ci", "billing")
+	released.Entity = nil
+	suspended := caller("tok-other", "billing")
+	suspended.Entity.State = logical.EntityStateSuspended
+	ungoverned := caller("tok-other", "billing")
+	ungoverned.Entity.Sponsor = nil
+	for name, te := range map[string]*logical.TokenEntry{
+		"released":   released,
+		"suspended":  suspended,
+		"ungoverned": ungoverned,
+	} {
+		_, err := mint(te)
+		require.Error(t, err, name)
+		assert.ErrorIs(t, err, credential.ErrEntityRequired, name)
+		assert.Equal(t, http.StatusForbidden, logical.GetErrorCode(err), name)
+		var issue *logical.CredentialIssueError
+		assert.False(t, errors.As(err, &issue), "%s: a refusal is not an issuance failure", name)
+		assert.Equal(t, 1, fetched(), "%s: refused before the referenced secret is read or served", name)
+	}
+
+	// Another role of the same entity is another fetch: the role keys the entry.
+	_, err = mint(caller("tok-ci-2", "auditor"))
+	require.NoError(t, err)
+	assert.Equal(t, 2, fetched())
+
+	// So is another user: the user keys the entry.
+	te := caller("tok-ci-3", "billing")
+	req = requestWith("s.x", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{ID: "user-tok", PrincipalID: "ada"}}
+	require.NoError(t, c.credConfigStore.UpdateSpec(ctx, &credential.CredSpec{
+		Name: "agent-secret", Type: "entity_test", Source: "kv-src",
+		Config: credential.NewConfig(map[string]string{
+			credential.ConfigSubjectTokenSource:  credential.SourceWardenEntity,
+			credential.ConfigAssertionAudience:   "kv.example.com",
+			credential.ConfigAssertionUserClaims: "sub",
+		}),
+	}))
+	require.NoError(t, c.mintSpecForRequest(ctx, req, te, "consumer"))
+	assert.Equal(t, 3, fetched())
+}
+
+// In the delegation shape the entity acts: the actor token Warden mints names the
+// entity, with the namespace-qualified role.
+func TestResolveExchangeInputs_WardenEntity_Actor(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	seedExchangeSpec(t, c, ctx, "for-user", map[string]string{
+		credential.ConfigSubjectTokenSource: credential.SourceUserIdentity,
+		credential.ConfigActorTokenSource:   credential.SourceWardenEntity,
+		credential.ConfigAssertionAudience:  "https://sts.example/aud",
+	})
+	req := requestWith("s.opaque-session", nil)
+	req.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{}, RawToken: "eyJ.user"}
+
+	inputs, err := resolveExchangeInputsForTest(c, ctx, req, entityCaller("for-user", "auth_jwt_8f3a", "p"))
+	require.NoError(t, err)
+	assert.Equal(t, "eyJ.user", inputs.SubjectToken)
+	assert.True(t, strings.HasPrefix(inputs.ActorCacheIdentity, "wfe:k3Rb9Q:"+testEntityID+"\x00"))
+
+	tok, err := inputs.ResolveActorToken(ctx)
+	require.NoError(t, err)
+	claims := decodeAssertionClaims(t, tok)
+	assert.Equal(t, "wfe:k3Rb9Q:"+testEntityID, claims["sub"])
+	assert.Equal(t, "k3Rb9Q/billing", claims["warden_role"])
+}
+
+// The entity prefix is reserved like the native one: a user whose IdP subject
+// reads "wfe:…" would pass as an agent to a verifier trusting "wfe:<ns>:*", so the
+// user is refused, the prefix named, on either minting source.
+func TestResolveExchangeInputs_UserWithEntityPrefixIsRefused(t *testing.T) {
+	c, ctx := exchangeResolveEnv(t)
+	c.oidcIssuer = newReadyIssuer(t, "https://warden-oidc.example")
+	for _, src := range []string{credential.SourceWardenIdentity, credential.SourceWardenEntity} {
+		t.Run(src, func(t *testing.T) {
+			seedSpec(t, c, ctx, "as-user-"+src, map[string]string{
+				credential.ConfigSubjectTokenSource:  src,
+				credential.ConfigAssertionAudience:   "https://orders.example/aud",
+				credential.ConfigAssertionUserClaims: "sub",
+			})
+			req := requestWith("s.opaque-session", nil)
+			req.User = &logical.UserPrincipal{TokenEntry: &logical.TokenEntry{PrincipalID: "wfe:k3Rb9Q:" + testEntityID}}
+
+			_, err := resolveExchangeInputsForTest(c, ctx, req, entityCaller("as-user-"+src, "auth_jwt_8f3a", "p"))
+			require.Error(t, err)
+			assert.ErrorIs(t, err, credential.ErrReservedPrincipal)
+			assert.Contains(t, err.Error(), `"wfe:"`)
+			assert.Equal(t, http.StatusForbidden, logical.GetErrorCode(err))
+		})
+	}
 }

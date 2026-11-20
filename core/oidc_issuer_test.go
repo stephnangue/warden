@@ -113,6 +113,12 @@ func serveJWKS(t *testing.T, iss *OIDCIssuer) *httptest.Server {
 	return srv
 }
 
+// wardenSubject is the native-identity subject an assertion of te names. The
+// implementation and its rationale live on credential.AssertionIdentity.
+func wardenSubject(te *logical.TokenEntry) string {
+	return identityFromTokenEntry(te).Subject()
+}
+
 // TestOIDCIssuer_Mint_VerifiesAgainstJWKS is the interoperability proof: a minted
 // assertion validates against the published JWKS using the same verifier library
 // (hashicorp/cap/jwt) an upstream would use, and carries the expected claims.
@@ -1460,7 +1466,7 @@ func (b brokenProfile) Claims(req credential.AssertionRequest) (map[string]any, 
 func goodClaims(req credential.AssertionRequest) map[string]any {
 	return map[string]any{
 		"iss": req.Issuer,
-		"sub": req.Identity.WardenSubject(),
+		"sub": req.Identity.Subject(),
 		"aud": req.Audience,
 		"iat": req.IssuedAt.Unix(),
 		"nbf": req.NotBefore.Unix(),
@@ -1661,7 +1667,7 @@ func TestIdentityFromTokenEntry(t *testing.T) {
 
 	// wardenSubject is now a thin wrapper over the moved method; the two must agree,
 	// because cacheIdentity uses the wrapper while the default profile uses the method.
-	assert.Equal(t, id.WardenSubject(), wardenSubject(te))
+	assert.Equal(t, id.Subject(), wardenSubject(te))
 }
 
 // identityFromTokenEntry must COPY the act chain: the token entry is shared across

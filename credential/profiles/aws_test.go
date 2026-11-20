@@ -146,6 +146,21 @@ func TestAWSProfile_Claims_QualifiedRoleTag(t *testing.T) {
 	assert.Equal(t, []string{"root/orders-reader"}, tags["warden_role"])
 }
 
+// Under warden_entity the aws profile names the entity, and its only tag is the
+// qualified role: there is no metadata to tag.
+func TestAWSProfile_Claims_Entity(t *testing.T) {
+	req := fixedRequest()
+	req.Identity.EntityID = "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b"
+	req.Metadata = nil
+
+	claims, err := AWSProfile{}.Claims(req)
+	require.NoError(t, err)
+	assert.Equal(t, "wfe:ns-3f2a1b:7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b", claims["sub"])
+	assert.Equal(t, map[string]any{
+		"principal_tags": map[string][]string{"warden_role": {"ns-3f2a1b/orders-reader"}},
+	}, claims["https://aws.amazon.com/tags"])
+}
+
 // AWS documents the web identity subject as at most 255 characters. A composite sub
 // longer than that fails at mint, locally and with a reason.
 func TestAWSProfile_Claims_SubjectLengthLimit(t *testing.T) {

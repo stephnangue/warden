@@ -18,9 +18,10 @@ const MinimalProfileName = "minimal"
 // Nothing about the shape is specific to Entra, which is why it is named after what
 // it is and not pinned to a source: any verifier that binds only iss/sub/aud fits.
 //
-// sub stays the composite "wid:{nsID}:{mountAccessor}:{principalID}", identical to
-// the agent's sub in the default profile, so a trust written against a default-
-// profile agent subject still matches when a spec moves to this profile.
+// sub stays the composite "wid:{nsID}:{mountAccessor}:{principalID}" (under
+// warden_entity, "wfe:{nsID}:{entityID}"), identical to the agent's sub in the
+// default profile, so a trust written against a default-profile agent subject still
+// matches when a spec moves to this profile.
 //
 // The rule is the aws profile's: emit only what the verifier can bind. So
 // warden_resource is dropped with the rest, and an explicit assertion_resource is
@@ -56,7 +57,7 @@ func (MinimalProfile) ValidateSpec(config credential.Config) error {
 func (MinimalProfile) Claims(req credential.AssertionRequest) (map[string]any, error) {
 	return map[string]any{
 		"iss": req.Issuer,
-		"sub": req.Identity.WardenSubject(),
+		"sub": req.Identity.Subject(),
 		"aud": req.Audience,
 		"iat": req.IssuedAt.Unix(),
 		"nbf": req.NotBefore.Unix(),

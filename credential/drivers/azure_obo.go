@@ -74,8 +74,8 @@ func AzureOnBehalfOfSpecError(specCfg, sourceCfg credential.Config) error {
 		// A keyless spec may name any app: the Warden assertion is checked against
 		// that app's own federated credential.
 		if !credential.MintsWardenAssertion(actor) {
-			return fmt.Errorf("a keyless on_behalf_of spec authenticates the app with a Warden assertion checked against its federated credential: set %s=%s",
-				credential.ConfigActorTokenSource, credential.SourceWardenIdentity)
+			return fmt.Errorf("a keyless on_behalf_of spec authenticates the app with a Warden assertion checked against its federated credential: set %s=%s or %s",
+				credential.ConfigActorTokenSource, credential.SourceWardenIdentity, credential.SourceWardenEntity)
 		}
 	} else {
 		if actor != "" {
@@ -225,7 +225,7 @@ func (d *AzureDriver) oboClientAuth(ctx context.Context, srcCfg credential.Confi
 	switch credential.GetString(srcCfg, "auth_method", azureAuthMethodStatic) {
 	case azureAuthMethodOIDCFederation:
 		if inputs.ActorToken == "" {
-			return "", oboAuth{}, fmt.Errorf("azure: a keyless on_behalf_of spec authenticates the app with a Warden assertion; set actor_token_source=warden_identity")
+			return "", oboAuth{}, fmt.Errorf("azure: a keyless on_behalf_of spec authenticates the app with a Warden assertion; set actor_token_source=warden_identity or warden_entity")
 		}
 		// The user's token is never the client credential.
 		if inputs.ActorToken == inputs.SubjectToken {

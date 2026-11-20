@@ -437,7 +437,7 @@ func TestAgentTemplateClaims_ComposesIdenticallyForBothSources(t *testing.T) {
 		Entity:      &logical.Entity{ID: "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b"},
 	}
 
-	fromAssertion := agentTemplateClaims(projected, te)
+	fromAssertion := agentTemplateClaims(projected, te, false)
 
 	fromForwardedToken, err := projectAgentClaims(te, []string{"team"})
 	require.NoError(t, err)
@@ -472,7 +472,7 @@ func TestAgentTemplateClaims_EntityID(t *testing.T) {
 	t.Run("claimed caller's entity wins over a metadata key of that name", func(t *testing.T) {
 		projected := map[string]string{"entity_id": "spoofed", "team": "platform"}
 		te := &logical.TokenEntry{PrincipalID: "build-runner", Entity: &logical.Entity{ID: entityID}}
-		got := agentTemplateClaims(projected, te)
+		got := agentTemplateClaims(projected, te, false)
 		assert.Equal(t, entityID, got["entity_id"])
 		assert.Equal(t, "platform", got["team"])
 		assert.Equal(t, "spoofed", projected["entity_id"],
