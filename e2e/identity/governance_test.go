@@ -257,3 +257,276 @@ func TestGovernance_EndToEnd(t *testing.T) {
 		return a.RoleDeniedReason == "unclaimed" && a.IdentityStatus == "unclaimed" && a.MountAccessor == jwtAccessor
 	})
 }
+
+// TestWardenEntity_EndToEnd: a spec minting warden_entity presents the agent's
+// entity of record, and a real Vault trusts it on that subject alone.
+//
+// Vault's JWT role binds sub to "wfe:root:<entity ID>" and warden_role to
+// "root/<role>". The governed agent reaches it through two native identities —
+// two Hydra clients on two jwt mounts — and Vault sees one subject. The same
+// client through a third mount, which no entity claims, holds the role through a
+// virtual group and is refused with a 403 before Vault is asked. Suspending the
+// entity refuses its next request.
+//
+// Chained: a datadog spec storing no key names a warden_entity spec that reads
+// secret/agents/{{agent.entity_id}}/datadog as the entity. Both native
+// identities are served the key that lives only there; the unclaimed one is
+// refused the same 403, and nothing reaches the upstream.
+func TestWardenEntity_EndToEnd(t *testing.T) {
+	port := h.GetLeaderPort(t)
+	var (
+		jwtA      = h.UniqueMount("e2e-wfe-jwt")
+		jwtB      = h.UniqueMount("e2e-wfe-ci")
+		jwtC      = h.UniqueMount("e2e-wfe-other")
+		vaultA    = h.UniqueMount("e2e-wfe-vault")
+		vaultB    = h.UniqueMount("e2e-wfe-vault-ci")
+		vaultC    = h.UniqueMount("e2e-wfe-vault-other")
+		reader    = h.UniqueMount("e2e-wfe-reader")
+		spec      = h.UniqueMount("e2e-wfe-spec")
+		vaultRole = h.UniqueMount("e2e-wfe")
+		agents    = h.UniqueMount("e2e-wfe-agents")
+		virtual   = h.UniqueMount("e2e-wfe-unclaimed")
+		oidc      = h.UniqueMount("oidc-wfe")
+		leads     = h.UniqueMount("wfe-leads")
+		admin     = h.UniqueMount("e2e-wfe-admin")
+		agent     = h.UniqueMount("billing-agent")
+		ada       = "ada@wfe.example"
+		agentID   = "e2e-agent"    // the Hydra client's sub
+		pipeID    = "e2e-pipeline" // ditto
+		// The chained leg: a datadog provider per mount, whose api_key is read
+		// from the entity's own Vault path through a warden_entity spec.
+		ddA       = h.UniqueMount("e2e-wfe-dd")
+		ddB       = h.UniqueMount("e2e-wfe-dd-ci")
+		ddC       = h.UniqueMount("e2e-wfe-dd-other")
+		ddReader  = h.UniqueMount("e2e-wfe-dd-reader")
+		kvSpec    = h.UniqueMount("e2e-wfe-kv")
+		ddSource  = h.UniqueMount("e2e-wfe-apikey")
+		ddSpec    = h.UniqueMount("e2e-wfe-dd-cred")
+		kvPolicy  = h.UniqueMount("e2e-wfe-agent-kv")
+		entityKey = "wfe-dd-" + h.UniqueMount("key") // exists only in Vault
+	)
+
+	h.EnableAuth(t, port, "", jwtA, "jwt", h.HydraJWTConfig(nil))
+	h.EnableAuth(t, port, "", jwtB, "jwt", h.HydraJWTConfig(nil))
+	h.EnableAuth(t, port, "", jwtC, "jwt", h.HydraJWTConfig(nil))
+	deleteEntityAtEnd(t, port, agent)
+	t.Cleanup(func() { h.NSRequestBestEffort(port, "", "DELETE", "sys/identity/group/"+agents+"?type=static") })
+	policies := []string{
+		h.VaultProvider(t, port, "", vaultA, jwtA),
+		h.VaultProvider(t, port, "", vaultB, jwtB),
+		h.VaultProvider(t, port, "", vaultC, jwtC),
+	}
+
+	// The entity: both clients, each through its own mount, are one agent.
+	cli(t, port, "identity", "entity", "create", agent, "-description", "Reconciles supplier invoices",
+		"-alias", h.AuthMountPath(jwtA)+"="+agentID, "-alias", h.AuthMountPath(jwtB)+"="+pipeID)
+	var e entity
+	cliJSON(t, port, &e, "identity", "entity", "read", agent)
+	if e.ID == "" {
+		t.Fatalf("entity %s has no id", agent)
+	}
+	subject := "wfe:root:" + e.ID
+
+	// The entity's own secret, at a path named by its ID, readable only by
+	// what the entity's subject logs in as.
+	agentPath := "agents/" + e.ID + "/datadog"
+	status, resp := h.VaultDirectRequest(t, "POST", "secret/data/"+agentPath,
+		h.JSON(t, map[string]any{"data": map[string]string{"api_key": entityKey}}))
+	if status < 200 || status > 299 {
+		t.Fatalf("write the entity's secret: status %d: %s", status, resp)
+	}
+	t.Cleanup(func() { h.VaultDirectRequest(t, "DELETE", "secret/metadata/agents/"+e.ID, "") })
+	status, resp = h.VaultDirectRequest(t, "PUT", "sys/policies/acl/"+kvPolicy, h.JSON(t, map[string]any{
+		"policy": fmt.Sprintf("path %q {\n  capabilities = [\"read\"]\n}\n", "secret/data/agents/"+e.ID+"/*"),
+	}))
+	if status < 200 || status > 299 {
+		t.Fatalf("write Vault policy %s: status %d: %s", kvPolicy, status, resp)
+	}
+	t.Cleanup(func() { h.VaultDirectRequest(t, "DELETE", "sys/policies/acl/"+kvPolicy, "") })
+
+	// Vault trusts the entity's subject and its roles in this namespace, and
+	// records both on the token it issues.
+	status, resp = h.VaultDirectRequest(t, "POST", "auth/jwt-warden/role/"+vaultRole, h.JSON(t, map[string]any{
+		"role_type":       "jwt",
+		"bound_audiences": []string{"https://vault.e2e.warden"},
+		"bound_subject":   subject,
+		"bound_claims":    map[string]any{"warden_role": []string{"root/" + reader, "root/" + ddReader}},
+		"user_claim":      "sub",
+		"claim_mappings":  map[string]string{"sub": "agent_subject", "warden_role": "agent_role"},
+		"token_policies":  []string{"e2e-secrets-reader", kvPolicy},
+		"token_type":      "batch",
+		"token_ttl":       "120s",
+	}))
+	if status < 200 || status > 299 {
+		t.Fatalf("create Vault role %s: status %d: %s", vaultRole, status, resp)
+	}
+	t.Cleanup(func() { h.VaultDirectRequest(t, "DELETE", "auth/jwt-warden/role/"+vaultRole, "") })
+
+	h.MustNS(t, port, "", "POST", "sys/cred/specs/"+spec, h.JSON(t, map[string]any{
+		"type":   "vault_token",
+		"source": "vault-warden-fed-e2e",
+		"config": map[string]string{
+			"mint_method":          "vault_token",
+			"jwt_role":             vaultRole,
+			"subject_token_source": "warden_entity",
+		},
+	}))
+	t.Cleanup(func() { h.NSRequestBestEffort(port, "", "DELETE", "sys/cred/specs/"+spec) })
+	h.WriteRoleInNS(t, port, "", reader, h.Role{Policies: policies, CredSpec: spec, ProviderPath: vaultA + "/"})
+	t.Cleanup(func() { h.NSRequestBestEffort(port, "", "DELETE", "sys/roles/"+reader) })
+
+	// The chained leg. The referenced spec reads the entity's own path, named
+	// by {{agent.entity_id}}, as the entity; the datadog spec stores no key of
+	// its own and takes the one that read returns.
+	upstream := h.StartRecordingUpstream(t)
+	t.Cleanup(upstream.Close)
+	var ddPolicies []string
+	for mount, auth := range map[string]string{ddA: jwtA, ddB: jwtB, ddC: jwtC} {
+		h.NSRequestBestEffort(port, "", "DELETE", "sys/providers/"+mount)
+		h.MustNS(t, port, "", "POST", "sys/providers/"+mount, `{"type":"datadog"}`)
+		t.Cleanup(func() { h.NSRequestBestEffort(port, "", "DELETE", "sys/providers/"+mount) })
+		h.MustNS(t, port, "", "POST", mount+"/config", h.JSON(t, map[string]any{
+			"datadog_url": upstream.URL, "tls_skip_verify": true, "auto_auth_path": h.AuthMountPath(auth),
+		}))
+		policy := mount + "-access"
+		h.MustNS(t, port, "", "POST", "sys/policies/cbp/"+policy, h.JSON(t, map[string]any{
+			"policy": fmt.Sprintf("path %q {\n  capabilities = [\"read\", \"create\", \"update\"]\n}\n", mount+"/role/+/gateway*"),
+		}))
+		t.Cleanup(func() { h.NSRequestBestEffort(port, "", "DELETE", "sys/policies/cbp/"+policy) })
+		ddPolicies = append(ddPolicies, policy)
+	}
+	// Cleanups run last first: the consumer goes before the spec it names, the
+	// spec before its source.
+	h.MustNS(t, port, "", "POST", "sys/cred/specs/"+kvSpec, h.JSON(t, map[string]any{
+		"type":   "key_value",
+		"source": "vault-warden-fed-e2e",
+		"config": map[string]string{
+			"mint_method":          "kv2_read",
+			"kv2_mount":            "secret",
+			"secret_path":          "agents/{{agent.entity_id}}/datadog",
+			"jwt_role":             vaultRole,
+			"subject_token_source": "warden_entity",
+		},
+	}))
+	t.Cleanup(func() { h.NSRequestBestEffort(port, "", "DELETE", "sys/cred/specs/"+kvSpec) })
+	h.MustNS(t, port, "", "POST", "sys/cred/sources/"+ddSource, `{"type":"apikey","config":{}}`)
+	t.Cleanup(func() { h.NSRequestBestEffort(port, "", "DELETE", "sys/cred/sources/"+ddSource) })
+	h.MustNS(t, port, "", "POST", "sys/cred/specs/"+ddSpec, h.JSON(t, map[string]any{
+		"type":   "api_key",
+		"source": ddSource,
+		"config": map[string]string{"secret_spec": kvSpec, "secret_field": "api_key", "secret_cache_ttl": "5m"},
+	}))
+	t.Cleanup(func() { h.NSRequestBestEffort(port, "", "DELETE", "sys/cred/specs/"+ddSpec) })
+	h.WriteRoleInNS(t, port, "", ddReader, h.Role{Policies: ddPolicies, CredSpec: ddSpec, ProviderPath: ddA + "/"})
+	t.Cleanup(func() { h.NSRequestBestEffort(port, "", "DELETE", "sys/roles/"+ddReader) })
+
+	// The governed agent holds the role through a static group; the client
+	// through the third mount, unclaimed, through a virtual group.
+	cli(t, port, "identity", "group", "create", agents, "-json", h.JSON(t, map[string]any{
+		"type": "static", "description": "Agents presenting their entity to Vault",
+		"members": []string{agent}, "roles": []string{reader, ddReader},
+	}))
+	h.WriteGroupInNS(t, port, "", virtual, h.Group{Roles: []string{reader, ddReader}, Rules: []map[string][]string{
+		{"mount": {h.AuthMountPath(jwtC)}, "sub": {agentID}},
+	}})
+
+	// Ada, a billing lead and an admin of the root namespace's entities,
+	// sponsors the agent: it is governed.
+	idp := h.StartHumanIdP(t, map[string]map[string]any{ada: {"roles": []any{"Warden.Admin", "Billing.Lead"}}})
+	h.EnableAuth(t, port, "", oidc, "oidc", h.OIDCMountConfig(idp, nil))
+	h.WriteGroupInNS(t, port, "", leads, h.Group{Rules: []map[string][]string{
+		{"mount": {h.AuthMountPath(oidc)}, "kind": {"human"}, "roles": {"Billing.Lead"}},
+	}})
+	deleteEntityAtEnd(t, port, agent)
+	policy := admin + "-policy"
+	h.MustNS(t, port, "", "POST", "sys/policies/cbp/"+policy, h.JSON(t, map[string]any{"policy": "" +
+		"path \"sys/identity/entity\" {\n  capabilities = [\"list\", \"sudo\"]\n}\n" +
+		"path \"sys/identity/entity/*\" {\n  capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\", \"sudo\"]\n}\n"}))
+	t.Cleanup(func() { h.NSRequestBestEffort(port, "", "DELETE", "sys/policies/cbp/"+policy) })
+	h.GrantRole(t, port, oidc, admin, h.Role{Policies: []string{policy}}, h.Rule{"kind": {"human"}, "roles": {"Warden.Admin"}})
+	t.Cleanup(func() { h.RevokeRoleBestEffort(port, oidc, admin) })
+	adaHome := t.TempDir()
+	if run := h.OIDCLogin(t, port, adaHome, ada, nil, nil, "-path="+oidc, "-role="+admin); run.Err != nil {
+		t.Fatalf("warden login as Ada: %v\n%s", run.Err, run.Stderr)
+	}
+	if stdout, stderr, err := h.SessionCLI(t, port, adaHome, nil,
+		"identity", "entity", "sponsor", "propose", agent, "-group", leads, "-group-namespace", "/"); err != nil {
+		t.Fatalf("as Ada, sponsor %s: %v\nstdout: %s\nstderr: %s", agent, err, stdout, stderr)
+	}
+
+	lookupSelf := func(jwt, provider string) (int, []byte) {
+		t.Helper()
+		return h.DoRequest(t, "GET",
+			fmt.Sprintf("%s/v1/%s/role/%s/gateway/v1/auth/token/lookup-self", h.NodeURL(port), provider, reader),
+			map[string]string{"Authorization": "Bearer " + jwt}, "")
+	}
+	agentJWT := h.GetDefaultJWT(t)
+	pipeJWT := h.GetJWT(t, pipeID, "pipeline-secret")
+
+	// Both native identities: Vault admitted the entity's subject, with the
+	// role qualified by the namespace, and recorded the same for both.
+	for who, call := range map[string]struct{ jwt, provider string }{
+		"the agent's CI identity":       {agentJWT, vaultA},
+		"the agent's pipeline identity": {pipeJWT, vaultB},
+	} {
+		status, body := lookupSelf(call.jwt, call.provider)
+		expectStatus(t, who, status, body, http.StatusOK)
+		if got := h.JSONString(t, body, "data.meta.agent_subject"); got != subject {
+			t.Errorf("%s: Vault read sub %q, want the entity's %q", who, got, subject)
+		}
+		if got := h.JSONString(t, body, "data.meta.agent_role"); got != "root/"+reader {
+			t.Errorf("%s: Vault read warden_role %q, want %q", who, got, "root/"+reader)
+		}
+	}
+
+	// The same client through a mount no entity claims holds the role, and is
+	// refused before any assertion is minted, rather than presented as itself.
+	status, body := lookupSelf(agentJWT, vaultC)
+	expectStatus(t, "the unclaimed identity", status, body, http.StatusForbidden)
+	want := "subject_token_source=warden_entity: native identity (" + h.AuthMountPath(jwtC) + ", " + agentID + ") is not claimed by an entity"
+	if !strings.Contains(h.ErrorText(body), want) {
+		t.Fatalf("the unclaimed identity: %s, want it to say %q", body, want)
+	}
+
+	// The chained leg: both native identities are served the key that lives
+	// only at the entity's own Vault path, read as the entity.
+	datadog := func(jwt, provider string) (int, []byte) {
+		t.Helper()
+		return h.DoRequest(t, "GET",
+			fmt.Sprintf("%s/v1/%s/role/%s/gateway/api/v1/validate", h.NodeURL(port), provider, ddReader),
+			map[string]string{"Authorization": "Bearer " + jwt}, "")
+	}
+	for who, call := range map[string]struct{ jwt, provider string }{
+		"the agent's CI identity":       {agentJWT, ddA},
+		"the agent's pipeline identity": {pipeJWT, ddB},
+	} {
+		before := len(upstream.Requests())
+		status, body := datadog(call.jwt, call.provider)
+		expectStatus(t, who+" through the chain", status, body, http.StatusOK)
+		reqs := upstream.Requests()
+		if len(reqs) != before+1 {
+			t.Fatalf("%s: the upstream saw %d requests, want 1", who, len(reqs)-before)
+		}
+		if got := reqs[len(reqs)-1].Header.Get("DD-API-KEY"); got != entityKey {
+			t.Errorf("%s: the upstream got DD-API-KEY %q, want the entity's %q", who, got, entityKey)
+		}
+	}
+
+	// The unclaimed identity is refused the chained spec as it is the direct
+	// one: a 403 naming its native identity, and nothing reaches the upstream.
+	before := len(upstream.Requests())
+	status, body = datadog(agentJWT, ddC)
+	expectStatus(t, "the unclaimed identity through the chain", status, body, http.StatusForbidden)
+	if !strings.Contains(h.ErrorText(body), want) {
+		t.Fatalf("the unclaimed identity through the chain: %s, want it to say %q", body, want)
+	}
+	if n := len(upstream.Requests()) - before; n != 0 {
+		t.Fatalf("the unclaimed identity through the chain: the upstream saw %d requests, want none", n)
+	}
+
+	// Suspension refuses the agent's next request.
+	cli(t, port, "identity", "entity", "state", agent, "suspended")
+	status, body = lookupSelf(agentJWT, vaultA)
+	expectStatus(t, "the suspended agent", status, body, http.StatusForbidden)
+	cli(t, port, "identity", "entity", "state", agent, "active")
+}
