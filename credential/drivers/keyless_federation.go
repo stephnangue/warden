@@ -34,7 +34,7 @@ func federatedSpecDelta(spec credential.Config, inputs map[string]string) map[st
 // assertion, which is what the rendered trust applies to. A spec forwarding the
 // agent's own token is trusted against that token's issuer, unknown here.
 func usesWardenIdentity(spec credential.Config) bool {
-	return spec.Get(credential.ConfigSubjectTokenSource) == credential.SourceWardenIdentity
+	return credential.MintsWardenAssertion(spec.Get(credential.ConfigSubjectTokenSource))
 }
 
 // agentIdentityNote is rendered when some specs forward the agent's own token.
@@ -400,7 +400,7 @@ func (f *AzureDriverFactory) KeylessPrerequisites(keyless credential.Config, spe
 		// client assertion — while its subject is the user's token, so its app needs
 		// the same federated credential.
 		oboActor := s.Config.Get("mint_method") == azureMintMethodOnBehalfOf &&
-			s.Config.Get(credential.ConfigActorTokenSource) == credential.SourceWardenIdentity
+			credential.MintsWardenAssertion(s.Config.Get(credential.ConfigActorTokenSource))
 		if id := s.Config.Get("client_id"); id != "" && (usesWardenIdentity(s.Config) || oboActor) {
 			apps[id] = true
 		}

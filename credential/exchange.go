@@ -102,6 +102,26 @@ var (
 	actorTokenSources   = []string{SourceAgentIdentity, SourceWardenIdentity, SourceNone}
 )
 
+// MintsWardenAssertion reports whether a *_token_source value has Warden mint and
+// sign an assertion of the caller for that slot.
+//
+// Every rule that turns on "Warden signs this slot" asks here rather than comparing
+// a value: the audience requirement, the assertion_* keys, the chaining allow-list,
+// the keyless trust, the mint dispatch. A minting source added later then inherits
+// all of them at once, instead of silently escaping the ones nobody remembered to
+// extend. TestSourceWardenIdentity_ComparedOnlyThroughThePredicate holds the line.
+func MintsWardenAssertion(src string) bool {
+	return src == SourceWardenIdentity
+}
+
+// SpecMintsWardenAssertion reports whether either slot of a spec's config has
+// Warden mint an assertion. At most one can (an actor requires a user_identity
+// subject), so the assertion_* keys apply to whichever it is.
+func SpecMintsWardenAssertion(config Config) bool {
+	return MintsWardenAssertion(config.Get(ConfigSubjectTokenSource)) ||
+		MintsWardenAssertion(config.Get(ConfigActorTokenSource))
+}
+
 // ConfigAssertionAudience is the spec-config key naming the `aud` of a
 // warden_identity assertion — the upstream the assertion is minted for. Required
 // and non-empty whenever subject_token_source=warden_identity: it is the control
@@ -494,8 +514,7 @@ func ValidateExchangeSpecConfig(config Config) error {
 	// the subject or the actor. Since actor≠none requires subject=user_identity
 	// (enforced below), at most one slot is ever warden_identity, so these keys apply
 	// unambiguously to whichever it is.
-	mintsAssertion := config.Get(ConfigSubjectTokenSource) == SourceWardenIdentity ||
-		config.Get(ConfigActorTokenSource) == SourceWardenIdentity
+	mintsAssertion := SpecMintsWardenAssertion(config)
 	// A Warden-minted subject must declare the audience it is minted for — an
 	// empty/absent aud is replayable at any upstream whose trust policy does not pin
 	// aud. That check is source-aware (some source types derive the audience from

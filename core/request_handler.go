@@ -2003,8 +2003,8 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		userTE = req.User.TokenEntry
 	}
 
-	switch spec.Config.Get(credential.ConfigSubjectTokenSource) {
-	case credential.SourceAgentIdentity:
+	switch src := spec.Config.Get(credential.ConfigSubjectTokenSource); {
+	case src == credential.SourceAgentIdentity:
 		// Reuse the JWT Warden verified during inbound authentication. It lives
 		// in ClientToken only for transparent JWT auth; an opaque session token
 		// or a cert-authenticated request has no reusable JWT and fails closed.
@@ -2021,7 +2021,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 			return nil, fmt.Errorf("spec %q: %w", specName, err)
 		}
 		inputs.AgentClaims = agentClaims
-	case credential.SourceUserIdentity:
+	case src == credential.SourceUserIdentity:
 		// Forward the secondary (user) principal's own validated credential as the
 		// RFC 8693 subject_token — the standard "agent acting for a user" delegation.
 		// The credential was validated by the user's auth method (PR1), so Warden
@@ -2031,7 +2031,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 			return nil, fmt.Errorf("spec %q requires subject_token_source=user_identity: %w", specName, credential.ErrUserRequired)
 		}
 		inputs.SubjectToken = req.User.RawToken
-	case credential.SourceWardenIdentity:
+	case credential.MintsWardenAssertion(src):
 		// Warden mints a fresh, short-lived assertion of the caller's resolved
 		// identity as the subject (Workload Identity Federation) — Warden signed it.
 		// Minted lazily on a cache miss; fails closed if the issuer is
@@ -2059,8 +2059,8 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		return nil, fmt.Errorf("spec %q has an unsupported %s %q", specName, credential.ConfigSubjectTokenSource, spec.Config.Get(credential.ConfigSubjectTokenSource))
 	}
 
-	switch spec.Config.Get(credential.ConfigActorTokenSource) {
-	case credential.SourceAgentIdentity:
+	switch src := spec.Config.Get(credential.ConfigActorTokenSource); {
+	case src == credential.SourceAgentIdentity:
 		// The agent's verified inbound JWT acts as the actor (agent-acting-for-user).
 		// Requires JWT auth; spec validation forbids subject_token_source=agent_identity
 		// alongside it, so ClientToken is free to serve as the actor.
@@ -2071,7 +2071,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		if inputs.ActorTokenType == "" {
 			inputs.ActorTokenType = credential.TokenTypeJWT
 		}
-	case credential.SourceWardenIdentity:
+	case credential.MintsWardenAssertion(src):
 		// Delegation: Warden signs the agent as the RFC 8693 actor (act), acting on
 		// behalf of the user carried in the user_identity subject (spec validation
 		// requires subject_token_source=user_identity here). Minted lazily on a cache
@@ -2087,7 +2087,7 @@ func (c *Core) resolveExchangeInputs(ctx context.Context, req *logical.Request, 
 		inputs.ResolveActorToken = setup.resolve
 		inputs.UserClaims = setup.userClaims
 		inputs.AgentClaims = setup.agentClaims
-	case credential.SourceNone, "":
+	case src == credential.SourceNone, src == "":
 		// No actor requested: drop any default type so Validate's pairing holds.
 		inputs.ActorTokenType = ""
 	default:

@@ -399,9 +399,9 @@ func IDJAGSpecError(specCfg, sourceCfg credential.Config) error {
 // assertion the IdP issued, so the spec may not have Warden sign one, and its type is
 // one of idJAGSubjectTokenTypes, named by short name or URN; id_token when none is named.
 func idJAGSubjectTokenType(specCfg credential.Config) (string, error) {
-	if specCfg.Get(credential.ConfigSubjectTokenSource) == credential.SourceWardenIdentity {
+	if src := specCfg.Get(credential.ConfigSubjectTokenSource); credential.MintsWardenAssertion(src) {
 		return "", fmt.Errorf("%s=%s cannot be used with grant=id_jag: the subject of an ID-JAG request is an identity assertion the IdP issued, not one Warden signs; use %s or %s",
-			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity, credential.SourceUserIdentity, credential.SourceAgentIdentity)
+			credential.ConfigSubjectTokenSource, src, credential.SourceUserIdentity, credential.SourceAgentIdentity)
 	}
 	name := specCfg.Get(credential.ConfigSubjectTokenType)
 	if name == "" {
