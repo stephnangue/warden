@@ -161,9 +161,9 @@ func validateAnthropicSpec(config credential.Config) error {
 	// which is the issuer the federation rules trust. A spec that opts out of
 	// exchange has nothing to mint with, and one presenting another identity would
 	// be refused by every rule registered for Warden's issuer.
-	switch src := config.Get(credential.ConfigSubjectTokenSource); src {
-	case credential.SourceWardenIdentity:
-	case "", credential.SourceNone:
+	switch src := config.Get(credential.ConfigSubjectTokenSource); {
+	case credential.MintsWardenAssertion(src):
+	case src == "", src == credential.SourceNone:
 		return fmt.Errorf("'%s' is required for an anthropic source: set it to '%s'",
 			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity)
 	default:
@@ -221,9 +221,9 @@ func validateOpenAISpec(config credential.Config) error {
 	// which is the issuer the identity provider trusts. A spec that opts out of
 	// exchange has nothing to mint with, and one presenting another identity would
 	// be refused by the identity provider registered for Warden's issuer.
-	switch src := config.Get(credential.ConfigSubjectTokenSource); src {
-	case credential.SourceWardenIdentity:
-	case "", credential.SourceNone:
+	switch src := config.Get(credential.ConfigSubjectTokenSource); {
+	case credential.MintsWardenAssertion(src):
+	case src == "", src == credential.SourceNone:
 		return fmt.Errorf("'%s' is required for an openai source: set it to '%s'",
 			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity)
 	default:

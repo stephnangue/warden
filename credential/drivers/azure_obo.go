@@ -73,7 +73,7 @@ func AzureOnBehalfOfSpecError(specCfg, sourceCfg credential.Config) error {
 	if credential.GetString(sourceCfg, "auth_method", azureAuthMethodStatic) == azureAuthMethodOIDCFederation {
 		// A keyless spec may name any app: the Warden assertion is checked against
 		// that app's own federated credential.
-		if actor != credential.SourceWardenIdentity {
+		if !credential.MintsWardenAssertion(actor) {
 			return fmt.Errorf("a keyless on_behalf_of spec authenticates the app with a Warden assertion checked against its federated credential: set %s=%s",
 				credential.ConfigActorTokenSource, credential.SourceWardenIdentity)
 		}

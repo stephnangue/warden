@@ -86,7 +86,7 @@ func GCPDelegatedAccessSpecError(specCfg, sourceCfg credential.Config) error {
 		return fmt.Errorf("mint_method=%s has Google sign with the delegating account's own key and holds none: the source must use auth_method=%s",
 			types.GCPMintMethodDelegated, gcpAuthMethodOIDCFederation)
 	}
-	if specCfg.Get(credential.ConfigSubjectTokenSource) != credential.SourceWardenIdentity {
+	if !credential.MintsWardenAssertion(specCfg.Get(credential.ConfigSubjectTokenSource)) {
 		return fmt.Errorf("mint_method=%s acts as the verified user projected into Warden's assertion: set %s=%s",
 			types.GCPMintMethodDelegated, credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity)
 	}
