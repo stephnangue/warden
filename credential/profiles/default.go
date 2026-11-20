@@ -53,9 +53,11 @@ import (
 //   - sub: as above.
 //   - warden_namespace: the user level only.
 //   - warden_role: the agent level only: the role the agent runs under — the
-//     authorization context an upstream may bind; a role-less agent (a root token)
-//     renders it empty. A user runs under no role (it grants the request nothing),
-//     so the user level carries none.
+//     authorization context an upstream may bind — qualified by the namespace that
+//     granted it, "{namespaceID}/{role}" (AssertionIdentity.QualifiedRole), so it is
+//     a tenant boundary on its own; a role-less agent (a root token) renders it
+//     empty. A user runs under no role (it grants the request nothing), so the user
+//     level carries none.
 //   - warden_metadata: for the agent, its projected login metadata
 //     (assertion_metadata_claims); for the user, its projected claims
 //     (assertion_user_claims) WITHOUT sub, which would repeat the top-level sub.
@@ -162,7 +164,7 @@ func (p DefaultProfile) Claims(req credential.AssertionRequest) (map[string]any,
 // written to.
 func agentClaims(m map[string]any, agent credential.AssertionIdentity, metadata map[string]string) {
 	m["sub"] = agent.WardenSubject()
-	m["warden_role"] = agent.RoleName
+	m["warden_role"] = agent.QualifiedRole()
 	if len(metadata) > 0 {
 		m["warden_metadata"] = metadata
 	}

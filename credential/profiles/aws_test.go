@@ -35,7 +35,7 @@ func TestAWSProfile_Claims_FullyPopulated(t *testing.T) {
 		"jti": "a3d9f0c2-8b41-4e77-9f2a-1c6b5e0d4a88",
 		"https://aws.amazon.com/tags": map[string]any{
 			"principal_tags": map[string][]string{
-				"warden_role": {"orders-reader"},
+				"warden_role": {"ns-3f2a1b/orders-reader"},
 				"team":        {"payments"},
 				"env":         {"prod"},
 			},
@@ -117,6 +117,33 @@ func TestAWSProfile_Claims_RejectsInvalidTagValues(t *testing.T) {
 		_, err := AWSProfile{}.Claims(req)
 		assert.NoError(t, err, "value %q is a valid AWS tag value", ok)
 	}
+}
+
+// The role tag is the QUALIFIED role, so its namespace and separator count toward
+// AWS's 256-character limit: a role name that fits alone can fail qualified. The
+// root namespace qualifies by its ID like any other.
+func TestAWSProfile_Claims_QualifiedRoleTag(t *testing.T) {
+	req := fixedRequest()
+	qualifier := len("ns-3f2a1b/")
+
+	req.Identity.RoleName = strings.Repeat("r", 256-qualifier)
+	claims, err := AWSProfile{}.Claims(req)
+	require.NoError(t, err, "exactly 256 characters qualified is allowed")
+	tags := claims["https://aws.amazon.com/tags"].(map[string]any)["principal_tags"].(map[string][]string)
+	assert.Equal(t, []string{"ns-3f2a1b/" + req.Identity.RoleName}, tags["warden_role"])
+
+	req.Identity.RoleName = strings.Repeat("r", 257-qualifier)
+	claims, err = AWSProfile{}.Claims(req)
+	require.Error(t, err)
+	assert.Nil(t, claims)
+	assert.Contains(t, err.Error(), "257 characters exceeds AWS's limit of 256")
+
+	req = fixedRequest()
+	req.Identity.NamespaceID = "root"
+	claims, err = AWSProfile{}.Claims(req)
+	require.NoError(t, err)
+	tags = claims["https://aws.amazon.com/tags"].(map[string]any)["principal_tags"].(map[string][]string)
+	assert.Equal(t, []string{"root/orders-reader"}, tags["warden_role"])
 }
 
 // AWS documents the web identity subject as at most 255 characters. A composite sub

@@ -487,6 +487,8 @@ func TestRoleGrant_ProjectionReachesEveryConsumer(t *testing.T) {
 		{"identityFromTokenEntry (warden_role)", func(t *testing.T) {
 			id := identityFromTokenEntry(te)
 			assert.Equal(t, "deploy", id.RoleName)
+			assert.Equal(t, te.NamespaceID+"/deploy", id.QualifiedRole(),
+				"the role is asserted qualified by the namespace whose groups granted it")
 			assert.Equal(t, grantAccessor, id.MountAccessor)
 		}},
 		{"assertion cache identity", func(t *testing.T) {

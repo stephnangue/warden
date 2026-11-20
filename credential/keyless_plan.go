@@ -91,6 +91,10 @@ type TrustEnv struct {
 	// agents present, "wid:<namespace>:"; the mount and principal follow.
 	SubjectPrefix string
 
+	// NamespaceID qualifies the warden_role this namespace's agents assert,
+	// "<namespace ID>/<role>".
+	NamespaceID string
+
 	// NamespaceClaim is the warden_namespace value a delegation token carries for
 	// this namespace's users: the namespace path, or "root" for the root namespace.
 	// A user's sub is its raw id, so a verifier binds this beside it.

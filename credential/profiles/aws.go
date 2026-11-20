@@ -22,7 +22,8 @@ const (
 	awsSessionTagsClaim = "https://aws.amazon.com/tags"
 	awsPrincipalTagsKey = "principal_tags"
 
-	// awsRoleTagKey carries the Warden role the principal logged in under.
+	// awsRoleTagKey carries the Warden role the request was granted, qualified by
+	// its namespace: "{namespaceID}/{role}".
 	awsRoleTagKey = "warden_role"
 
 	awsMaxSessionTags   = 50
@@ -50,7 +51,9 @@ const (
 //
 //   - sub stays the composite "wid:{nsID}:{mountAccessor}:{principalID}", so a
 //     StringLike prefix on sub still pins a namespace and auth mount;
-//   - the role becomes the "warden_role" session tag, and each projected metadata
+//   - the role becomes the "warden_role" session tag, as "{nsID}/{role}" so a
+//     permission policy reading aws:PrincipalTag/warden_role cannot confuse two
+//     namespaces' roles of one name, and each projected metadata
 //     key becomes a session tag of the same name, so a trust policy conditions on
 //     each one independently (aws:RequestTag/<key>), in any order, and adding a key
 //     to a spec later breaks no existing condition. The tags then persist on the
@@ -147,11 +150,13 @@ func (AWSProfile) Claims(req credential.AssertionRequest) (map[string]any, error
 	}
 
 	tags := make(map[string][]string, len(req.Metadata)+1)
-	if req.Identity.RoleName != "" {
-		if err := validateAWSTagText(req.Identity.RoleName, awsMaxTagValueChars); err != nil {
-			return nil, fmt.Errorf("role %q is not a valid AWS session tag value: %w", req.Identity.RoleName, err)
+	// Validated as qualified, since that is the value AWS receives: the namespace
+	// and its separator count toward the tag's length.
+	if role := req.Identity.QualifiedRole(); role != "" {
+		if err := validateAWSTagText(role, awsMaxTagValueChars); err != nil {
+			return nil, fmt.Errorf("role %q is not a valid AWS session tag value: %w", role, err)
 		}
-		tags[awsRoleTagKey] = []string{req.Identity.RoleName}
+		tags[awsRoleTagKey] = []string{role}
 	}
 	for k, v := range req.Metadata {
 		// Keys were validated at spec-create; re-checked here because it is cheap

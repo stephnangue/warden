@@ -60,6 +60,20 @@ func VerifyAssertion(t *testing.T, leaderPort int, token string) map[string]any 
 	return claims
 }
 
+// AssertedRole is the warden_role an agent-level claim set carries for role:
+// "<namespace ID>/<role>". The namespace ID is read from the claims' own sub
+// ("wid:<namespace ID>:…"), so a suite asserts the qualification without knowing
+// which namespace it runs in.
+func AssertedRole(t *testing.T, claims map[string]any, role string) string {
+	t.Helper()
+	sub, _ := claims["sub"].(string)
+	parts := strings.SplitN(sub, ":", 3)
+	if len(parts) != 3 || parts[1] == "" {
+		t.Fatalf("assertion sub %q does not carry a namespace ID", sub)
+	}
+	return parts[1] + "/" + role
+}
+
 // DecodeJWTSegment decodes one base64url JWT segment.
 func DecodeJWTSegment(t *testing.T, segment string) []byte {
 	t.Helper()
