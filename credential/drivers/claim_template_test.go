@@ -110,6 +110,13 @@ func TestResolveSecretPath_AgentGuidanceMatchesTheFailure(t *testing.T) {
 		assert.Contains(t, err.Error(), "login",
 			"listing the claim is necessary but not sufficient — an absent one is skipped, not rejected")
 	})
+	t.Run("a missing entity_id blames the caller, not the spec", func(t *testing.T) {
+		_, err := resolveSecretPath("kv/agents/{{agent.entity_id}}", nil, map[string]string{"sub": "a"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not claimed by an entity")
+		assert.NotContains(t, err.Error(), "assertion_metadata_claims",
+			"entity_id never comes from metadata, so listing it there changes nothing")
+	})
 }
 
 // A path with no template must come back byte-identical whatever the claim maps

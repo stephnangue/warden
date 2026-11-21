@@ -89,6 +89,10 @@ func resolveClaimTemplate(raw string, userClaims, agentClaims map[string]string,
 				// unconditionally from the principal, so this is unreachable
 				// short of a construction bug — say that rather than blame config.
 				fix = "the agent's principal is always projected, so this indicates an internal error rather than a configuration one"
+			case claim == "entity_id":
+				// Written whenever the caller resolved to an entity, and never
+				// from metadata, so its absence is about the caller, not the spec.
+				fix = "the caller's native identity is not claimed by an entity, so it has no entity_id"
 			default:
 				// Projection ran without this claim. Listing it is necessary but
 				// may not be sufficient: an absent metadata key is skipped rather
