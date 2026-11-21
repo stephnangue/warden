@@ -3646,6 +3646,21 @@ func TestResolveExchangeInputs_ChainedReferencedSpec_CarriesCallerRole(t *testin
 		"the same role must resolve a stable identity, or the cache could never share")
 }
 
+// The caller core hands the mint pipeline carries the entity the request resolved,
+// the one dimension the manager keys on that no token id or subject reflects: a
+// native identity moved to another entity keeps both. An unclaimed caller carries
+// none, so its keys stay as they were.
+func TestCallerFor_CarriesTheEntity(t *testing.T) {
+	c, _ := exchangeResolveEnv(t)
+	req := requestWith("s.opaque-session", nil)
+
+	claimed := &logical.TokenEntry{ID: "tok", Entity: &logical.Entity{ID: "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b"}}
+	assert.Equal(t, "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b", c.callerFor(req, claimed, time.Hour, nil).EntityID)
+
+	unclaimed := &logical.TokenEntry{ID: "tok"}
+	assert.Empty(t, c.callerFor(req, unclaimed, time.Hour, nil).EntityID)
+}
+
 // shapeProfile is a registrable non-default profile for cache-fragment tests. It
 // emits a correct claim set so the issuer's guard passes and the test is only about
 // the cache key.

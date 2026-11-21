@@ -1833,6 +1833,40 @@ func TestManager_IssueCredential_PerUserCacheDimension(t *testing.T) {
 	assert.Equal(t, int32(3), factory.driver.mintCalls.Load(), "three distinct cache keys → three mints")
 }
 
+// TestManager_IssueCredential_EntityCacheDimension verifies the ":e:" cache
+// dimension. A native identity moved from entity A to entity B keeps its token id,
+// so without it B would be served what was minted as A — for a spec templated on
+// {{agent.entity_id}}, A's secret. The same entity hits cache, and a caller no
+// entity claims keys distinctly again.
+func TestManager_IssueCredential_EntityCacheDimension(t *testing.T) {
+	manager, configStore, factory := createTestManager(t)
+	defer manager.Stop()
+
+	configStore.AddSource(&CredSource{Name: "test-source", Type: SourceTypeLocal, Config: NewConfig(map[string]string{})})
+	configStore.AddSpec(&CredSpec{Name: "test-spec", Type: TypeVaultToken, Source: "test-source", Config: NewConfig(map[string]string{})})
+
+	ctx := createNamespaceContext()
+	const nativeTok = "one-native-identity"
+	asA := Caller{TokenID: nativeTok, TokenTTL: time.Hour, EntityID: "entity-a"}
+	asB := Caller{TokenID: nativeTok, TokenTTL: time.Hour, EntityID: "entity-b"}
+
+	credA1, err := manager.IssueCredential(ctx, asA, "test-spec", nil)
+	require.NoError(t, err)
+	credA2, err := manager.IssueCredential(ctx, asA, "test-spec", nil)
+	require.NoError(t, err)
+	assert.Equal(t, credA1.CredentialID, credA2.CredentialID, "the same entity should hit cache")
+
+	credB, err := manager.IssueCredential(ctx, asB, "test-spec", nil)
+	require.NoError(t, err)
+	assert.NotEqual(t, credA1.CredentialID, credB.CredentialID, "a moved identity must not reuse the previous entity's credential")
+
+	credUnclaimed, err := manager.IssueCredential(ctx, Caller{TokenID: nativeTok, TokenTTL: time.Hour}, "test-spec", nil)
+	require.NoError(t, err)
+	assert.NotEqual(t, credA1.CredentialID, credUnclaimed.CredentialID, "an unclaimed caller must not reuse an entity-scoped entry")
+
+	assert.Equal(t, int32(3), factory.driver.mintCalls.Load(), "three distinct cache keys → three mints")
+}
+
 // TestChainedSecretCacheKey_AgentClaimsDimension pins the invariant the templating
 // feature depends on: anything that can select which secret is fetched has to key
 // the entry that answers for it.
@@ -1879,6 +1913,30 @@ func TestChainedSecretCacheKey_AgentClaimsDimension(t *testing.T) {
 		assert.Equal(t, legacy, withNone,
 			"a spec not carrying agent claims must not have its cache key perturbed")
 	})
+}
+
+// A native identity moved from one entity to another keeps its token and its
+// subject, so only the entity tells the two apart: the chained entry is keyed on
+// it, with or without agent claims, and a caller no entity claims keeps the key
+// it had before entities keyed anything.
+func TestChainedSecretCacheKey_EntityDimension(t *testing.T) {
+	inputs := func(claims map[string]string) *ExchangeInputs {
+		return &ExchangeInputs{SubjectToken: "the.same.jwt", SubjectTokenType: TokenTypeJWT, AgentClaims: claims}
+	}
+	claims := map[string]string{"sub": "build-runner"}
+
+	asA := chainedSecretCacheKey("ns", "ref", testRefFP, Caller{TokenID: "t", EntityID: "entity-a"}, inputs(claims))
+	asB := chainedSecretCacheKey("ns", "ref", testRefFP, Caller{TokenID: "t", EntityID: "entity-b"}, inputs(claims))
+	require.NotEmpty(t, asA)
+	assert.NotEqual(t, asA, asB, "one native identity under two entities must not share an entry")
+
+	noClaimsA := chainedSecretCacheKey("ns", "ref", testRefFP, Caller{TokenID: "t", EntityID: "entity-a"}, inputs(nil))
+	noClaimsB := chainedSecretCacheKey("ns", "ref", testRefFP, Caller{TokenID: "t", EntityID: "entity-b"}, inputs(nil))
+	assert.NotEqual(t, noClaimsA, noClaimsB, "the entity keys the entry even with no agent claims")
+
+	unclaimed := chainedSecretCacheKey("ns", "ref", testRefFP, Caller{TokenID: "t"}, inputs(claims))
+	assert.Equal(t, "chainsecret:ns:ref:s:"+testRefFP+":"+inputs(claims).Fingerprint()+":a:"+claimsFingerprint(claims), unclaimed,
+		"a caller no entity claims keeps its key byte-identical")
 }
 
 // The agent and user dimensions are independent: a per-user chained fetch under two

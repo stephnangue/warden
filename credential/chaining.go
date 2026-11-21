@@ -72,6 +72,11 @@ type Caller struct {
 	TokenID string
 	// TokenTTL bounds a dynamic credential's cache/lease lifetime.
 	TokenTTL time.Duration
+	// EntityID is the entity of record the request resolved the caller to, or ""
+	// for a caller no entity claims. It keys every cached credential, because a
+	// native identity moved to another entity keeps its token id, and a credential
+	// fetched as one entity must never answer for another.
+	EntityID string
 	// ResolveInputs builds ExchangeInputs for an arbitrary spec name as this caller
 	// (a nil result means the spec does not request exchange). Set only by core; it
 	// is nil on non-request code paths, in which case a chained secret-spec that
