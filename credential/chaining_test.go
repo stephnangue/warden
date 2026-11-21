@@ -650,6 +650,46 @@ func TestChaining_RefusedInputsNeverReachSharedCache(t *testing.T) {
 	assert.Equal(t, int32(1), env.exchangeDriver.mintCalls.Load(), "session C was served the entry session A cached")
 }
 
+// TestChaining_EntitySharedAcrossNativeIdentities: a referenced spec minted as the
+// caller's entity resolves the same inputs whichever native identity the agent
+// presented — core heads the identity with the entity's subject and templates the
+// entity alone — so two native identities of one agent share one fetch. A second
+// entity, with the same claims shape, does not share it.
+func TestChaining_EntitySharedAcrossNativeIdentities(t *testing.T) {
+	env := newChainingEnv(t)
+	env.store.AddSpec(&CredSpec{Name: "entity-secret", Type: TypeVaultToken, Source: "exchangesource", Config: NewConfig(map[string]string{})})
+	env.store.AddSpec(&CredSpec{Name: "consumer", Type: TypeVaultToken, Source: "consumersource",
+		Config: NewConfig(map[string]string{ConfigSecretSpec: "entity-secret", ConfigSecretCacheTTL: "30m"})})
+
+	asEntity := func(tokenID, entityID string) Caller {
+		return Caller{
+			TokenID:  tokenID,
+			TokenTTL: time.Hour,
+			EntityID: entityID,
+			ResolveInputs: func(_ context.Context, _ string) (*ExchangeInputs, error) {
+				return &ExchangeInputs{
+					SubjectCacheIdentity: "wfe:k3Rb9Q:" + entityID + "\x00kv.example.com\x00role=billing",
+					ResolveSubjectToken:  func(_ context.Context) (string, error) { return "assertion", nil },
+					AgentClaims:          map[string]string{"entity_id": entityID},
+				}, nil
+			},
+		}
+	}
+
+	ctx := createNamespaceContext()
+	_, err := env.manager.IssueCredential(ctx, asEntity("ci-token", "entity-a"), "consumer", nil)
+	require.NoError(t, err)
+	env.manager.secretCache.Wait()
+	_, err = env.manager.IssueCredential(ctx, asEntity("k8s-token", "entity-a"), "consumer", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), env.exchangeDriver.mintCalls.Load(),
+		"two native identities of one entity are served one fetch")
+
+	_, err = env.manager.IssueCredential(ctx, asEntity("other-token", "entity-b"), "consumer", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), env.exchangeDriver.mintCalls.Load(), "another entity fetches its own")
+}
+
 // TestChaining_RequiresCallerContext: a nil ResolveInputs (non-request path) fails
 // closed rather than minting the referenced spec without a caller.
 func TestChaining_RequiresCallerContext(t *testing.T) {

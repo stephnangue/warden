@@ -311,7 +311,7 @@ func TestDefaultProfile_ReservedUserPrincipal(t *testing.T) {
 	agent.Identity.PrincipalID = "wid:spiffe-like"
 	claims, err := p.Claims(agent)
 	require.NoError(t, err)
-	assert.Equal(t, agent.Identity.WardenSubject(), claims["sub"])
+	assert.Equal(t, agent.Identity.Subject(), claims["sub"])
 }
 
 // TestDefaultProfile_Claims_Pure pins the purity contract the issuer relies on:
@@ -412,7 +412,51 @@ func TestAssertionIdentity_WardenSubject(t *testing.T) {
 		NamespaceID:   "ns-1234",
 		MountAccessor: "auth_jwt_abc",
 	}
-	assert.Equal(t, "wid:ns-1234:auth_jwt_abc:spiffe://acme.internal/agent/refund-bot", id.WardenSubject())
+	assert.Equal(t, "wid:ns-1234:auth_jwt_abc:spiffe://acme.internal/agent/refund-bot", id.Subject())
+
+	// Naming an entity, the subject is the entity's alone: the mount and the
+	// principal it authenticated through do not appear.
+	id.EntityID = "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b"
+	assert.Equal(t, "wfe:ns-1234:7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b", id.Subject())
+}
+
+// Both agent subject prefixes are reserved, and the refusal names the one found.
+func TestReservedPrincipalError(t *testing.T) {
+	for principal, prefix := range map[string]string{
+		"wid:ns-1234:auth_jwt_abc:bot": "wid:",
+		"wfe:ns-1234:7c1e2f4a":         "wfe:",
+	} {
+		err := credential.ReservedPrincipalError(principal)
+		require.ErrorIs(t, err, credential.ErrReservedPrincipal, principal)
+		assert.Contains(t, err.Error(), `"`+prefix+`"`)
+		assert.True(t, credential.HasReservedSubjectPrefix(principal))
+	}
+	for _, principal := range []string{"alice@example.com", "WFE:ns:x", "repo:corp/x:ref:refs/heads/main"} {
+		assert.NoError(t, credential.ReservedPrincipalError(principal), principal)
+		assert.False(t, credential.HasReservedSubjectPrefix(principal), principal)
+	}
+}
+
+// Under warden_entity the default profile names the entity at the agent's level,
+// with the namespace-qualified role and no metadata, and in a delegation the
+// entity is the actor.
+func TestDefaultProfile_Claims_Entity(t *testing.T) {
+	agentOnly := fixedRequest()
+	agentOnly.Identity.EntityID = "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b"
+	agentOnly.Metadata = nil
+	claims, err := Default().Claims(agentOnly)
+	require.NoError(t, err)
+	assert.Equal(t, "wfe:ns-3f2a1b:7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b", claims["sub"])
+	assert.Equal(t, "ns-3f2a1b/orders-reader", claims["warden_role"])
+	assert.NotContains(t, claims, "warden_metadata")
+
+	delegated := delegationRequest()
+	delegated.Identity.EntityID = "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b"
+	claims, err = Default().Claims(delegated)
+	require.NoError(t, err)
+	act := claims["act"].(map[string]any)
+	assert.Equal(t, "wfe:ns-3f2a1b:7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b", act["sub"])
+	assert.NotEqual(t, act["sub"], claims["sub"], "the user stays the subject")
 }
 
 func TestNamespaceClaim(t *testing.T) {

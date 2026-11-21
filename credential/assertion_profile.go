@@ -89,6 +89,7 @@ var reservedAssertionProfileNames = map[string]struct{}{
 	SourceAgentIdentity:  {},
 	SourceUserIdentity:   {},
 	SourceWardenIdentity: {},
+	SourceWardenEntity:   {},
 	SourceNone:           {},
 
 	// Anything that looks like a typ / token-type value. typ IS profile-controlled,
@@ -122,7 +123,7 @@ func AssertionProfileName(config Config) string {
 // does not import logical (which imports credential).
 type AssertionIdentity struct {
 	// PrincipalID is the raw principal — never the composite subject. It can carry
-	// delimiters (a SPIFFE ID holds colons), which is why WardenSubject puts it last.
+	// delimiters (a SPIFFE ID holds colons), which is why Subject puts it last.
 	PrincipalID string
 	// RoleName is the auth role the principal logged in under. It CAN be empty: a
 	// root token carries no role, so a profile must define what it renders rather
@@ -135,6 +136,10 @@ type AssertionIdentity struct {
 	NamespacePath string
 	// MountAccessor identifies the auth mount, Warden-generated and delimiter-free.
 	MountAccessor string
+	// EntityID is the entity of record the assertion names, set only when the
+	// slot is warden_entity; Subject then names the entity instead of the native
+	// identity. Warden-generated and delimiter-free.
+	EntityID string
 	// Actors is the verified RFC 8693 "act" chain the principal's own token carried
 	// at login, outermost (current) actor first; nil when it carried none. A fresh
 	// copy per request, but READ-ONLY to the profile all the same, since one request
@@ -152,25 +157,59 @@ type AssertionActor struct {
 	Issuer string
 }
 
-// WardenSubjectPrefix begins every agent subject WardenSubject builds. It is
-// reserved: a user principal carrying it is refused (ErrReservedPrincipal), so a
-// verifier binding agents by a "wid:<namespace>:" sub prefix never matches a user.
-const WardenSubjectPrefix = "wid:"
+// WardenSubjectPrefix begins every native-identity subject Subject builds, and
+// EntitySubjectPrefix every entity subject. Both are reserved: a user principal
+// carrying either is refused (ErrReservedPrincipal), so a verifier binding agents
+// by a "wid:<namespace>:" or "wfe:<namespace>:" sub prefix never matches a user.
+const (
+	WardenSubjectPrefix = "wid:"
+	EntitySubjectPrefix = "wfe:"
+)
 
-// HasReservedSubjectPrefix reports whether principal begins with
-// WardenSubjectPrefix. The match is case-sensitive, like the verifier bindings it
+// reservedSubjectPrefixes are the subject prefixes that name agents.
+var reservedSubjectPrefixes = []string{WardenSubjectPrefix, EntitySubjectPrefix}
+
+// HasReservedSubjectPrefix reports whether principal begins with a reserved
+// subject prefix. The match is case-sensitive, like the verifier bindings it
 // protects: "WID:" cannot satisfy a "wid:" glob or startsWith.
 func HasReservedSubjectPrefix(principal string) bool {
-	return strings.HasPrefix(principal, WardenSubjectPrefix)
+	return reservedSubjectPrefix(principal) != ""
 }
 
-// WardenSubject builds the globally-unique subject of a minted assertion:
-// "wid:{namespaceID}:{mountAccessor}:{principalID}". namespaceID and the mount
-// accessor are Warden-generated and delimiter-free; the possibly-delimiter-bearing
-// principal (e.g. a SPIFFE ID) is the trailing segment, so the value is
-// unambiguous and an operator can bind a role to a mount with a `sub` StringLike
-// prefix "wid:{nsID}:{accessor}:*".
-func (id AssertionIdentity) WardenSubject() string {
+// ReservedPrincipalError returns ErrReservedPrincipal naming the reserved prefix
+// a user principal begins with, or nil when it begins with none.
+func ReservedPrincipalError(principal string) error {
+	if prefix := reservedSubjectPrefix(principal); prefix != "" {
+		return fmt.Errorf("%w %q", ErrReservedPrincipal, prefix)
+	}
+	return nil
+}
+
+// reservedSubjectPrefix returns the reserved prefix principal begins with, or "".
+func reservedSubjectPrefix(principal string) string {
+	for _, prefix := range reservedSubjectPrefixes {
+		if strings.HasPrefix(principal, prefix) {
+			return prefix
+		}
+	}
+	return ""
+}
+
+// Subject builds the globally-unique subject of a minted assertion.
+//
+// For a native identity it is "wid:{namespaceID}:{mountAccessor}:{principalID}".
+// namespaceID and the mount accessor are Warden-generated and delimiter-free; the
+// possibly-delimiter-bearing principal (e.g. a SPIFFE ID) is the trailing segment,
+// so the value is unambiguous and an operator can bind a role to a mount with a
+// `sub` StringLike prefix "wid:{nsID}:{accessor}:*".
+//
+// For an entity (EntityID set) it is "wfe:{namespaceID}:{entityID}": one subject
+// per agent, whichever native identity authenticated, stable across a rename of
+// the entity and changed only by deleting and recreating it.
+func (id AssertionIdentity) Subject() string {
+	if id.EntityID != "" {
+		return EntitySubjectPrefix + id.NamespaceID + ":" + id.EntityID
+	}
 	return fmt.Sprintf("%s%s:%s:%s", WardenSubjectPrefix, id.NamespaceID, id.MountAccessor, id.PrincipalID)
 }
 

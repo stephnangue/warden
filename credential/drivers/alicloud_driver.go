@@ -286,7 +286,7 @@ func (d *AlicloudDriver) federationConfig() (endpoint, providerARN string) {
 // MintCredential returns Alicloud credentials for the given spec.
 func (d *AlicloudDriver) MintCredential(ctx context.Context, spec *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
 	if d.getAuthMethod() == alicloudAuthMethodOIDCFederation {
-		return nil, nil, 0, "", fmt.Errorf("alicloud: a source with auth_method=%s mints only from a caller assertion: set subject_token_source (warden_identity or agent_identity) on the spec", alicloudAuthMethodOIDCFederation)
+		return nil, nil, 0, "", fmt.Errorf("alicloud: a source with auth_method=%s mints only from a caller assertion: set subject_token_source (warden_identity, warden_entity or agent_identity) on the spec", alicloudAuthMethodOIDCFederation)
 	}
 
 	mintMethod := credential.GetString(spec.Config, "mint_method", "")

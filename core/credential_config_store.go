@@ -522,9 +522,7 @@ func (s *CredentialConfigStore) applyCreateTimeAssertionProfile(ctx context.Cont
 	if spec.Config.Get(credential.ConfigAssertionProfile) != "" {
 		return nil
 	}
-	mintsAssertion := spec.Config.Get(credential.ConfigSubjectTokenSource) == credential.SourceWardenIdentity ||
-		spec.Config.Get(credential.ConfigActorTokenSource) == credential.SourceWardenIdentity
-	if !mintsAssertion {
+	if !credential.SpecMintsWardenAssertion(spec.Config) {
 		return nil
 	}
 	reg := s.core.assertionProfileRegistry
@@ -1786,12 +1784,11 @@ func (s *CredentialConfigStore) validateSpecWithSource(ctx context.Context, spec
 	// otherwise it is required. This check is source-aware, so it lives here rather
 	// than in the source-agnostic structural validator above. Re-checked at mint
 	// time (defence in depth).
-	mintsAssertion := spec.Config.Get(credential.ConfigSubjectTokenSource) == credential.SourceWardenIdentity ||
-		spec.Config.Get(credential.ConfigActorTokenSource) == credential.SourceWardenIdentity
+	mintsAssertion := credential.SpecMintsWardenAssertion(spec.Config)
 	if mintsAssertion && spec.Config.Get(credential.ConfigAssertionAudience) == "" {
 		if _, ok := drivers.DeriveAssertionAudience(source.Type, source.Config, spec.Config); !ok {
-			return logical.ErrBadRequestf("field '%s': is required when the subject or actor is '%s'",
-				credential.ConfigAssertionAudience, credential.SourceWardenIdentity)
+			return logical.ErrBadRequestf("field '%s': is required when the subject or actor is '%s' or '%s'",
+				credential.ConfigAssertionAudience, credential.SourceWardenIdentity, credential.SourceWardenEntity)
 		}
 	}
 
@@ -2437,8 +2434,9 @@ func secretSpecRefRules(ref string, refSpec *credential.CredSpec, refSource *cre
 	}
 
 	// The referenced secret-spec must be minted as the requesting caller with a
-	// SESSION-PINNED subject: warden_identity (Warden mints an assertion for the
-	// session's principal) or agent_identity (the caller's own inbound JWT). A
+	// subject PINNED TO THE CALLING IDENTITY: warden_identity or warden_entity
+	// (Warden mints an assertion of the caller's native identity or of its entity)
+	// or agent_identity (the caller's own inbound JWT). A
 	// user_identity subject is a per-request, per-user token that is NOT tied to the
 	// session token, so it cannot key a stable per-caller secret. (A plain chained
 	// consumer's outer cache key carries no exchange fingerprint — the exchange happens
@@ -2448,12 +2446,12 @@ func secretSpecRefRules(ref string, refSpec *credential.CredSpec, refSource *cre
 	// session-pinned requirement is on the REFERENCED spec regardless.) Reject anything else
 	// (including an unset/"none" subject, which would otherwise degrade to the
 	// non-exchange path and fail late with an opaque backend error).
-	switch refSpec.Config.Get(credential.ConfigSubjectTokenSource) {
-	case credential.SourceWardenIdentity, credential.SourceAgentIdentity:
+	switch src := refSpec.Config.Get(credential.ConfigSubjectTokenSource); {
+	case credential.MintsWardenAssertion(src), src == credential.SourceAgentIdentity:
 		// session-pinned — safe
 	default:
-		return logical.ErrBadRequestf("secret_spec %q must set subject_token_source=%s or %s (got %q); a chained secret must be minted as the session-pinned caller",
-			ref, credential.SourceWardenIdentity, credential.SourceAgentIdentity, refSpec.Config.Get(credential.ConfigSubjectTokenSource))
+		return logical.ErrBadRequestf("secret_spec %q must set subject_token_source=%s, %s or %s (got %q); a chained secret must be minted as the calling identity",
+			ref, credential.SourceWardenIdentity, credential.SourceWardenEntity, credential.SourceAgentIdentity, refSpec.Config.Get(credential.ConfigSubjectTokenSource))
 	}
 
 	return nil

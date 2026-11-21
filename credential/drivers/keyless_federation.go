@@ -34,7 +34,7 @@ func federatedSpecDelta(spec credential.Config, inputs map[string]string) map[st
 // assertion, which is what the rendered trust applies to. A spec forwarding the
 // agent's own token is trusted against that token's issuer, unknown here.
 func usesWardenIdentity(spec credential.Config) bool {
-	return spec.Get(credential.ConfigSubjectTokenSource) == credential.SourceWardenIdentity
+	return credential.MintsWardenAssertion(spec.Get(credential.ConfigSubjectTokenSource))
 }
 
 // agentIdentityNote is rendered when some specs forward the agent's own token.
@@ -63,33 +63,123 @@ func agentIdentityNote(specs []credential.PlannedSpec) []credential.Prerequisite
 // so the verifier must bind warden_namespace beside it; bind says how, for this
 // verifier. A rule that ORs the agent pattern with the namespace binding stays a
 // tenant boundary because no user sub can match the agent pattern: core refuses a
-// user principal that begins with credential.WardenSubjectPrefix.
+// user principal that begins with a reserved agent subject prefix (wid:, wfe:).
 func delegationNote(specs []credential.PlannedSpec, env credential.TrustEnv, bind string) []credential.Prerequisite {
 	var names []string
+	var delegating []credential.PlannedSpec
 	for _, s := range specs {
 		if usesWardenIdentity(s.Config) &&
 			credential.AssertionProfileName(s.Config) == credential.DefaultAssertionProfileName &&
 			len(credential.AssertionUserClaimKeys(s.Config)) > 0 {
 			names = append(names, s.Name)
+			delegating = append(delegating, s)
 		}
 	}
 	if len(names) == 0 {
 		return nil
 	}
+	native, entity := subjectFamilies(delegating)
 	return []credential.Prerequisite{{
 		Title:  "Delegation specs",
 		Where:  strings.Join(names, ", "),
 		Format: "text",
 		Body: "These specs set assertion_user_claims, so their assertions are RFC 8693 delegation tokens: sub is the user's own id " +
-			"and act.sub the agent's " + env.SubjectPrefix + "<mount_accessor>:<principal_id>. A user id is not tenant-qualified, " +
+			"and act.sub the agent's " + strings.Join(agentSubjectForms(env, native, entity), " or ") + ". A user id is not tenant-qualified, " +
 			"so bind warden_namespace = \"" + env.NamespaceClaim + "\" together with it: " + bind,
 	}}
 }
 
-// subjectPattern is the subject every agent of the namespace presents, up to
-// the mount and principal: "wid:<namespace>:*".
-func subjectPattern(env credential.TrustEnv) string {
-	return env.SubjectPrefix + "*"
+// kubernetesUsers names the users agents authenticate as under the "warden:"
+// username prefix, one quoted name per subject form.
+func kubernetesUsers(forms []string) string {
+	users := make([]string, len(forms))
+	for i, f := range forms {
+		users[i] = `"warden:` + f + `"`
+	}
+	return strings.Join(users, " or ")
+}
+
+// azureEntityNote adds, when some spec mints an entity subject, why that subject
+// suits Entra's exact match: it does not change with the native identity.
+func azureEntityNote(specs []credential.PlannedSpec) string {
+	if _, entity := subjectFamilies(specs); !entity {
+		return ""
+	}
+	return " A warden_entity spec's subject names the agent's entity, the same whichever native identity the agent " +
+		"presents, so one credential covers all of an agent's native identities."
+}
+
+// subjectFamilies reports which subject families specs mint: the native
+// identity's (warden_identity) and the entity's (warden_entity).
+func subjectFamilies(specs []credential.PlannedSpec) (native, entity bool) {
+	for _, s := range specs {
+		switch {
+		case credential.SpecAssertsEntity(s.Config):
+			entity = true
+		case credential.SpecMintsWardenAssertion(s.Config):
+			native = true
+		}
+	}
+	return native, entity
+}
+
+// subjectPrefixes are the starts of every subject the namespace's agents
+// present for the given families: "wid:<namespace>:" for a native identity,
+// "wfe:<namespace>:" for an entity. With neither, no spec mints yet and the
+// native prefix is rendered, as it was before the entity family existed.
+func subjectPrefixes(env credential.TrustEnv, native, entity bool) []string {
+	var out []string
+	if native || !entity {
+		out = append(out, env.SubjectPrefix)
+	}
+	if entity {
+		out = append(out, env.EntitySubjectPrefix)
+	}
+	return out
+}
+
+// subjectPatterns are subjectPrefixes as globs: "wid:<namespace>:*" and/or
+// "wfe:<namespace>:*".
+func subjectPatterns(env credential.TrustEnv, native, entity bool) []string {
+	prefixes := subjectPrefixes(env, native, entity)
+	for i, p := range prefixes {
+		prefixes[i] = p + "*"
+	}
+	return prefixes
+}
+
+// stringOrList renders one value as itself and several as a list, so a policy
+// trusting one family reads exactly as it did before the second existed.
+func stringOrList(values []string) any {
+	if len(values) == 1 {
+		return values[0]
+	}
+	return values
+}
+
+// startsWithAny is the expression accepting a subject that starts with any of
+// prefixes, in the CEL-like form GCP and Kubernetes take; quote is the string
+// quote the surrounding text leaves free.
+func startsWithAny(subject, quote string, prefixes []string) string {
+	clauses := make([]string, len(prefixes))
+	for i, p := range prefixes {
+		clauses[i] = subject + ".startsWith(" + quote + p + quote + ")"
+	}
+	return strings.Join(clauses, " || ")
+}
+
+// agentSubjectForms describes the subject one agent presents, for each family
+// minted: "wid:<namespace>:<mount_accessor>:<principal_id>" and/or
+// "wfe:<namespace>:<entity_id>".
+func agentSubjectForms(env credential.TrustEnv, native, entity bool) []string {
+	var forms []string
+	if native || !entity {
+		forms = append(forms, env.SubjectPrefix+"<mount_accessor>:<principal_id>")
+	}
+	if entity {
+		forms = append(forms, env.EntitySubjectPrefix+"<entity_id>")
+	}
+	return forms
 }
 
 func prettyJSON(v any) string {
@@ -159,8 +249,9 @@ func (f *AWSDriverFactory) KeylessPrerequisites(keyless credential.Config, specs
 		Body:   fmt.Sprintf("aws iam create-open-id-connect-provider \\\n  --url %s \\\n  --client-id-list %s", env.IssuerURL, aud),
 	}}
 
-	// One trust policy per role, allowing TagSession if any spec on it tags.
-	type roleTrust struct{ tags bool }
+	// One trust policy per role, allowing TagSession if any spec on it tags, and
+	// accepting the subject families the specs on it mint.
+	type roleTrust struct{ tags, native, entity bool }
 	roles := map[string]*roleTrust{}
 	for _, s := range specs {
 		arn := s.Config.Get("role_arn")
@@ -172,6 +263,11 @@ func (f *AWSDriverFactory) KeylessPrerequisites(keyless credential.Config, specs
 		}
 		if s.Config.Get(credential.ConfigAssertionProfile) == "aws" {
 			roles[arn].tags = true
+		}
+		if credential.SpecAssertsEntity(s.Config) {
+			roles[arn].entity = true
+		} else {
+			roles[arn].native = true
 		}
 	}
 	for _, arn := range slices.Sorted(func(yield func(string) bool) {
@@ -194,7 +290,7 @@ func (f *AWSDriverFactory) KeylessPrerequisites(keyless credential.Config, specs
 				"Action":    actions,
 				"Condition": map[string]any{
 					"StringEquals": map[string]any{host + ":aud": aud},
-					"StringLike":   map[string]any{host + ":sub": subjectPattern(env)},
+					"StringLike":   map[string]any{host + ":sub": stringOrList(subjectPatterns(env, roles[arn].native, roles[arn].entity))},
 				},
 			}},
 		}
@@ -203,12 +299,20 @@ func (f *AWSDriverFactory) KeylessPrerequisites(keyless credential.Config, specs
 		})
 	}
 
+	native, entity := subjectFamilies(specs)
+	var narrow []string
+	if native || !entity {
+		narrow = append(narrow, "to one auth mount with "+env.SubjectPrefix+"<mount_accessor>:*")
+	}
+	if entity {
+		narrow = append(narrow, "to one agent with "+env.EntitySubjectPrefix+"<entity_id>")
+	}
 	prereqs = append(prereqs, credential.Prerequisite{
 		Title:  "Notes",
 		Where:  "every role that trusts this provider",
 		Format: "text",
-		Body: "The subject pattern trusts every agent of the namespace. Narrow it to one auth mount with " +
-			env.SubjectPrefix + "<mount_accessor>:*, or add a condition on aws:RequestTag/warden_role, whose value is " +
+		Body: "The subject pattern trusts every agent of the namespace. Narrow it " + strings.Join(narrow, ", or ") +
+			", or add a condition on aws:RequestTag/warden_role, whose value is " +
 			env.NamespaceID + "/<role>.\n" +
 			"When any token carries session tags, every role trusting this provider must allow sts:TagSession, " +
 			"or AssumeRoleWithWebIdentity fails for it.",
@@ -291,12 +395,13 @@ func (f *VaultDriverFactory) KeylessPrerequisites(keyless credential.Config, spe
 	role := credential.GetString(keyless, "jwt_role", "<jwt_role>")
 	aud := credential.GetString(keyless, "audience", "<audience>")
 
+	native, entity := subjectFamilies(specs)
 	roleBody := prettyJSON(map[string]any{
 		"role_type":         "jwt",
 		"user_claim":        "sub",
 		"bound_audiences":   []string{aud},
 		"bound_claims_type": "glob",
-		"bound_claims":      map[string]string{"sub": subjectPattern(env)},
+		"bound_claims":      map[string]any{"sub": stringOrList(subjectPatterns(env, native, entity))},
 		"token_policies":    []string{"<the policies the AppRole role granted>"},
 	})
 	return append([]credential.Prerequisite{{
@@ -391,18 +496,36 @@ func (f *AzureDriverFactory) PlanKeylessSpec(specType string, spec, current, _ c
 func (f *AzureDriverFactory) KeylessPrerequisites(keyless credential.Config, specs []credential.PlannedSpec, env credential.TrustEnv) []credential.Prerequisite {
 	aud, _ := azureAssertionAudience(keyless)
 
-	apps := map[string]bool{}
+	// Per app, the subject families its specs mint: a federated credential names
+	// one exact subject, so each family needs its own.
+	type appTrust struct{ native, entity bool }
+	apps := map[string]*appTrust{}
 	if id := keyless.Get("client_id"); id != "" {
-		apps[id] = true
+		apps[id] = &appTrust{}
 	}
 	for _, s := range specs {
 		// An on_behalf_of spec presents Warden's assertion as the actor — the app's
 		// client assertion — while its subject is the user's token, so its app needs
 		// the same federated credential.
 		oboActor := s.Config.Get("mint_method") == azureMintMethodOnBehalfOf &&
-			s.Config.Get(credential.ConfigActorTokenSource) == credential.SourceWardenIdentity
-		if id := s.Config.Get("client_id"); id != "" && (usesWardenIdentity(s.Config) || oboActor) {
-			apps[id] = true
+			credential.MintsWardenAssertion(s.Config.Get(credential.ConfigActorTokenSource))
+		if !usesWardenIdentity(s.Config) && !oboActor {
+			continue
+		}
+		id := s.Config.Get("client_id")
+		if id == "" {
+			id = keyless.Get("client_id")
+		}
+		if id == "" {
+			continue
+		}
+		if apps[id] == nil {
+			apps[id] = &appTrust{}
+		}
+		if credential.SpecAssertsEntity(s.Config) {
+			apps[id].entity = true
+		} else {
+			apps[id].native = true
 		}
 	}
 
@@ -414,18 +537,30 @@ func (f *AzureDriverFactory) KeylessPrerequisites(keyless credential.Config, spe
 			}
 		}
 	}) {
-		body := prettyJSON(map[string]any{
-			"name":      "warden-<agent>",
-			"issuer":    env.IssuerURL,
-			"subject":   env.SubjectPrefix + "<mount_accessor>:<principal_id>",
-			"audiences": []string{aud},
-		})
-		prereqs = append(prereqs, credential.Prerequisite{
-			Title:  "Federated identity credential (one per agent)",
-			Where:  "app registration " + app,
-			Format: "json",
-			Body:   body + "\n\n# az ad app federated-credential create --id " + app + " --parameters credential.json",
-		})
+		trust := apps[app]
+		// Names are unique per app, so an agent's entity credential takes its own.
+		fic := func(title, name, subject string) credential.Prerequisite {
+			body := prettyJSON(map[string]any{
+				"name":      name,
+				"issuer":    env.IssuerURL,
+				"subject":   subject,
+				"audiences": []string{aud},
+			})
+			return credential.Prerequisite{
+				Title:  title,
+				Where:  "app registration " + app,
+				Format: "json",
+				Body:   body + "\n\n# az ad app federated-credential create --id " + app + " --parameters credential.json",
+			}
+		}
+		if trust.native || !trust.entity {
+			prereqs = append(prereqs, fic("Federated identity credential (one per agent)",
+				"warden-<agent>", env.SubjectPrefix+"<mount_accessor>:<principal_id>"))
+		}
+		if trust.entity {
+			prereqs = append(prereqs, fic("Federated identity credential (one per agent, for warden_entity specs)",
+				"warden-entity-<agent>", env.EntitySubjectPrefix+"<entity_id>"))
+		}
 	}
 	prereqs = append(prereqs, credential.Prerequisite{
 		Title:  "Notes",
@@ -433,7 +568,7 @@ func (f *AzureDriverFactory) KeylessPrerequisites(keyless credential.Config, spe
 		Format: "text",
 		Body: "Entra matches the subject exactly and supports no wildcard for a custom issuer, and an app holds at most " +
 			"20 federated credentials. Warden's subject is per agent, so each agent needs its own credential: " +
-			"spread agents across apps beyond 20.",
+			"spread agents across apps beyond 20." + azureEntityNote(specs),
 	})
 	return append(prereqs, agentIdentityNote(specs)...)
 }
@@ -501,6 +636,8 @@ func (f *GCPDriverFactory) PlanKeylessSpec(specType string, spec, current, _ cre
 func (f *GCPDriverFactory) KeylessPrerequisites(keyless credential.Config, specs []credential.PlannedSpec, env credential.TrustEnv) []credential.Prerequisite {
 	provider := keyless.Get("workload_identity_provider")
 	project, pool, prov := parseWIFProvider(provider)
+	native, entity := subjectFamilies(specs)
+	agentSubjects := startsWithAny("assertion.sub", "'", subjectPrefixes(env, native, entity))
 
 	prereqs := []credential.Prerequisite{{
 		Title:  "Workload identity pool provider",
@@ -510,8 +647,8 @@ func (f *GCPDriverFactory) KeylessPrerequisites(keyless credential.Config, specs
 			"  --project=%s --location=global --workload-identity-pool=%s \\\n"+
 			"  --issuer-uri=%q \\\n"+
 			"  --attribute-mapping=\"google.subject=assertion.sub,attribute.warden_role=assertion.warden_role\" \\\n"+
-			"  --attribute-condition=\"assertion.sub.startsWith('%s')\"",
-			prov, project, pool, env.IssuerURL, env.SubjectPrefix),
+			"  --attribute-condition=\"%s\"",
+			prov, project, pool, env.IssuerURL, agentSubjects),
 	}}
 
 	accounts := map[string]bool{}
@@ -542,14 +679,14 @@ func (f *GCPDriverFactory) KeylessPrerequisites(keyless credential.Config, specs
 		Where:  "the pool provider",
 		Format: "text",
 		Body: "google.subject may not exceed 127 bytes, and the token exchange fails for a longer one. Warden's subject " +
-			"is " + env.SubjectPrefix + "<mount_accessor>:<principal_id>; keep principal ids short enough.\n" +
+			"is " + strings.Join(agentSubjectForms(env, native, entity), " or ") + "; keep principal ids short enough.\n" +
 			"With no --allowed-audiences the provider accepts its own resource name, which is the audience Warden derives.\n" +
 			"attribute.warden_role is " + env.NamespaceID + "/<role>, so a principalSet on it names this namespace's role only.\n" +
 			"attribute.warden_role maps a claim the minimal assertion profile does not carry; drop that mapping for specs using it.",
 	})
 	prereqs = append(prereqs, agentIdentityNote(specs)...)
 	return append(prereqs, delegationNote(specs, env,
-		"widen the attribute condition to \"assertion.sub.startsWith('"+env.SubjectPrefix+"') || "+
+		"widen the attribute condition to \""+agentSubjects+" || "+
 			"assertion.warden_namespace == '"+env.NamespaceClaim+"'\" and map attribute.warden_namespace=assertion.warden_namespace.")...)
 }
 
@@ -601,6 +738,8 @@ func (f *KubernetesDriverFactory) PlanKeylessSpec(_ string, spec, _, _ credentia
 
 func (f *KubernetesDriverFactory) KeylessPrerequisites(keyless credential.Config, specs []credential.PlannedSpec, env credential.TrustEnv) []credential.Prerequisite {
 	aud := credential.GetString(keyless, "audience", "<audience>")
+	native, entity := subjectFamilies(specs)
+	agentSubjects := startsWithAny("claims.sub", `"`, subjectPrefixes(env, native, entity))
 	body := fmt.Sprintf(`apiVersion: apiserver.config.k8s.io/v1   # v1beta1 on Kubernetes 1.30 to 1.33
 kind: AuthenticationConfiguration
 jwt:
@@ -608,12 +747,12 @@ jwt:
     url: %s
     audiences: [%q]
   claimValidationRules:
-  - expression: 'claims.sub.startsWith("%s")'
+  - expression: '%s'
     message: sub must be a Warden workload identity of this namespace
   claimMappings:
     username:
       claim: sub
-      prefix: "warden:"`, env.IssuerURL, aud, env.SubjectPrefix)
+      prefix: "warden:"`, env.IssuerURL, aud, agentSubjects)
 	return append([]credential.Prerequisite{
 		{
 			Title:  "Structured authentication configuration",
@@ -626,10 +765,10 @@ jwt:
 			Where:  "the API server",
 			Format: "text",
 			Body: "--authentication-config cannot be combined with the --oidc-* flags. Agents authenticate as users " +
-				"\"warden:" + env.SubjectPrefix + "<mount_accessor>:<principal_id>\"; bind RBAC roles to those users.",
+				kubernetesUsers(agentSubjectForms(env, native, entity)) + "; bind RBAC roles to those users.",
 		},
 	}, append(agentIdentityNote(specs), delegationNote(specs, env,
-		"widen the claim validation rule to 'claims.sub.startsWith(\""+env.SubjectPrefix+"\") || "+
+		"widen the claim validation rule to '"+agentSubjects+" || "+
 			"claims.warden_namespace == \""+env.NamespaceClaim+"\"'. Delegated users then authenticate as \"warden:<user id>\".")...)...)
 }
 
@@ -679,6 +818,8 @@ func (f *AlicloudDriverFactory) KeylessPrerequisites(keyless credential.Config, 
 		}),
 	}}
 
+	// One trust policy, shared by the roles, accepting every family the specs mint.
+	native, entity := subjectFamilies(specs)
 	roles := map[string]bool{}
 	for _, s := range specs {
 		if arn := s.Config.Get("role_arn"); arn != "" && usesWardenIdentity(s.Config) {
@@ -693,7 +834,7 @@ func (f *AlicloudDriverFactory) KeylessPrerequisites(keyless credential.Config, 
 			"Action":    "sts:AssumeRole",
 			"Condition": map[string]any{
 				"StringEquals": map[string]any{"oidc:iss": []string{env.IssuerURL}, "oidc:aud": []string{aud}},
-				"StringLike":   map[string]any{"oidc:sub": []string{subjectPattern(env)}},
+				"StringLike":   map[string]any{"oidc:sub": subjectPatterns(env, native, entity)},
 			},
 		}},
 	})

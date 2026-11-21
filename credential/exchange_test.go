@@ -2,6 +2,12 @@ package credential
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -604,6 +610,42 @@ func TestValidateExchangeSpecConfig_AssertionUserClaimsGate(t *testing.T) {
 	}
 }
 
+// warden_entity is a minting source in either slot, so the assertion_* keys that
+// shape what Warden signs apply to it; login metadata does not, in either slot.
+func TestValidateExchangeSpecConfig_WardenEntity(t *testing.T) {
+	assert.True(t, MintsWardenAssertion(SourceWardenEntity))
+	assert.True(t, SpecMintsWardenAssertion(NewConfig(map[string]string{
+		ConfigSubjectTokenSource: SourceUserIdentity, ConfigActorTokenSource: SourceWardenEntity,
+	})))
+
+	for name, cfg := range map[string]map[string]string{
+		"subject": {ConfigSubjectTokenSource: SourceWardenEntity},
+		"actor":   {ConfigSubjectTokenSource: SourceUserIdentity, ConfigActorTokenSource: SourceWardenEntity},
+		"with assertion keys": {
+			ConfigSubjectTokenSource:  SourceWardenEntity,
+			ConfigAssertionUserClaims: "email",
+			ConfigAssertionProfile:    "minimal",
+			ConfigAssertionAlgorithm:  AssertionAlgES256,
+			ConfigAssertionResource:   "none",
+			ConfigAssertionTTL:        "2m",
+		},
+	} {
+		assert.NoError(t, ValidateExchangeSpecConfig(NewConfig(cfg)), name)
+	}
+
+	for name, cfg := range map[string]map[string]string{
+		"subject": {ConfigSubjectTokenSource: SourceWardenEntity, ConfigAssertionMetadataClaims: "team"},
+		"actor": {
+			ConfigSubjectTokenSource: SourceUserIdentity, ConfigActorTokenSource: SourceWardenEntity,
+			ConfigAssertionMetadataClaims: "team",
+		},
+	} {
+		err := ValidateExchangeSpecConfig(NewConfig(cfg))
+		require.Error(t, err, name)
+		assert.Contains(t, err.Error(), "is not available with 'warden_entity': the entity's claims are its subject and role", name)
+	}
+}
+
 func TestValidateExchangeSpecConfig_AssertionTTL(t *testing.T) {
 	wid := func(ttl string) Config {
 		return NewConfig(map[string]string{
@@ -665,4 +707,192 @@ func TestRequestedAssertionTTL(t *testing.T) {
 			RequestedAssertionTTL(NewConfig(map[string]string{ConfigAssertionTTL: bad})),
 			"%q must fall back to the issuer's lifetime", bad)
 	}
+}
+
+// TestSourceWardenIdentity_ComparedOnlyThroughThePredicate keeps every "does Warden
+// sign this slot?" decision behind MintsWardenAssertion. A comparison against the
+// value itself — an ==, a != or a switch case — would leave a later minting source
+// outside that one rule while every test of the source it was written for stays
+// green. It walks the non-test code of this package tree, of core and of the
+// providers, and allows the value only where it names a choice rather than tests
+// one; the raw string "warden_identity" may not be compared or switched on at all.
+//
+// Its limit: a value copied into a local first and compared there is invisible to
+// it, as to any syntactic check.
+func TestSourceWardenIdentity_ComparedOnlyThroughThePredicate(t *testing.T) {
+	var violations []string
+	files := 0
+	for _, root := range []string{".", filepath.Join("..", "core"), filepath.Join("..", "provider")} {
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return err
+			}
+			src, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			files++
+			found, err := wardenIdentityComparisons(path, src)
+			violations = append(violations, found...)
+			return err
+		})
+		require.NoError(t, err)
+	}
+	// A walk that found nothing would pass vacuously after a move.
+	require.Greater(t, files, 300, "the walk must reach the credential, core and provider trees")
+	assert.Empty(t, violations,
+		"compare a *_token_source value through MintsWardenAssertion, not against SourceWardenIdentity")
+}
+
+// The guard has to see the forms a comparison takes, a switch case among them,
+// and leave alone the forms that only name the value.
+func TestWardenIdentityComparisons_Fixture(t *testing.T) {
+	flagged, err := wardenIdentityComparisons("fixture.go", []byte(`package p
+
+func f(src string) bool {
+	switch src {
+	case credential.SourceWardenIdentity:
+		return true
+	}
+	if src != credential.SourceWardenIdentity {
+		return false
+	}
+	if slices.Contains([]string{credential.SourceWardenIdentity}, src) {
+		return true
+	}
+	switch src {
+	case "warden_identity":
+		return true
+	}
+	return src == credential.SourceWardenIdentity || src == "warden_identity"
+}`))
+	require.NoError(t, err)
+	assert.Len(t, flagged, 6, "%v", flagged)
+
+	allowed, err := wardenIdentityComparisons("fixture.go", []byte(`package p
+
+var sources = []string{credential.SourceWardenIdentity}
+var reserved = map[string]struct{}{credential.SourceWardenIdentity: {}}
+
+func g(delta map[string]string) error {
+	src := credential.SourceWardenIdentity
+	delta["k"] = credential.SourceWardenIdentity
+	return fmt.Errorf("set %s=%s", "k", credential.SourceWardenIdentity)
+}`))
+	require.NoError(t, err)
+	assert.Empty(t, allowed)
+}
+
+// wardenIdentityComparisons returns the position of every reference to
+// SourceWardenIdentity in src that is not one of the forms that name the value
+// without testing it: its declaration, an entry of a slice or map literal, the
+// right side of an assignment (a default), an argument of a message-building call,
+// and the body of MintsWardenAssertion itself.
+func wardenIdentityComparisons(filename string, src []byte) ([]string, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filename, src, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	var found []string
+	var stack []ast.Node
+	ast.Inspect(file, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		var ref ast.Node
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			if x.Sel.Name == "SourceWardenIdentity" {
+				ref = x
+			}
+		case *ast.Ident:
+			if x.Name == "SourceWardenIdentity" {
+				ref = x
+			}
+		case *ast.BasicLit:
+			// The raw value has no form that only names it in a comparison.
+			if x.Value == `"warden_identity"` {
+				switch stack[len(stack)-1].(type) {
+				case *ast.BinaryExpr, *ast.CaseClause:
+					found = append(found, fset.Position(x.Pos()).String())
+				}
+			}
+		}
+		if ref != nil {
+			if !namesWardenIdentity(ref, stack) {
+				found = append(found, fset.Position(ref.Pos()).String())
+			}
+			// A selector's own Sel is the same reference; do not count it twice.
+			return false
+		}
+		stack = append(stack, n)
+		return true
+	})
+	return found, nil
+}
+
+// namesWardenIdentity reports whether a reference, given its ancestors (innermost
+// last), only names the value.
+func namesWardenIdentity(ref ast.Node, stack []ast.Node) bool {
+	for _, a := range stack {
+		if fn, ok := a.(*ast.FuncDecl); ok && fn.Name.Name == "MintsWardenAssertion" {
+			return true
+		}
+	}
+	parent := stack[len(stack)-1]
+	switch p := parent.(type) {
+	case *ast.ValueSpec:
+		for _, name := range p.Names {
+			if name == ref {
+				return true
+			}
+		}
+	case *ast.CompositeLit:
+		// A list of the values, declared at package level; one built inside a
+		// function is a lookup a comparison can hide in.
+		return !inFunc(stack)
+	case *ast.KeyValueExpr:
+		if inFunc(stack) {
+			return false
+		}
+		_, inLiteral := stack[len(stack)-2].(*ast.CompositeLit)
+		return inLiteral
+	case *ast.AssignStmt:
+		for _, rhs := range p.Rhs {
+			if rhs == ref {
+				return true
+			}
+		}
+	case *ast.CallExpr:
+		var name string
+		switch fun := p.Fun.(type) {
+		case *ast.SelectorExpr:
+			name = fun.Sel.Name
+		case *ast.Ident:
+			name = fun.Name
+		}
+		switch name {
+		case "Errorf", "Sprintf", "ErrBadRequestf", "New":
+			for _, arg := range p.Args {
+				if arg == ref {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// inFunc reports whether the ancestors include a function body.
+func inFunc(stack []ast.Node) bool {
+	for _, a := range stack {
+		switch a.(type) {
+		case *ast.FuncDecl, *ast.FuncLit:
+			return true
+		}
+	}
+	return false
 }

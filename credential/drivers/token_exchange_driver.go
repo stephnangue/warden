@@ -399,9 +399,9 @@ func IDJAGSpecError(specCfg, sourceCfg credential.Config) error {
 // assertion the IdP issued, so the spec may not have Warden sign one, and its type is
 // one of idJAGSubjectTokenTypes, named by short name or URN; id_token when none is named.
 func idJAGSubjectTokenType(specCfg credential.Config) (string, error) {
-	if specCfg.Get(credential.ConfigSubjectTokenSource) == credential.SourceWardenIdentity {
+	if src := specCfg.Get(credential.ConfigSubjectTokenSource); credential.MintsWardenAssertion(src) {
 		return "", fmt.Errorf("%s=%s cannot be used with grant=id_jag: the subject of an ID-JAG request is an identity assertion the IdP issued, not one Warden signs; use %s or %s",
-			credential.ConfigSubjectTokenSource, credential.SourceWardenIdentity, credential.SourceUserIdentity, credential.SourceAgentIdentity)
+			credential.ConfigSubjectTokenSource, src, credential.SourceUserIdentity, credential.SourceAgentIdentity)
 	}
 	name := specCfg.Get(credential.ConfigSubjectTokenType)
 	if name == "" {
@@ -686,8 +686,8 @@ func (d *TokenExchangeDriver) Type() string {
 // means a spec without a subject source slipped past validation; never forward
 // without caller identity.
 func (d *TokenExchangeDriver) MintCredential(_ context.Context, _ *credential.CredSpec) (map[string]interface{}, map[string]interface{}, time.Duration, string, error) {
-	return nil, nil, 0, "", fmt.Errorf("token_exchange requires caller exchange inputs; set %s=%s|%s|%s on the spec",
-		credential.ConfigSubjectTokenSource, credential.SourceAgentIdentity, credential.SourceUserIdentity, credential.SourceWardenIdentity)
+	return nil, nil, 0, "", fmt.Errorf("token_exchange requires caller exchange inputs; set %s=%s|%s|%s|%s on the spec",
+		credential.ConfigSubjectTokenSource, credential.SourceAgentIdentity, credential.SourceUserIdentity, credential.SourceWardenIdentity, credential.SourceWardenEntity)
 }
 
 // MintCredentialWithExchange exchanges the caller-derived subject for a scoped

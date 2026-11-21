@@ -896,6 +896,10 @@ func TestGCPDelegatedAccessSpecError(t *testing.T) {
 
 	require.NoError(t, GCPDelegatedAccessSpecError(with(nil), federated))
 	require.NoError(t, GCPDelegatedAccessSpecError(with(map[string]string{"assertion_profile": "default"}), federated))
+	// Delegation never read the native identity: the pool binds the derived
+	// resource and the user's address, and the agent is only act. So the entity can
+	// act as well.
+	require.NoError(t, GCPDelegatedAccessSpecError(with(map[string]string{"subject_token_source": "warden_entity"}), federated))
 
 	tests := []struct {
 		name    string
