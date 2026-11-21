@@ -153,7 +153,7 @@ func TestDefaultProfile_VaultBindsDelegation(t *testing.T) {
 		"delegated_subject": wantSubject,
 		"subject_namespace": "root",
 		"current_actor":     wantActor,
-		"actor_role":        defaultAgentRole,
+		"actor_role":        "root/" + defaultAgentRole,
 	} {
 		if got := h.JSONString(t, body, "data.meta."+key); got != want {
 			t.Errorf("Vault read %s = %q, want %q", key, got, want)
@@ -192,8 +192,8 @@ func TestDefaultProfile_VaultBindsAgentOnly(t *testing.T) {
 	if got := h.JSONString(t, body, "data.meta.agent_subject"); got != wantSubject {
 		t.Errorf("Vault read sub = %q, want the agent's composite %q", got, wantSubject)
 	}
-	if got := h.JSONString(t, body, "data.meta.agent_role"); got != defaultAgentRole {
-		t.Errorf("Vault read warden_role = %q, want %q", got, defaultAgentRole)
+	if got, want := h.JSONString(t, body, "data.meta.agent_role"), "root/"+defaultAgentRole; got != want {
+		t.Errorf("Vault read warden_role = %q, want %q", got, want)
 	}
 	if got := h.JSONPath(h.ParseJSON(t, body), "data.meta.current_actor"); got != nil {
 		t.Errorf("an agent-only token must carry no act, but Vault read act.sub = %v", got)

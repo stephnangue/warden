@@ -157,7 +157,7 @@ func TestOIDCIssuer_Mint_VerifiesAgainstJWKS(t *testing.T) {
 	if got := claims["sub"]; got != "wid:ns-1234:auth_jwt_abc:spiffe://acme.internal/agent/refund-bot" {
 		t.Errorf("sub = %v", got)
 	}
-	if got := claims["warden_role"]; got != "payments-agent" {
+	if got := claims["warden_role"]; got != "ns-1234/payments-agent" {
 		t.Errorf("warden_role = %v", got)
 	}
 	// The agent's composite sub carries its namespace and mount, so neither is

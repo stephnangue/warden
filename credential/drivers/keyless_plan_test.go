@@ -254,6 +254,7 @@ var testTrustEnv = credential.TrustEnv{
 	IssuerURL:      "https://warden.example.com",
 	JWKSURL:        "https://warden.example.com/oidc/jwks",
 	SubjectPrefix:  "wid:root:",
+	NamespaceID:    "root",
 	NamespaceClaim: "root",
 }
 
@@ -282,6 +283,8 @@ func TestKeylessPrerequisites_Shapes(t *testing.T) {
 		assert.ElementsMatch(t, []string{"sts:AssumeRoleWithWebIdentity", "sts:TagSession"}, st.Action)
 		assert.Equal(t, "sts.amazonaws.com", st.Condition["StringEquals"]["warden.example.com:aud"])
 		assert.Equal(t, "wid:root:*", st.Condition["StringLike"]["warden.example.com:sub"])
+		assert.Contains(t, prereqs[len(prereqs)-1].Body, "aws:RequestTag/warden_role, whose value is root/<role>",
+			"the role tag is qualified by the namespace, so a condition on it must name the namespace too")
 	})
 
 	t.Run("azure federated credential", func(t *testing.T) {
@@ -313,6 +316,7 @@ func TestKeylessPrerequisites_Shapes(t *testing.T) {
 		assert.Contains(t, prereqs[0].Body, "--workload-identity-pool=pool")
 		assert.Contains(t, prereqs[1].Body, "workloadIdentityPools/pool/*")
 		assert.Contains(t, prereqs[len(prereqs)-1].Body, "127 bytes")
+		assert.Contains(t, prereqs[len(prereqs)-1].Body, "attribute.warden_role is root/<role>")
 	})
 
 	t.Run("alicloud trust policy", func(t *testing.T) {

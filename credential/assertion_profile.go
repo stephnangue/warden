@@ -174,6 +174,21 @@ func (id AssertionIdentity) WardenSubject() string {
 	return fmt.Sprintf("%s%s:%s:%s", WardenSubjectPrefix, id.NamespaceID, id.MountAccessor, id.PrincipalID)
 }
 
+// QualifiedRole is the role as an assertion names it: "{namespaceID}/{roleName}",
+// or "" for a role-less identity. One issuer signs for every namespace, so a bare
+// role name would let a role named "deploy" in one namespace satisfy a downstream
+// rule written for another namespace's "deploy" wherever the rule reads the role
+// without the sub (an AWS resource policy on aws:PrincipalTag/warden_role, a GCP
+// principalSet on attribute.warden_role). "/" rather than ":" so the value drops
+// into a resource name as a path segment (a Secrets Manager name forbids ":");
+// neither part can hold a "/", so the split is unambiguous.
+func (id AssertionIdentity) QualifiedRole() string {
+	if id.RoleName == "" {
+		return ""
+	}
+	return id.NamespaceID + "/" + id.RoleName
+}
+
 // AssertionRequest carries everything a profile renders into claims. It is a struct
 // rather than positional arguments so a later profile that needs to know which slot
 // it fills (subject vs actor) is an additive field, not a signature change.

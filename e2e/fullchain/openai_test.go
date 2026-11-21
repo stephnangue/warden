@@ -412,8 +412,8 @@ func TestOpenAI_WIFInjectsTheExchangedBearer(t *testing.T) {
 	if sub, _ := claims["sub"].(string); !strings.HasPrefix(sub, "wid:") {
 		t.Errorf("assertion sub = %q, want the wid: identity shape", sub)
 	}
-	if got := claims["warden_role"]; got != openaiWIFMain.role {
-		t.Errorf("assertion warden_role = %v, want %s", got, openaiWIFMain.role)
+	if got, want := claims["warden_role"], h.AssertedRole(t, claims, openaiWIFMain.role); got != want {
+		t.Errorf("assertion warden_role = %v, want %s", got, want)
 	}
 	if got, want := claims["warden_resource"], "openai:"+openaiWIFAccount; got != want {
 		t.Errorf("assertion warden_resource = %v, want %s", got, want)

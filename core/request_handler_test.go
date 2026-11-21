@@ -3830,7 +3830,7 @@ func TestResolveExchangeInputs_AWSProfile(t *testing.T) {
 	assert.Equal(t, "sts.amazonaws.com", claims["aud"])
 	assert.Equal(t, map[string]any{
 		"principal_tags": map[string]any{
-			"warden_role": []any{"orders-reader"},
+			"warden_role": []any{"ns-3f2a1b/orders-reader"},
 			"team":        []any{"payments"},
 			"env":         []any{"prod"},
 		},
@@ -3888,7 +3888,7 @@ func TestResolveExchangeInputs_DefaultDelegation(t *testing.T) {
 	assert.Equal(t, map[string]any{
 		"sub":         wardenSubject(agentTE),
 		"iss":         "https://warden-oidc.example",
-		"warden_role": "orders-reader",
+		"warden_role": "ns1/orders-reader",
 		"act": map[string]any{
 			"sub": "broker-beta",
 			"iss": "https://idp.example",
@@ -4108,7 +4108,7 @@ func TestResolveExchangeInputs_LegacyAWSSpecMintsDefault(t *testing.T) {
 	require.NoError(t, err)
 	claims := decodeAssertionClaims(t, tok)
 	assert.Equal(t, wardenSubject(te), claims["sub"], "the agent's composite sub, byte-identical to before the upgrade")
-	assert.Equal(t, "reader", claims["warden_role"])
+	assert.Equal(t, "n/reader", claims["warden_role"])
 	assert.NotContains(t, claims, "https://aws.amazon.com/tags", "no session tags on a legacy spec")
 }
 

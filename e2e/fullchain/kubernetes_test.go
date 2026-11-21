@@ -211,8 +211,8 @@ func TestKubernetes_KeylessMintPresentsWardenAssertion(t *testing.T) {
 		t.Errorf("assertion sub: got %q, want the wid: identity shape", sub)
 	}
 	// The claim a cluster maps to groups, and so the one an RBAC binding keys on.
-	if got, _ := claims["warden_role"].(string); got != kubernetesEnv.CertRole() {
-		t.Errorf("warden_role: got %q, want %q", got, kubernetesEnv.CertRole())
+	if got, want := claims["warden_role"], h.AssertedRole(t, claims, kubernetesEnv.CertRole()); got != want {
+		t.Errorf("warden_role: got %v, want %q", got, want)
 	}
 	// A cluster pins the issuer exactly and rejects anything expired, so checking
 	// both here is part of "would a real authenticator take this".

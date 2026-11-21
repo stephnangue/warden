@@ -208,7 +208,8 @@ func (f *AWSDriverFactory) KeylessPrerequisites(keyless credential.Config, specs
 		Where:  "every role that trusts this provider",
 		Format: "text",
 		Body: "The subject pattern trusts every agent of the namespace. Narrow it to one auth mount with " +
-			env.SubjectPrefix + "<mount_accessor>:*, or add a condition on aws:RequestTag/warden_role.\n" +
+			env.SubjectPrefix + "<mount_accessor>:*, or add a condition on aws:RequestTag/warden_role, whose value is " +
+			env.NamespaceID + "/<role>.\n" +
 			"When any token carries session tags, every role trusting this provider must allow sts:TagSession, " +
 			"or AssumeRoleWithWebIdentity fails for it.",
 	})
@@ -543,6 +544,7 @@ func (f *GCPDriverFactory) KeylessPrerequisites(keyless credential.Config, specs
 		Body: "google.subject may not exceed 127 bytes, and the token exchange fails for a longer one. Warden's subject " +
 			"is " + env.SubjectPrefix + "<mount_accessor>:<principal_id>; keep principal ids short enough.\n" +
 			"With no --allowed-audiences the provider accepts its own resource name, which is the audience Warden derives.\n" +
+			"attribute.warden_role is " + env.NamespaceID + "/<role>, so a principalSet on it names this namespace's role only.\n" +
 			"attribute.warden_role maps a claim the minimal assertion profile does not carry; drop that mapping for specs using it.",
 	})
 	prereqs = append(prereqs, agentIdentityNote(specs)...)

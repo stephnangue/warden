@@ -713,8 +713,8 @@ func TestAnthropic_WIFInjectsTheExchangedBearer(t *testing.T) {
 	if sub, _ := claims["sub"].(string); !strings.HasPrefix(sub, "wid:") {
 		t.Errorf("assertion sub = %q, want the wid: identity shape", sub)
 	}
-	if got := claims["warden_role"]; got != anthropicWIFMain.role {
-		t.Errorf("assertion warden_role = %v, want %s", got, anthropicWIFMain.role)
+	if got, want := claims["warden_role"], h.AssertedRole(t, claims, anthropicWIFMain.role); got != want {
+		t.Errorf("assertion warden_role = %v, want %s", got, want)
 	}
 	if got, want := claims["warden_resource"], "anthropic:"+anthropicWIFAccount; got != want {
 		t.Errorf("assertion warden_resource = %v, want %s", got, want)

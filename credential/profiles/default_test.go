@@ -94,7 +94,7 @@ func TestDefaultProfile_Claims_AgentOnly(t *testing.T) {
 		"nbf":             int64(1755248370),
 		"exp":             int64(1755248700),
 		"jti":             "a3d9f0c2-8b41-4e77-9f2a-1c6b5e0d4a88",
-		"warden_role":     "orders-reader",
+		"warden_role":     "ns-3f2a1b/orders-reader",
 		"warden_metadata": map[string]string{"team": "payments", "env": "prod"},
 		"warden_resource": "aws-iam:arn:aws:iam::123456789012:role/OrdersReader",
 	}, claims)
@@ -122,7 +122,7 @@ func TestDefaultProfile_Claims_Delegation(t *testing.T) {
 		"act": map[string]any{
 			"sub":             "wid:ns-3f2a1b:auth_jwt_9c1e:agent-checkout-7",
 			"iss":             "https://warden.example.com",
-			"warden_role":     "orders-reader",
+			"warden_role":     "ns-3f2a1b/orders-reader",
 			"warden_metadata": map[string]string{"team": "payments", "env": "prod"},
 		},
 		"warden_resource": "aws-iam:arn:aws:iam::123456789012:role/OrdersReader",
@@ -236,6 +236,27 @@ func TestDefaultProfile_Claims_RoleLess(t *testing.T) {
 	require.Contains(t, act, "warden_role")
 	assert.Equal(t, "", act["warden_role"])
 	assert.NotContains(t, claims, "warden_role")
+}
+
+// One issuer signs for every namespace, so warden_role must name the namespace
+// that granted it: the same role name in two namespaces asserts two values, and the
+// root namespace qualifies by its ID like any other.
+func TestDefaultProfile_Claims_RoleQualifiedByNamespace(t *testing.T) {
+	a := fixedRequest()
+	b := fixedRequest()
+	b.Identity.NamespaceID = "ns-77c0d4"
+	claimsA, err := Default().Claims(a)
+	require.NoError(t, err)
+	claimsB, err := Default().Claims(b)
+	require.NoError(t, err)
+	assert.Equal(t, "ns-3f2a1b/orders-reader", claimsA["warden_role"])
+	assert.Equal(t, "ns-77c0d4/orders-reader", claimsB["warden_role"])
+
+	root := fixedRequest()
+	root.Identity.NamespaceID = "root"
+	claims, err := Default().Claims(root)
+	require.NoError(t, err)
+	assert.Equal(t, "root/orders-reader", claims["warden_role"])
 }
 
 // An agent whose own token carries act is refused only when a user is disclosed —
