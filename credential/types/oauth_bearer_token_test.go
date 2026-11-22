@@ -149,7 +149,7 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: credential.SourceTypeAnthropic,
 			wantErr:    true,
-			errMsg:     "must be 'warden_identity' for an anthropic source",
+			errMsg:     "must be 'warden_identity' or 'warden_entity' for an anthropic source",
 		},
 		{
 			name: "anthropic source - missing federation rule",
@@ -292,7 +292,7 @@ func TestOAuthBearerTokenCredType_ValidateConfig(t *testing.T) {
 			},
 			sourceType: credential.SourceTypeOpenAI,
 			wantErr:    true,
-			errMsg:     "must be 'warden_identity' for an openai source",
+			errMsg:     "must be 'warden_identity' or 'warden_entity' for an openai source",
 		},
 		{
 			name:       "openai source - missing service account",

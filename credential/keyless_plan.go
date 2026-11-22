@@ -91,6 +91,11 @@ type TrustEnv struct {
 	// agents present, "wid:<namespace>:"; the mount and principal follow.
 	SubjectPrefix string
 
+	// EntitySubjectPrefix is the fixed start of every entity subject this
+	// namespace's agents present through a warden_entity spec,
+	// "wfe:<namespace>:"; the entity ID follows.
+	EntitySubjectPrefix string
+
 	// NamespaceID qualifies the warden_role this namespace's agents assert,
 	// "<namespace ID>/<role>".
 	NamespaceID string

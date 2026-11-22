@@ -50,7 +50,8 @@ const (
 // travel as session tags. This profile puts them there:
 //
 //   - sub stays the composite "wid:{nsID}:{mountAccessor}:{principalID}", so a
-//     StringLike prefix on sub still pins a namespace and auth mount;
+//     StringLike prefix on sub still pins a namespace and auth mount (under
+//     warden_entity it is "wfe:{nsID}:{entityID}", pinning a namespace and agent);
 //   - the role becomes the "warden_role" session tag, as "{nsID}/{role}" so a
 //     permission policy reading aws:PrincipalTag/warden_role cannot confuse two
 //     namespaces' roles of one name, and each projected metadata
@@ -143,7 +144,7 @@ func (AWSProfile) ValidateSpec(config credential.Config) error {
 // values arrive per login, so unlike the keys they can only be checked here), or when
 // sub exceeds the length AWS documents for a web identity subject.
 func (AWSProfile) Claims(req credential.AssertionRequest) (map[string]any, error) {
-	sub := req.Identity.WardenSubject()
+	sub := req.Identity.Subject()
 	if n := utf8.RuneCountInString(sub); n > awsMaxSubjectChars {
 		return nil, fmt.Errorf("subject is %d characters; AWS accepts a web identity subject of at most %d (the principal ID is likely too long)",
 			n, awsMaxSubjectChars)

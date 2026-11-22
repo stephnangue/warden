@@ -50,6 +50,14 @@ func TestMinimalProfile_Claims_SubjectMatchesDefault(t *testing.T) {
 	def, err := Default().Claims(req)
 	require.NoError(t, err)
 	assert.Equal(t, def["sub"], minimal["sub"])
+
+	// So is the entity's, which is what lets one exact Entra federated credential
+	// cover every native identity of an agent.
+	req.Identity.EntityID = "7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b"
+	minimal, err = MinimalProfile{}.Claims(req)
+	require.NoError(t, err)
+	assert.Equal(t, "wfe:ns-3f2a1b:7c1e2f4a-5b6d-4e8f-9a0b-1c2d3e4f5a6b", minimal["sub"])
+	assert.Len(t, minimal, 7, "registered claims only, whichever subject")
 }
 
 // A role-less identity (a root token) mints the same shape: the role is not

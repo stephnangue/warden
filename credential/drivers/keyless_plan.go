@@ -81,7 +81,7 @@ func chainedPrerequisites(keyless credential.Config, fields string) []credential
 		Body: "Store a newly issued credential there, not the one this source holds now: that one stays live " +
 			"until it is deleted upstream, and nothing should depend on it.\n" +
 			"The payload must carry: " + fields + ".\n" +
-			"The referenced spec must set subject_token_source (warden_identity or agent_identity) and must not chain itself.",
+			"The referenced spec must set subject_token_source (warden_identity, warden_entity or agent_identity) and must not chain itself.",
 	}}
 }
 

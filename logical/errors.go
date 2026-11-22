@@ -158,6 +158,14 @@ func GetErrorCode(err error) int {
 	// challenge naming where to go.
 	case errors.Is(err, credential.ErrUserRequired):
 		return http.StatusUnauthorized
+	// A verified principal the spec refuses for what it is: a user carrying an
+	// agent's subject prefix, or a caller with no governed entity presenting a
+	// warden_entity slot. Presenting it again cannot succeed. Mapped here, not only
+	// where the request's own spec resolves its inputs, because a chained
+	// secret_spec resolves them inside the credential manager and its failure
+	// reaches the client through this function alone.
+	case errors.Is(err, credential.ErrReservedPrincipal), errors.Is(err, credential.ErrEntityRequired):
+		return http.StatusForbidden
 	// The upstream refused to act for the user until the user re-authenticates
 	// (a claims challenge, an expired or wrong-audience user token). Checked
 	// before the credential-issue rule below, which would make the upstream's

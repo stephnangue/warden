@@ -166,7 +166,9 @@ func isGitSmartHTTP(req *logical.Request) bool {
 //
 // A missing user principal is a 401: the caller can acquire a user identity and
 // retry, which is exactly what the paired WWW-Authenticate challenge tells it to
-// do. Everything else reaching here is a malformed or unsupported spec, which
+// do. A principal the spec refuses for what it is — a user carrying an agent's
+// subject prefix, a caller with no governed entity for a warden_entity slot — is
+// a 403. Everything else reaching here is a malformed or unsupported spec, which
 // stays the 400 it has always been.
 //
 // Both branches are load-bearing. Returning the error un-coded would push the
@@ -176,7 +178,7 @@ func exchangeInputError(err error) error {
 	if errors.Is(err, credential.ErrUserRequired) {
 		return logical.WrapWithCode(http.StatusUnauthorized, err)
 	}
-	if errors.Is(err, credential.ErrReservedPrincipal) {
+	if errors.Is(err, credential.ErrReservedPrincipal) || errors.Is(err, credential.ErrEntityRequired) {
 		return logical.WrapWithCode(http.StatusForbidden, err)
 	}
 	return logical.ErrBadRequestf("token exchange input resolution failed: %s", err.Error())

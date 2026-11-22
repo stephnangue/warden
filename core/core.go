@@ -259,7 +259,7 @@ type Core struct {
 
 	// oidcIssuer, when configured, makes Warden its own OIDC issuer: it mints
 	// short-lived identity assertions for Workload Identity Federation. nil (or
-	// not-ready) when disabled, so the warden_identity mint path fails closed.
+	// not-ready) when disabled, so the Warden-minted assertion paths fail closed.
 	//
 	// oidcMu guards all the oidc* fields below against the concurrent rotation
 	// goroutine, config writes (setupOIDCIssuer), and the mint/publish paths.
@@ -987,7 +987,7 @@ func (c *Core) GetRotationManager() *RotationManager {
 
 // setupOIDCIssuer constructs the OIDC issuer from its stored config during
 // unseal. It is disabled by default: with no config (or Enabled=false) the
-// issuer is left nil and the warden_identity mint path fails closed.
+// issuer is left nil and the Warden-minted assertion paths fail closed.
 //
 // When enabled, it loads the signing key from storage. If none exists yet, the
 // active node generates and persists one; a standby leaves the issuer not-ready

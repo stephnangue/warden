@@ -85,15 +85,23 @@ var (
 	// able to, retry, and succeed. A malformed spec is a different failure.
 	ErrUserRequired = errors.New("a user principal is required but none was presented")
 
-	// ErrReservedPrincipal is returned (wrapped) when a user principal begins with
-	// WardenSubjectPrefix. That prefix names agents: a delegation assertion carries
-	// the user's raw principal as its sub, and a verifier that binds agents by a
-	// "wid:<namespace>:" sub prefix would read such a user as an agent — of any
-	// namespace, since the prefix does not depend on where the user logged in.
-	// Like ErrUserRequired it is a sentinel so core attaches the status: 403, since
-	// the identity was verified and is refused, and presenting it again cannot
-	// succeed.
-	ErrReservedPrincipal = errors.New("the user principal uses the reserved agent subject prefix " + WardenSubjectPrefix)
+	// ErrReservedPrincipal is returned (wrapped, naming the prefix) when a user
+	// principal begins with a reserved subject prefix (WardenSubjectPrefix,
+	// EntitySubjectPrefix). Those prefixes name agents: a delegation assertion
+	// carries the user's raw principal as its sub, and a verifier that binds agents
+	// by a "wid:<namespace>:" or "wfe:<namespace>:" sub prefix would read such a user
+	// as an agent — of any namespace, since the prefix does not depend on where the
+	// user logged in. Like ErrUserRequired it is a sentinel so core attaches the
+	// status: 403, since the identity was verified and is refused, and presenting it
+	// again cannot succeed.
+	ErrReservedPrincipal = errors.New("the user principal uses a reserved agent subject prefix")
+
+	// ErrEntityRequired is returned (wrapped, naming the slot and why) when a
+	// warden_entity slot is minted for a caller without a governed, active entity
+	// of record: unclaimed, a human, or a token no auth mount issued. It is a
+	// sentinel so core attaches the status, 403: the caller was verified and what
+	// it is cannot be asserted, never asserted as its native identity instead.
+	ErrEntityRequired = errors.New("only an agent claimed by a governed, active entity can present it")
 
 	// ErrUserNotAllowed is returned (wrapped) when a spec that acts as the user
 	// refuses the verified user: the identity names no one the spec may act for —
