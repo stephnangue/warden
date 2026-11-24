@@ -119,7 +119,7 @@ func mountLoginStub(t *testing.T, c *Core, mountType string, roles ...string) *l
 		grantRole(t, c, ctx, testGrant{Role: r, Policies: []string{"access-reader"}, Mount: "auth/" + mountType + "/"})
 	}
 
-	accessor, err := c.generateMountAccessor(mountType)
+	accessor, err := c.generateMountAccessor(mountClassAuth, mountType)
 	require.NoError(t, err)
 	backendUUID, err := uuid.GenerateUUID()
 	require.NoError(t, err)

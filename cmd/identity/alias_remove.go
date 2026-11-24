@@ -35,7 +35,7 @@ Usage: warden identity alias remove [options]
         }'
 
       $ warden identity alias remove \
-          -mount-accessor=jwt_8f3a2c1d \
+          -mount-accessor=auth_jwt_8f3a2c1d \
           -name=repo:corp/billing-agent:ref:refs/heads/main \
           -from=billing-agent
 `,

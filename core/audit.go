@@ -224,7 +224,7 @@ func (c *Core) buildConfigAuditEntry(decl *MountEntry, normalizedPath string) (*
 	if err := ensureAuditHMACKey(cfg); err != nil {
 		return nil, err
 	}
-	accessor, err := c.generateMountAccessor("audit_" + decl.Type)
+	accessor, err := c.generateMountAccessor(mountClassAudit, decl.Type)
 	if err != nil {
 		return nil, fmt.Errorf("generate accessor: %w", err)
 	}
@@ -400,7 +400,7 @@ func (c *Core) EnableAudit(ctx context.Context, entry *MountEntry, updateStorage
 	}
 
 	if entry.Accessor == "" {
-		accessor, err := c.generateMountAccessor("audit_" + entry.Type)
+		accessor, err := c.generateMountAccessor(mountClassAudit, entry.Type)
 		if err != nil {
 			return err
 		}

@@ -484,14 +484,27 @@ func TestCore_Unmount_NotFound(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestCore_GenerateMountAccessor tests generating mount accessor
+// TestCore_GenerateMountAccessor pins the accessor shape per class: an auth
+// method's and an audit device's carry the class in front, a provider's and
+// the system mount's are the bare type.
 func TestCore_GenerateMountAccessor(t *testing.T) {
 	core := createTestCore(t)
 
-	accessor, err := core.generateMountAccessor("mock")
-	require.NoError(t, err)
-	assert.NotEmpty(t, accessor)
-	assert.Contains(t, accessor, "mock_")
+	for _, tc := range []struct {
+		class, entryType, want string
+	}{
+		{mountClassAuth, "jwt", `^auth_jwt_[0-9a-f]{8}$`},
+		{mountClassAudit, "file", `^audit_file_[0-9a-f]{8}$`},
+		{mountClassProvider, "vault", `^vault_[0-9a-f]{8}$`},
+		{mountClassSystem, "system", `^system_[0-9a-f]{8}$`},
+		{mountClassNSSystem, "ns_system", `^ns_system_[0-9a-f]{8}$`},
+	} {
+		t.Run(tc.class, func(t *testing.T) {
+			accessor, err := core.generateMountAccessor(tc.class, tc.entryType)
+			require.NoError(t, err)
+			assert.Regexp(t, tc.want, accessor)
+		})
+	}
 }
 
 // TestCore_RequiredMountTable tests creating required mount table
@@ -781,7 +794,7 @@ func TestBackfillEntryFields_FillsMissing(t *testing.T) {
 	changed, err := core.backfillEntryFields(ctx, entry)
 	require.NoError(t, err)
 	assert.True(t, changed, "helper must report changed=true when fields were filled")
-	assert.NotEmpty(t, entry.Accessor, "Accessor must be filled")
+	assert.Regexp(t, `^auth_jwt_[0-9a-f]{8}$`, entry.Accessor, "an auth entry's accessor must be filled with the auth_ prefix")
 	assert.NotEmpty(t, entry.BackendAwareUUID, "BackendAwareUUID must be filled")
 	assert.Equal(t, namespace.RootNamespaceID, entry.NamespaceID, "missing NamespaceID defaults to root")
 	require.NotNil(t, entry.namespace, "namespace pointer must be resolved")
@@ -792,12 +805,14 @@ func TestBackfillEntryFields_NoOpWhenComplete(t *testing.T) {
 	core := createTestCore(t)
 	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
 
+	// The accessor is an auth one assigned before auth_ was prefixed: it is
+	// stored wherever the mount is referred to, so it must survive a load as is.
 	entry := &MountEntry{
 		Path:             "complete/",
 		Type:             "jwt",
 		Class:            mountClassAuth,
 		UUID:             "fixed-uuid",
-		Accessor:         "mock_12345678",
+		Accessor:         "jwt_12345678",
 		BackendAwareUUID: "fixed-backend-uuid",
 		NamespaceID:      namespace.RootNamespaceID,
 		namespace:        namespace.RootNamespace,
@@ -807,7 +822,7 @@ func TestBackfillEntryFields_NoOpWhenComplete(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, changed, "helper must report changed=false when nothing was filled")
 	// Idempotence: the entry should be byte-identical.
-	assert.Equal(t, "mock_12345678", entry.Accessor)
+	assert.Equal(t, "jwt_12345678", entry.Accessor)
 	assert.Equal(t, "fixed-backend-uuid", entry.BackendAwareUUID)
 }
 
@@ -835,6 +850,7 @@ func TestCore_Mount_AuthClass_RoutesToAuthTable(t *testing.T) {
 	}
 	core.authLock.RUnlock()
 	assert.True(t, found, "auth-class entry must appear in c.auth after mount()")
+	assert.Regexp(t, `^auth_mock_[0-9a-f]{8}$`, entry.Accessor, "an auth method's accessor names its class, unlike a provider's of the same type")
 
 	core.mountsLock.RLock()
 	for _, e := range core.mounts.Entries {
@@ -867,6 +883,7 @@ func TestCore_Mount_ProviderClass_RoutesToMountsTable(t *testing.T) {
 	}
 	core.mountsLock.RUnlock()
 	assert.True(t, found, "provider-class entry must appear in c.mounts after mount()")
+	assert.Regexp(t, `^mock_[0-9a-f]{8}$`, entry.Accessor, "a provider's accessor is its bare type, unlike an auth method's of the same type")
 
 	core.authLock.RLock()
 	for _, e := range core.auth.Entries {
