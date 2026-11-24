@@ -200,6 +200,38 @@ func TestListRoles_URLCarriesNamespace(t *testing.T) {
 	assert.Equal(t, "/v1/team-data/vault/role/read-secret/gateway/", out.Roles[0].URL)
 }
 
+// One discovery server answers every namespace: each lists only the roles
+// its own groups grant.
+func TestListRoles_SharedServerSeparatesNamespaces(t *testing.T) {
+	root := newDiscEnv(t, "", "")
+	namespaces := []struct {
+		header, role string
+		env          *discEnv
+	}{
+		{"", "read-root", root},
+		{"team-a", "read-a", root.sibling("team-a/")},
+		{"team-b", "read-b", root.sibling("team-b/")},
+	}
+	for _, ns := range namespaces {
+		ns.env.mountAuth("jwt/")
+		ns.env.provider("vault", "vault/", "auth/jwt/")
+		ns.env.grant("readers", []string{"auth/jwt/"}, &logical.Role{Name: ns.role, ProviderPath: "vault/"})
+	}
+
+	srv := startMCPTestServer(t, root.c, nil)
+	for _, ns := range namespaces {
+		headers := map[string]string{"Authorization": "Bearer eyJ.any.token"}
+		if ns.header != "" {
+			headers["X-Warden-Namespace"] = ns.header
+		}
+		res, err := connectMCPWithHeaders(t, srv, headers).CallTool(context.Background(), &mcp.CallToolParams{Name: "list_roles"})
+		require.NoError(t, err, ns.role)
+		out := decodeListRoles(t, res)
+		require.Len(t, out.Roles, 1, ns.role)
+		assert.Equal(t, ns.role, out.Roles[0].Name)
+	}
+}
+
 func TestParseSkillURI(t *testing.T) {
 	name, err := parseSkillURI("skill://mcp-aws/SKILL.md")
 	require.NoError(t, err)

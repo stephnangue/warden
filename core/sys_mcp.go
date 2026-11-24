@@ -242,14 +242,19 @@ func (b *SystemBackend) handleMCPStream(ctx context.Context, req *logical.Reques
 }
 
 // anonymousListenSlots returns the node's anonymous listen semaphore: one
-// per node, shared by every namespace's discovery server, so the bound is the
-// node's and not a namespace's.
+// per node, shared by every namespace through the discovery server, so the
+// bound is the node's and not a namespace's.
 func (c *Core) anonymousListenSlots() chan struct{} {
 	c.anonymousListensOnce.Do(func() { c.anonymousListens = make(chan struct{}, maxAnonymousListens) })
 	return c.anonymousListens
 }
 
-// discoveryMCP returns the backend's MCP server, built on first use.
+// discoveryMCP returns the backend's MCP server, built on first use. One
+// server answers every namespace, which holds only while its handlers take the
+// namespace from the request, its tools, resources and capabilities never
+// change after construction, and it sends no notification of its own: the
+// server keeps its sessions and subscriptions server-wide, so a notification
+// would reach clients of every namespace.
 func (b *SystemBackend) discoveryMCP() http.Handler {
 	b.mcpOnce.Do(func() { b.mcpHandler = b.core.newDiscoveryMCPHandler() })
 	return b.mcpHandler

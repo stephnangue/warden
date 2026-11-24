@@ -173,6 +173,19 @@ func newDiscEnv(t *testing.T, nsPath, autoAuthPath string) *discEnv {
 	return e
 }
 
+// sibling returns an env on e's core in a new namespace at nsPath, or in the
+// root namespace when nsPath is empty.
+func (e *discEnv) sibling(nsPath string) *discEnv {
+	e.t.Helper()
+	s := &discEnv{t: e.t, c: e.c, ns: namespace.RootNamespace, ctx: rootCtx(), stub: e.stub}
+	if nsPath != "" {
+		s.ns = &namespace.Namespace{Path: nsPath}
+		require.NoError(e.t, e.c.namespaceStore.SetNamespace(rootCtx(), s.ns))
+		s.ctx = namespace.ContextWithNamespace(context.Background(), s.ns)
+	}
+	return s
+}
+
 // mountAuth mounts an admitStub auth mount at path ("jwt/") and returns it.
 func (e *discEnv) mountAuth(path string) *admitStubMount {
 	e.t.Helper()

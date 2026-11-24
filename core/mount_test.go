@@ -2,9 +2,14 @@ package core
 
 import (
 	"context"
+	"reflect"
+	"slices"
+	"sync/atomic"
 	"testing"
 
+	"github.com/stephnangue/warden/framework"
 	"github.com/stephnangue/warden/internal/namespace"
+	"github.com/stephnangue/warden/logical"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -520,6 +525,131 @@ func TestCore_RequiredMountTable(t *testing.T) {
 	assert.Len(t, table.Entries, 1)
 	assert.Equal(t, "sys/", table.Entries[0].Path)
 	assert.Equal(t, mountClassSystem, table.Entries[0].Type)
+}
+
+// systemBackendOf reads c.systemBackend under the lock that guards it.
+func systemBackendOf(c *Core) *SystemBackend {
+	c.mountsLock.RLock()
+	defer c.mountsLock.RUnlock()
+	return c.systemBackend
+}
+
+// TestCore_NamespaceSystemMountSharesBackend pins one system backend for every
+// namespace: each namespace's sys/ is a handle on root's, and keeps its own
+// ns_system mount entry.
+func TestCore_NamespaceSystemMountSharesBackend(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	acme := nsModify(t, core, ctx, "acme", nil)
+	dev := nsModify(t, core, ctx, "acme/dev", nil)
+
+	shared := systemBackendOf(core)
+	require.NotNil(t, shared)
+	assert.Same(t, shared, core.router.MatchingBackend(ctx, "sys/"), "root's sys/ holds the backend itself")
+
+	accessors := map[string]bool{}
+	for _, ns := range []*namespace.Namespace{acme, dev} {
+		nsCtx := namespace.ContextWithNamespace(context.Background(), ns)
+		handle, ok := core.router.MatchingBackend(nsCtx, "sys/").(nsSystemBackend)
+		require.True(t, ok, ns.Path)
+		assert.Same(t, shared, handle.SystemBackend, ns.Path)
+		assert.Same(t, shared.Backend, framework.ExtractBackend(handle), ns.Path)
+
+		entry := core.router.MatchingMountEntry(nsCtx, "sys/")
+		require.NotNil(t, entry, ns.Path)
+		assert.Equal(t, mountClassNSSystem, entry.Class, ns.Path)
+		assert.Equal(t, mountClassNSSystem, entry.Type, ns.Path)
+		accessors[entry.Accessor] = true
+	}
+	assert.Len(t, accessors, 2, "each namespace's sys/ keeps its own accessor")
+
+	// The handle replaces three of the backend's methods and promotes the
+	// rest: only a field shadowing a method could hide one.
+	assert.Equal(t, reflect.TypeOf(shared).NumMethod(), reflect.TypeOf(nsSystemBackend{}).NumMethod())
+}
+
+// TestCore_NamespaceSystemHandleOwnsNoLifecycle pins that a namespace never
+// sets up, initializes or cleans up the backend every namespace shares: only
+// root's mount does, once.
+func TestCore_NamespaceSystemHandleOwnsNoLifecycle(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+
+	shared := systemBackendOf(core)
+	require.NotNil(t, shared)
+	var initialized, cleaned atomic.Int32
+	shared.InitializeFunc = func(context.Context) error { initialized.Add(1); return nil }
+	shared.Clean = func(context.Context) { cleaned.Add(1) }
+
+	acme := nsModify(t, core, ctx, "acme", nil)
+	beta := nsModify(t, core, ctx, "beta", nil)
+	assert.Zero(t, initialized.Load(), "creating a namespace does not initialize the shared backend")
+
+	acmeCtx := namespace.ContextWithNamespace(context.Background(), acme)
+	handle := core.router.MatchingBackend(acmeCtx, "sys/")
+	require.NotNil(t, handle)
+	require.NoError(t, handle.Setup(acmeCtx, &logical.BackendConfig{Config: map[string]any{"k": "v"}, Logger: core.logger}))
+	assert.Nil(t, shared.Config(), "setting up a handle does not reconfigure the shared backend")
+
+	require.NoError(t, core.namespaceStore.clearNamespaceResources(acmeCtx, acme))
+	assert.Zero(t, cleaned.Load(), "deleting a namespace does not clean up the shared backend")
+	assert.Nil(t, core.router.MatchingMountEntry(acmeCtx, "sys/"), "acme's sys/ is unmounted")
+
+	resp, err := core.router.Route(ctx, &logical.Request{Operation: logical.ReadOperation, Path: "sys/namespaces/beta"})
+	require.NoError(t, err, "root's sys/ still answers")
+	require.NotNil(t, resp)
+	assert.Equal(t, "beta/", resp.Data["path"])
+	betaCtx := namespace.ContextWithNamespace(context.Background(), beta)
+	_, err = core.router.Route(betaCtx, &logical.Request{Operation: logical.ListOperation, Path: "sys/namespaces"})
+	require.NoError(t, err, "a sibling namespace's sys/ still answers")
+
+	require.NoError(t, core.unloadMounts(ctx))
+	assert.Equal(t, int32(1), cleaned.Load(), "sealing cleans the shared backend up once, through root's mount")
+	assert.Nil(t, systemBackendOf(core), "sealing forgets the backend, so no namespace is handed it again")
+}
+
+// TestCore_NamespaceSystemMountNeedsRootBackend pins that a namespace's sys/
+// is never mounted without root's backend to hand it.
+func TestCore_NamespaceSystemMountNeedsRootBackend(t *testing.T) {
+	core := createTestCore(t)
+	acme := &namespace.Namespace{ID: "acme-id", Path: "acme/"}
+	entry := &MountEntry{Class: mountClassNSSystem, Type: mountClassNSSystem, Path: "sys/", NamespaceID: acme.ID, namespace: acme}
+
+	core.mountsLock.Lock()
+	core.systemBackend = nil
+	_, err := core.newLogicalBackend(context.Background(), entry, nil)
+	core.mountsLock.Unlock()
+
+	require.ErrorContains(t, err, "system backend does not exist")
+}
+
+// TestCore_SetupMountsOrdersRootSystemFirst lists a namespace's sys/ ahead of
+// root's: setup still mounts root's first, and the namespace's handle is on
+// the backend built by this setup, not the one before it.
+func TestCore_SetupMountsOrdersRootSystemFirst(t *testing.T) {
+	core := createTestCore(t)
+	ctx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	acme := nsModify(t, core, ctx, "acme", nil)
+	before := systemBackendOf(core)
+
+	core.mountsLock.RLock()
+	table := core.mounts.shallowClone()
+	core.mountsLock.RUnlock()
+	require.NoError(t, core.unloadMounts(ctx))
+
+	slices.Reverse(table.Entries)
+	require.Equal(t, mountClassNSSystem, table.Entries[0].Class, "precondition: a namespace's sys/ is listed first")
+	core.mountsLock.Lock()
+	core.mounts = table
+	core.mountsLock.Unlock()
+	require.NoError(t, core.setupMounts(ctx))
+
+	after := systemBackendOf(core)
+	require.NotNil(t, after)
+	assert.NotSame(t, before, after)
+	handle, ok := core.router.MatchingBackend(namespace.ContextWithNamespace(context.Background(), acme), "sys/").(nsSystemBackend)
+	require.True(t, ok)
+	assert.Same(t, after, handle.SystemBackend)
 }
 
 // TestCore_DefaultMountTable tests creating default mount table

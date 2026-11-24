@@ -647,7 +647,13 @@ func (c *Core) newLogicalBackend(ctx context.Context, entry *MountEntry, view sd
 	case mountClassSystem:
 		backend = NewSystemBackend(c, c.logger.WithSystem("system"))
 	case mountClassNSSystem:
-		backend = NewSystemBackend(c, c.logger.WithSystem("ns_system"))
+		// A namespace's sys/ is a handle on root's backend, so root's sys/
+		// must be mounted first: setupMounts orders entries by path depth,
+		// and root's sys/ is shallower than any namespace's.
+		if c.systemBackend == nil {
+			return nil, errors.New("system backend does not exist")
+		}
+		backend = nsSystemBackend{c.systemBackend}
 	}
 
 	// Check if backend is nil (shouldn't happen in normal operation, but handle it for safety)
@@ -1525,6 +1531,8 @@ func (c *Core) setupAuth(ctx context.Context) error {
 // IMPORTANT: this also resets the router and clears systemBarrierView, both
 // of which are global (shared with c.auth). Call c.unloadAuth BEFORE this so
 // the auth backends get a chance to clean up against a still-populated router.
+// It clears systemBackend too, so no namespace's sys/ is ever handed the
+// backend of a previous unseal.
 func (c *Core) unloadMounts(ctx context.Context) error {
 	c.mountsLock.Lock()
 	defer c.mountsLock.Unlock()
@@ -1550,6 +1558,7 @@ func (c *Core) unloadMounts(ctx context.Context) error {
 	c.mounts = nil
 	c.router.reset()
 	c.systemBarrierView = nil
+	c.systemBackend = nil
 	return nil
 }
 
