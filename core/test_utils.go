@@ -679,7 +679,7 @@ func mountStubAuthMethod(t *testing.T, c *Core, mountPath, mountType string) *Mo
 func mountStubAuthMethodInNamespace(t *testing.T, c *Core, mountPath, mountType string, ns *namespace.Namespace) *MountEntry {
 	t.Helper()
 
-	accessor, err := c.generateMountAccessor(mountType)
+	accessor, err := c.generateMountAccessor(mountClassAuth, mountType)
 	require.NoError(t, err)
 	backendUUID, err := uuid.GenerateUUID()
 	require.NoError(t, err)

@@ -79,20 +79,28 @@ var (
 	}
 )
 
-func (c *Core) generateMountAccessor(entryType string) (string, error) {
-	var accessor string
+// generateMountAccessor returns a new accessor for a mount of the given class
+// and type, "<type>_<8 hex>", that no mounted entry holds. An auth method's or
+// an audit device's carries its class in front, "auth_jwt_1a2b3c4d", so it never
+// reads as a provider's of the same type: kubernetes is both an auth method and
+// a provider. An accessor is stored wherever a mount is referred to, so one
+// already assigned is never regenerated in a new shape.
+func (c *Core) generateMountAccessor(class, entryType string) (string, error) {
+	prefix := entryType
+	switch class {
+	case mountClassAuth, mountClassAudit:
+		prefix = class + "_" + entryType
+	}
 	for {
 		randBytes, err := uuid.GenerateRandomBytes(4)
 		if err != nil {
 			return "", err
 		}
-		accessor = fmt.Sprintf("%s_%s", entryType, fmt.Sprintf("%08x", randBytes[0:4]))
-		if entry := c.router.MatchingMountByAccessor(accessor); entry == nil {
-			break
+		accessor := fmt.Sprintf("%s_%08x", prefix, randBytes)
+		if c.router.MatchingMountByAccessor(accessor) == nil {
+			return accessor, nil
 		}
 	}
-
-	return accessor, nil
 }
 
 // MountTable is used to represent the internal mount table
@@ -412,7 +420,7 @@ func (c *Core) mountInternalLocked(ctx context.Context, entry *MountEntry, updat
 		entry.BackendAwareUUID = bUUID
 	}
 	if entry.Accessor == "" {
-		accessor, err := c.generateMountAccessor(entry.Type)
+		accessor, err := c.generateMountAccessor(entry.Class, entry.Type)
 		if err != nil {
 			return err
 		}
@@ -534,7 +542,7 @@ func (c *Core) mountAuthInternalLocked(ctx context.Context, entry *MountEntry, u
 		entry.BackendAwareUUID = bUUID
 	}
 	if entry.Accessor == "" {
-		accessor, err := c.generateMountAccessor(entry.Type)
+		accessor, err := c.generateMountAccessor(mountClassAuth, entry.Type)
 		if err != nil {
 			return err
 		}
@@ -1217,7 +1225,7 @@ func (c *Core) backfillEntryFields(ctx context.Context, entry *MountEntry) (bool
 	changed := false
 
 	if entry.Accessor == "" {
-		accessor, err := c.generateMountAccessor(entry.Type)
+		accessor, err := c.generateMountAccessor(entry.Class, entry.Type)
 		if err != nil {
 			return false, err
 		}
@@ -1291,7 +1299,7 @@ func (c *Core) requiredMountTable(ctx context.Context) (*MountTable, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not create sys UUID: %w", err)
 	}
-	sysAccessor, err := c.generateMountAccessor("system")
+	sysAccessor, err := c.generateMountAccessor(mountClassSystem, "system")
 	if err != nil {
 		return nil, fmt.Errorf("could not generate sys accessor: %w", err)
 	}

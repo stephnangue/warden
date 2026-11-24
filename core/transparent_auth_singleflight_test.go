@@ -80,7 +80,7 @@ func mountBlockingLogin(t *testing.T, c *Core, mountPath string) *blockingLoginB
 	backend := &blockingLoginBackend{entered: make(chan struct{}, 4), release: make(chan struct{})}
 	t.Cleanup(backend.open)
 
-	accessor, err := c.generateMountAccessor("jwt")
+	accessor, err := c.generateMountAccessor(mountClassAuth, "jwt")
 	require.NoError(t, err)
 	backendUUID, err := uuid.GenerateUUID()
 	require.NoError(t, err)
