@@ -10,6 +10,7 @@ import (
 	"github.com/openbao/openbao/sdk/v2/logical"
 	"github.com/openbao/openbao/sdk/v2/physical"
 	"github.com/openbao/openbao/sdk/v2/physical/inmem"
+	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -177,6 +178,53 @@ func TestHA_StepDown_ReAcquire(t *testing.T) {
 		t.Logf("other node acquired leadership; addr=%s", reAcquired.redirectAddr)
 	}
 	_ = otherNode // suppress unused
+}
+
+// TestHA_NamespaceSystemMountFollowsRootBackend steps down twice, so a node
+// that was active once becomes active again: each unseal builds a new system
+// backend, and a namespace's sys/ is a handle on that unseal's backend, never
+// a previous one's.
+func TestHA_NamespaceSystemMountFollowsRootBackend(t *testing.T) {
+	origSleep := manualStepDownSleepPeriod
+	manualStepDownSleepPeriod = 100 * time.Millisecond
+	defer func() { manualStepDownSleepPeriod = origSleep }()
+
+	active, standby, core1, core2, _ := setupTwoNodeHA(t)
+	defer core1.Shutdown()
+	defer core2.Shutdown()
+
+	rootCtx := namespace.ContextWithNamespace(context.Background(), namespace.RootNamespace)
+	nsModify(t, active, rootCtx, "acme", nil)
+
+	built := map[*Core]*SystemBackend{}
+	check := func(c *Core) {
+		t.Helper()
+		backend := systemBackendOf(c)
+		require.NotNil(t, backend)
+		if earlier, ok := built[c]; ok {
+			assert.NotSame(t, earlier, backend, "a new unseal builds a new system backend")
+		}
+		built[c] = backend
+
+		acme, err := c.namespaceStore.GetNamespaceByPath(rootCtx, "acme/")
+		require.NoError(t, err)
+		require.NotNil(t, acme)
+		handle, ok := c.router.MatchingBackend(namespace.ContextWithNamespace(context.Background(), acme), "sys/").(nsSystemBackend)
+		require.True(t, ok)
+		assert.Same(t, backend, handle.SystemBackend)
+	}
+
+	check(active)
+
+	require.NoError(t, active.StepDown())
+	next := waitForActiveNode(t, []*Core{standby}, 10*time.Second)
+	check(next)
+
+	require.NoError(t, next.StepDown())
+	require.Eventually(t, next.Standby, 10*time.Second, 20*time.Millisecond, "step-down is asynchronous")
+	again := waitForActiveNode(t, []*Core{core1, core2}, 10*time.Second)
+	check(again)
+	assert.Len(t, built, 2, "the node active third was active before")
 }
 
 func TestHA_Standby_DataVisibility(t *testing.T) {

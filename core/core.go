@@ -433,7 +433,9 @@ type Core struct {
 	stateLock locking.RWMutex
 	sealed    *uint32
 
-	// systemBackend is the backend which is used to manage internal operations
+	// systemBackend is the backend which is used to manage internal operations.
+	// Root's sys/ mount holds it and every namespace's sys/ holds a handle on
+	// it (nsSystemBackend). Set, cleared and read under mountsLock.
 	systemBackend *SystemBackend
 
 	// transparentAuthFlight ensures only one implicit auth per credential and role,
@@ -2051,8 +2053,8 @@ func (c *Core) preSeal() error {
 	}
 
 	// Unload auth BEFORE mounts: c.unloadMounts resets the router and clears
-	// c.systemBarrierView (shared global state), and auth backends need to
-	// run their Cleanup() against a still-populated router.
+	// c.systemBarrierView and c.systemBackend (shared global state), and auth
+	// backends need to run their Cleanup() against a still-populated router.
 	if err := c.unloadAuth(context.Background()); err != nil {
 		c.logger.Error("error unloading auth methods", logger.Err(err))
 		return fmt.Errorf("error unloading auth methods: %w", err)

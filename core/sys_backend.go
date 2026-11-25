@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,7 +12,10 @@ import (
 	"github.com/stephnangue/warden/logical"
 )
 
-// SystemBackend implements logical.Backend using the framework pattern
+// SystemBackend implements logical.Backend using the framework pattern. One
+// instance serves root's sys/ and, through nsSystemBackend, every namespace's:
+// its handlers take the namespace from the request, so a field added here is
+// shared across namespaces.
 type SystemBackend struct {
 	*framework.Backend
 	core   *Core
@@ -22,6 +26,25 @@ type SystemBackend struct {
 	mcpOnce    sync.Once
 	mcpHandler http.Handler
 }
+
+// nsSystemBackend is a namespace's handle on the one system backend. Every
+// namespace's sys/ mount routes to the same backend, whose handlers take the
+// namespace from the request. The handle owns none of the backend's
+// lifecycle: setting up, initializing and cleaning up happen once, through
+// root's mount. Unmounting a namespace's sys/ must not clean up the backend
+// the other namespaces still serve.
+type nsSystemBackend struct{ *SystemBackend }
+
+var (
+	_ logical.Backend              = nsSystemBackend{}
+	_ logical.MCPPolicyEnforced    = nsSystemBackend{}
+	_ logical.MCPInProcessServer   = nsSystemBackend{}
+	_ logical.GatewayErrorRenderer = nsSystemBackend{}
+)
+
+func (nsSystemBackend) Setup(context.Context, *logical.BackendConfig) error { return nil }
+func (nsSystemBackend) Initialize(context.Context) error                    { return nil }
+func (nsSystemBackend) Cleanup(context.Context)                             {}
 
 // NewSystemBackend creates a new system backend using framework.Backend
 func NewSystemBackend(core *Core, log *logger.GatedLogger) *SystemBackend {
