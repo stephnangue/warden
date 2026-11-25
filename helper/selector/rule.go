@@ -115,6 +115,46 @@ func compileValues(name string, values []string) (ruleKey, error) {
 	return rk, nil
 }
 
+// ParseRule converts one rule as a request carries it, decoded from JSON: an
+// object mapping each fact name to a list of strings, or to one string standing
+// for a one-element list. It checks the shape only; Compile checks the names
+// and values.
+func ParseRule(raw any) (map[string][]string, error) {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("must be an object of selectors (fact name to values), got %T", raw)
+	}
+	rule := make(map[string][]string, len(m))
+	for name, v := range m {
+		values, err := parseValues(v)
+		if err != nil {
+			return nil, fmt.Errorf("selector %q: %w", name, err)
+		}
+		rule[name] = values
+	}
+	return rule, nil
+}
+
+func parseValues(v any) ([]string, error) {
+	switch t := v.(type) {
+	case string:
+		return []string{t}, nil
+	case []string:
+		return t, nil
+	case []any:
+		out := make([]string, len(t))
+		for i, e := range t {
+			s, ok := e.(string)
+			if !ok {
+				return nil, fmt.Errorf("values must be strings, got %T", e)
+			}
+			out[i] = s
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("must be a string or a list of strings, got %T", v)
+}
+
 // Match reports whether src satisfies r. A name src cannot answer, or answers
 // with no scalar value, fails the rule. A nil or empty Rule matches nothing.
 // Match does not allocate beyond what src.Lookup does.
@@ -122,14 +162,33 @@ func (r *Rule) Match(src Source) bool {
 	if r == nil || len(r.keys) == 0 {
 		return false
 	}
+	return r.firstUnmet(src) < 0
+}
+
+// Unmet returns the name of the first selector, in name order, that src does
+// not satisfy, or "" when src satisfies every one. It explains a failed Match:
+// a nil or empty Rule matches nothing yet has no selector to name, and returns
+// "".
+func (r *Rule) Unmet(src Source) string {
+	if r == nil {
+		return ""
+	}
+	if i := r.firstUnmet(src); i >= 0 {
+		return r.keys[i].name
+	}
+	return ""
+}
+
+// firstUnmet returns the index of the first key src does not satisfy, or -1.
+func (r *Rule) firstUnmet(src Source) int {
 	for i := range r.keys {
 		rk := &r.keys[i]
 		cur := src.Lookup(rk.name)
 		if !rk.matches(&cur) {
-			return false
+			return i
 		}
 	}
-	return true
+	return -1
 }
 
 // matches reports whether any value cur yields satisfies any of rk's values.

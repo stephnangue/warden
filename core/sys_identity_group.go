@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stephnangue/warden/framework"
+	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stephnangue/warden/internal/namespace"
 	"github.com/stephnangue/warden/logical"
 )
@@ -355,41 +356,13 @@ func errGroupTypeRequired(op string) error {
 func parseRules(raw []any) ([]logical.GroupRule, error) {
 	out := make([]logical.GroupRule, 0, len(raw))
 	for i, item := range raw {
-		m, ok := item.(map[string]any)
-		if !ok {
-			return nil, logical.ErrBadRequestf("rules[%d]: must be an object of selectors (fact name to values), got %T", i, item)
-		}
-		rule := make(logical.GroupRule, len(m))
-		for name, v := range m {
-			values, err := stringList(v)
-			if err != nil {
-				return nil, logical.ErrBadRequestf("rules[%d]: selector %q: %v", i, name, err)
-			}
-			rule[name] = values
+		rule, err := selector.ParseRule(item)
+		if err != nil {
+			return nil, logical.ErrBadRequestf("rules[%d]: %v", i, err)
 		}
 		out = append(out, rule)
 	}
 	return out, nil
-}
-
-func stringList(v any) ([]string, error) {
-	switch t := v.(type) {
-	case string:
-		return []string{t}, nil
-	case []string:
-		return t, nil
-	case []any:
-		out := make([]string, len(t))
-		for i, e := range t {
-			s, ok := e.(string)
-			if !ok {
-				return nil, fmt.Errorf("values must be strings, got %T", e)
-			}
-			out[i] = s
-		}
-		return out, nil
-	}
-	return nil, fmt.Errorf("must be a string or a list of strings, got %T", v)
 }
 
 // parseValidUntil reads a valid_until value: an RFC 3339 instant, or "" for

@@ -37,10 +37,10 @@ func ParseEntityKind(s string) (string, error) {
 // One *Admission is shared by pointer: the token store keeps it on the stored
 // TokenEntry, and every per-request copy of that entry holds the same pointer.
 // Readers on any number of goroutines need no lock: the exported fields do not
-// change after LoginCreateToken, and the one field that does, the cached
-// membership, is an atomic pointer to an immutable Membership, replaced whole
-// (LoadMembership, CompareAndSwapMembership). An Admission must not be copied
-// by value.
+// change after LoginCreateToken, and the two that do, the cached membership and
+// the cached MFA verdict, are atomic pointers to immutable values, replaced
+// whole (LoadMembership, CompareAndSwapMembership; CheckMFA). An Admission must
+// not be copied by value.
 type Admission struct {
 	// MountPath is the admitting mount's path relative to its namespace
 	// ("auth/jwt/", never "ns1/auth/jwt/"), answered as the fact "mount". Only
@@ -89,8 +89,8 @@ type Admission struct {
 	Kind string
 
 	// AuthTime is when the person behind the credential last authenticated to
-	// its identity provider, when the credential says so; zero otherwise. It is
-	// recorded, never checked.
+	// its identity provider, when the credential says so; zero otherwise.
+	// CheckMFA bounds it when the mount sets MFARequirement.ReauthenticateAfter.
 	AuthTime time.Time
 
 	// AudienceBound reports that the credential's audience was checked
@@ -118,6 +118,17 @@ type Admission struct {
 	// It lives here so the cached token entry and every per-request copy share
 	// it: a recompute on one request is seen by the next.
 	membership atomic.Pointer[Membership]
+
+	// mfa caches whether the admission meets the floor (MFARequirement.Rule)
+	// of the naming it was last checked under, shared as membership is.
+	mfa atomic.Pointer[mfaVerdict]
+}
+
+// mfaVerdict is CheckMFA's cached floor verdict: whether the admission meets
+// the floor of naming. Immutable once built.
+type mfaVerdict struct {
+	naming *MountNaming
+	ok     bool
 }
 
 // KeyBinding is the key a ticket is bound to.
@@ -243,8 +254,9 @@ func (m *MountFacts) Load() *MountNaming {
 }
 
 // MountNaming is how one mount configuration names its facts: the canonical
-// names it answers, the kind of entity it admits, and the fact its native
-// identities (aliases) are taken from. It is immutable once published.
+// names it answers, the kind of entity it admits, the fact its native
+// identities (aliases) are taken from, and what it requires of a sign-in. It is
+// immutable once published.
 type MountNaming struct {
 	Mapping *selector.Mapping // built-in and mapped fact names
 	Kind    string            // EntityKindAgent or EntityKindHuman
@@ -254,7 +266,95 @@ type MountNaming struct {
 	// entities by, with the mount accessor. Empty when the mount names none,
 	// and then no admission of the mount carries an alias.
 	AliasSource string
+
+	// MFA is what the mount's mfa_options require of every credential it
+	// admitted, on every use; nil when it sets none. Core checks it on each
+	// request a ticket of the mount makes (Admission.CheckMFA).
+	MFA *MFARequirement
 }
+
+// MFARequirement is what an auth mount's mfa_options require of every
+// credential it admitted: a floor its facts must match, and a bound on how long
+// ago its holder authenticated. It is immutable once published, with the
+// naming that carries it.
+type MFARequirement struct {
+	// Rule is the floor: a rule over the mount's fact names that the
+	// admission's facts must match; nil for none.
+	Rule *selector.Rule
+
+	// ReauthenticateAfter is how long after the admission's AuthTime it stops
+	// being accepted; 0 for no bound. Set, an admission without an AuthTime is
+	// refused.
+	ReauthenticateAfter time.Duration
+
+	// Invalid is why the stored mfa_options did not compile when the mount
+	// loaded them. Set, the requirement admits nothing: a requirement lost at
+	// load must not admit every credential.
+	Invalid error
+}
+
+// CheckMFA's refusals.
+var (
+	ErrMFAInvalid = errors.New("the mount's mfa_options do not compile; " +
+		"it admits no credential until they are rewritten")
+	ErrMFANoAuthTime = errors.New("the credential does not say when its holder authenticated, " +
+		"which mfa_options.reauthenticate_after requires")
+	ErrMFAStale         = errors.New("the credential's authentication is older than mfa_options.reauthenticate_after")
+	ErrMFARequireNotMet = errors.New("the credential does not meet mfa_options.require")
+)
+
+// CheckMFA returns why the admission does not meet n's MFA requirement at now,
+// or nil when it does or n sets none (a nil n sets none). The requirement is
+// read from n, the naming the caller loaded, so every check of one request sees
+// one naming. Freshness is compared on every call; the floor's verdict is
+// cached per naming, so the floor is matched once per admission and mount
+// configuration, and a config write (which publishes a new naming) applies
+// from the next call. A call that finds the verdict cached does not allocate;
+// one that matches allocates the verdict and the source it matches through.
+//
+// Safe for concurrent use: calls that match under one naming reach one
+// verdict, and the compare-and-swap keeps one of them.
+func (a *Admission) CheckMFA(n *MountNaming, now time.Time) error {
+	if n == nil || n.MFA == nil {
+		return nil
+	}
+	r := n.MFA
+	switch {
+	case r.Invalid != nil:
+		return ErrMFAInvalid
+	case a == nil:
+		return ErrMFARequireNotMet
+	}
+	if r.ReauthenticateAfter > 0 {
+		if a.AuthTime.IsZero() {
+			return ErrMFANoAuthTime
+		}
+		if !now.Before(a.AuthTime.Add(r.ReauthenticateAfter)) {
+			return ErrMFAStale
+		}
+	}
+	if r.Rule == nil {
+		return nil
+	}
+	v := a.mfa.Load()
+	if v == nil || v.naming != n {
+		next := &mfaVerdict{naming: n, ok: r.Rule.Match(&namingSource{a: a, n: n})}
+		a.mfa.CompareAndSwap(v, next)
+		v = next
+	}
+	if !v.ok {
+		return ErrMFARequireNotMet
+	}
+	return nil
+}
+
+// namingSource is an admission seen through one naming, as a selector.Source.
+type namingSource struct {
+	a *Admission
+	n *MountNaming
+}
+
+func (s *namingSource) Lookup(name string) selector.Cursor { return s.a.Lookup(s.n, name) }
 
 // NewMountNaming returns a naming for mapping and kind, which ParseEntityKind
 // checks: an empty kind is EntityKindAgent and an unknown one is an error, so a

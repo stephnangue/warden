@@ -425,3 +425,157 @@ func TestAnchorFingerprints(t *testing.T) {
 	assert.Equal(t, []string{fp("root a")}, AnchorFingerprints([][]*x509.Certificate{{leaf, rootA}}))
 	assert.Empty(t, AnchorFingerprints(nil))
 }
+
+func TestParseMFAOptions(t *testing.T) {
+	for _, raw := range []any{nil, map[string]any{}} {
+		o, err := ParseMFAOptions(raw)
+		require.NoError(t, err)
+		assert.Nil(t, o, "%v clears the block", raw)
+	}
+
+	o, err := ParseMFAOptions(map[string]any{
+		"require":              map[string]any{"acrs": []any{"c2", "c1"}, "amr": "mfa"},
+		"reauthenticate_after": "15m",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, &MFAOptions{
+		Require:             map[string][]string{"acrs": {"c2", "c1"}, "amr": {"mfa"}},
+		ReauthenticateAfter: 15 * time.Minute,
+	}, o, "values keep the order listed")
+
+	for _, secs := range []any{900, 900.0, json.Number("900"), "900"} {
+		o, err := ParseMFAOptions(map[string]any{"reauthenticate_after": secs})
+		require.NoError(t, err, "%T", secs)
+		assert.Equal(t, &MFAOptions{ReauthenticateAfter: 15 * time.Minute}, o, "%T is seconds", secs)
+	}
+	for _, d := range []string{"5m", "8h"} {
+		_, err := ParseMFAOptions(map[string]any{"reauthenticate_after": d})
+		assert.NoError(t, err, "%s is within the bounds", d)
+	}
+
+	refused := []struct {
+		raw  any
+		want string
+	}{
+		{"x", "mfa_options: must be an object"},
+		{map[string]any{"max_age": "1h"}, `mfa_options: unknown key "max_age"`},
+		{map[string]any{"require": "acr"}, "mfa_options.require: must be an object of selectors"},
+		{map[string]any{"require": map[string]any{}}, "mfa_options.require: name at least one fact"},
+		{map[string]any{"require": map[string]any{"acr": 2.0}}, `mfa_options.require: selector "acr"`},
+		{map[string]any{"reauthenticate_after": "4m59s"}, "between 5m0s and 8h0m0s"},
+		{map[string]any{"reauthenticate_after": "8h1s"}, "between 5m0s and 8h0m0s"},
+		{map[string]any{"reauthenticate_after": 0}, "leave it out for no bound"},
+		{map[string]any{"reauthenticate_after": ""}, "leave it out for no bound"},
+		{map[string]any{"reauthenticate_after": "-15m"}, "between"},
+		{map[string]any{"reauthenticate_after": "soon"}, "mfa_options.reauthenticate_after: "},
+	}
+	for _, tc := range refused {
+		_, err := ParseMFAOptions(tc.raw)
+		assert.ErrorContains(t, err, tc.want, "%v", tc.raw)
+	}
+}
+
+func TestMFAOptions_Attach(t *testing.T) {
+	compile := func(facts map[string]string) *logical.MountNaming {
+		c := FactsConfig{Facts: facts, EntityKind: logical.EntityKindHuman}
+		c.Compile(testBuiltins, AliasPolicy{Default: "sub"})
+		require.NoError(t, c.Err())
+		return c.Naming()
+	}
+	facts := map[string]string{"acr": "acr", "amr": "amr"}
+
+	n := compile(facts)
+	o := &MFAOptions{
+		Require:             map[string][]string{"acr": {"phr", "2"}, "amr": {"mfa"}},
+		ReauthenticateAfter: time.Hour,
+	}
+	require.NoError(t, o.Attach(n))
+	require.NotNil(t, n.MFA)
+	assert.NoError(t, n.MFA.Invalid)
+	assert.Equal(t, []string{"acr", "amr"}, n.MFA.Rule.Names())
+	assert.Equal(t, time.Hour, n.MFA.ReauthenticateAfter)
+	assert.Equal(t, []string{"phr", "2"}, o.Require["acr"], "the block keeps the values as written")
+
+	// The requirement checks what the mount admits; a numeric acr matches
+	// its rendering.
+	now := time.Now()
+	adm := func(claims map[string]any) *logical.Admission {
+		return &logical.Admission{Facts: selector.NewClaims(claims), AuthTime: now.Add(-time.Minute)}
+	}
+	assert.NoError(t, adm(map[string]any{"acr": 2.0, "amr": []any{"pwd", "mfa"}}).CheckMFA(n, now))
+	assert.ErrorIs(t, adm(map[string]any{"acr": "phr", "amr": []any{"pwd"}}).CheckMFA(n, now), logical.ErrMFARequireNotMet)
+
+	freshOnly := compile(nil)
+	require.NoError(t, (&MFAOptions{ReauthenticateAfter: 10 * time.Minute}).Attach(freshOnly))
+	assert.Nil(t, freshOnly.MFA.Rule)
+
+	// A nil block leaves the naming without a requirement, and a nil naming
+	// (facts that do not compile) is left alone.
+	var none *MFAOptions
+	require.NoError(t, none.Attach(n))
+	assert.Nil(t, n.MFA)
+	assert.NoError(t, o.Attach(nil))
+
+	// A block that does not compile is refused, and the naming it was
+	// attached to admits nothing.
+	refused := []struct {
+		name  string
+		o     *MFAOptions
+		facts map[string]string
+		want  string
+	}{
+		{"unmapped fact", &MFAOptions{Require: map[string][]string{"acrs": {"c1"}}}, facts,
+			`mfa_options.require: "acrs" is not a fact this mount publishes (one of acr, amr, aud, iss, sub); map the claim in facts first`},
+		{"fact dropped from facts", &MFAOptions{Require: map[string][]string{"acr": {"phr"}}}, nil, `"acr" is not a fact`},
+		{"reserved name", &MFAOptions{Require: map[string][]string{"mount": {"auth/oidc/"}}}, facts, `"mount" is not a fact`},
+		{"bad value", &MFAOptions{Require: map[string][]string{"acr": {""}}}, facts, "mfa_options.require: selector \"acr\": empty value"},
+		{"bad name", &MFAOptions{Require: map[string][]string{"ACR": {"x"}}}, facts, "mfa_options.require: "},
+		{"stored bound too short", &MFAOptions{ReauthenticateAfter: time.Minute}, facts, "between 5m0s and 8h0m0s"},
+		{"stored empty block", &MFAOptions{}, facts, "set require, reauthenticate_after or both"},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			n := compile(tc.facts)
+			err := tc.o.Attach(n)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+			require.NotNil(t, n.MFA, "a block that does not compile still sets a requirement")
+			assert.Equal(t, err, n.MFA.Invalid)
+			assert.ErrorIs(t, adm(map[string]any{"acr": "phr"}).CheckMFA(n, now), logical.ErrMFAInvalid)
+		})
+	}
+}
+
+// mfa_options is stored as written: the values in the order listed, the
+// bound as a duration.
+func TestMFAOptions_JSON(t *testing.T) {
+	o := &MFAOptions{Require: map[string][]string{"acr": {"phrh", "phr"}}, ReauthenticateAfter: 15 * time.Minute}
+	b, err := json.Marshal(o)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"require":{"acr":["phrh","phr"]},"reauthenticate_after":900000000000}`, string(b))
+	var back MFAOptions
+	require.NoError(t, json.Unmarshal(b, &back))
+	assert.Equal(t, o, &back)
+
+	b, err = json.Marshal(&MFAOptions{ReauthenticateAfter: time.Hour})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"reauthenticate_after":3600000000000}`, string(b))
+}
+
+func TestMFAOptions_Warnings(t *testing.T) {
+	var none *MFAOptions
+	assert.Nil(t, none.Warnings())
+	assert.Nil(t, (&MFAOptions{Require: map[string][]string{"acr": {"phr", `a\*b`}}}).Warnings(),
+		"exact values and escaped stars warn of nothing")
+
+	got := (&MFAOptions{Require: map[string][]string{
+		"amr": {"mfa"},
+		"acr": {"https://refeds.org/profile/*", "c?"},
+	}}).Warnings()
+	assert.Equal(t, []string{
+		`mfa_options.require: "https://refeds.org/profile/*" (fact "acr") is a pattern: it is matched, ` +
+			`never asked of the identity provider, and its "*" stops at "/" ("**" crosses it)`,
+		`mfa_options.require: "c?" (fact "acr") is a pattern: it is matched, ` +
+			`never asked of the identity provider, and its "*" stops at "/" ("**" crosses it)`,
+	}, got)
+}

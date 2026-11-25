@@ -2,10 +2,12 @@ package logical
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stephnangue/warden/helper/selector"
 	"github.com/stretchr/testify/assert"
@@ -347,6 +349,126 @@ func TestAdmissionRenderMetadata_Nil(t *testing.T) {
 	assert.Nil(t, adm.RenderMetadata(builtinsOnly), "no mapped names")
 	absentOnly := testNaming(t, testMapping(t, nil, map[string]string{"absent": "gone"}), EntityKindAgent)
 	assert.Nil(t, adm.RenderMetadata(absentOnly), "nothing rendered")
+}
+
+// withMFA returns a copy of n requiring r.
+func withMFA(n *MountNaming, r *MFARequirement) *MountNaming {
+	c := *n
+	c.MFA = r
+	return &c
+}
+
+func mfaRule(t testing.TB, s map[string][]string) *selector.Rule {
+	t.Helper()
+	r, err := selector.Compile(s)
+	require.NoError(t, err)
+	return r
+}
+
+func TestAdmissionCheckMFA(t *testing.T) {
+	adm, naming := jwtAdmission(t)
+	now := time.Unix(1_800_000_000, 0)
+	adm.AuthTime = now.Add(-10 * time.Minute)
+
+	fresh := &MFARequirement{ReauthenticateAfter: 15 * time.Minute}
+	floor := &MFARequirement{Rule: mfaRule(t, map[string][]string{"repo": {"acme/api", "acme/web"}, "env": {"prod"}})}
+	cases := []struct {
+		name string
+		adm  *Admission
+		n    *MountNaming
+		now  time.Time
+		want error
+	}{
+		{"no naming", adm, nil, now, nil},
+		{"no requirement", adm, naming, now, nil},
+		{"does not compile", adm, withMFA(naming, &MFARequirement{Invalid: errors.New("x")}), now, ErrMFAInvalid},
+		{"fresh", adm, withMFA(naming, fresh), now, nil},
+		{"one tick before the bound", adm, withMFA(naming, fresh), adm.AuthTime.Add(15*time.Minute - 1), nil},
+		{"at the bound", adm, withMFA(naming, fresh), adm.AuthTime.Add(15 * time.Minute), ErrMFAStale},
+		{"past the bound", adm, withMFA(naming, fresh), now.Add(time.Hour), ErrMFAStale},
+		{"no auth time", &Admission{Facts: adm.Facts, Mount: adm.Mount}, withMFA(naming, fresh), now, ErrMFANoAuthTime},
+		{"floor met", adm, withMFA(naming, floor), now, nil},
+		{"floor met, no auth time needed", &Admission{Facts: adm.Facts}, withMFA(naming, floor), now, nil},
+		{"floor not met", adm, withMFA(naming, &MFARequirement{
+			Rule: mfaRule(t, map[string][]string{"repo": {"acme/api"}, "env": {"dev"}}),
+		}), now, ErrMFARequireNotMet},
+		{"floor on an absent fact", adm, withMFA(naming, &MFARequirement{
+			Rule: mfaRule(t, map[string][]string{"gone": {"x"}}),
+		}), now, ErrMFARequireNotMet},
+		{"floor on a name the mount does not map", adm, withMFA(naming, &MFARequirement{
+			Rule: mfaRule(t, map[string][]string{"email": {"a@example.com"}}),
+		}), now, ErrMFARequireNotMet},
+		{"both, stale", adm, withMFA(naming, &MFARequirement{Rule: floor.Rule, ReauthenticateAfter: 5 * time.Minute}), now, ErrMFAStale},
+		{"nil admission", nil, withMFA(naming, floor), now, ErrMFARequireNotMet},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.adm.CheckMFA(tc.n, tc.now))
+		})
+	}
+}
+
+// The floor's verdict is cached per naming: a new naming, published by a
+// config write, is matched afresh, and a cached verdict costs nothing.
+func TestAdmissionCheckMFA_VerdictPerNaming(t *testing.T) {
+	adm, naming := jwtAdmission(t)
+	now := time.Now()
+	met := withMFA(naming, &MFARequirement{Rule: mfaRule(t, map[string][]string{"repo": {"acme/api"}})})
+	tightened := withMFA(naming, &MFARequirement{Rule: mfaRule(t, map[string][]string{"repo": {"acme/web"}})})
+
+	require.NoError(t, adm.CheckMFA(met, now))
+	assert.ErrorIs(t, adm.CheckMFA(tightened, now), ErrMFARequireNotMet, "a tightened floor applies at once")
+	require.NoError(t, adm.CheckMFA(met, now), "and loosening it again too")
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		if adm.CheckMFA(met, now) != nil {
+			panic("refused")
+		}
+	})
+	assert.Zero(t, allocs, "a cached verdict does not allocate")
+
+	stale := withMFA(naming, &MFARequirement{Rule: met.MFA.Rule, ReauthenticateAfter: time.Hour})
+	adm.AuthTime = now.Add(-time.Minute)
+	require.NoError(t, adm.CheckMFA(stale, now))
+	allocs = testing.AllocsPerRun(1000, func() {
+		if adm.CheckMFA(stale, now) != nil {
+			panic("refused")
+		}
+	})
+	assert.Zero(t, allocs, "nor does freshness")
+}
+
+// Concurrent checks under two namings, one met and one not, while both race to
+// cache their verdict: each check answers for the naming it was given, never
+// for the other's cached verdict.
+func TestAdmissionCheckMFA_Concurrent(t *testing.T) {
+	adm, naming := jwtAdmission(t)
+	met := withMFA(naming, &MFARequirement{Rule: mfaRule(t, map[string][]string{"repo": {"acme/api"}})})
+	unmet := withMFA(naming, &MFARequirement{Rule: mfaRule(t, map[string][]string{"repo": {"acme/web"}})})
+	now := time.Now()
+
+	const workers, rounds = 8, 2000
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			for i := range rounds {
+				n, want := met, error(nil)
+				if (i+w)%2 == 1 {
+					n, want = unmet, ErrMFARequireNotMet
+				}
+				if got := adm.CheckMFA(n, now); got != want {
+					errs <- fmt.Errorf("round %d: CheckMFA = %v; want %v", i, got, want)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
 }
 
 // An admission never leaves memory: the structs that are serialized (the

@@ -5,10 +5,12 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -423,6 +425,206 @@ func TestTicket_KindFlipRefusesLiveTickets(t *testing.T) {
 	e.issuer.mf.Publish(&n)
 	_, err = e.c.LookupToken(e.ctx, value)
 	assert.ErrorIs(t, err, ErrTokenNotFound, "a cached ticket is refused too")
+}
+
+// publishMFA publishes a copy of base requiring floor (nil for none) and a
+// sign-in no older than reauth (0 for no bound), as a config write setting
+// mfa_options would, and returns it.
+func (e *ticketEnv) publishMFA(b *ticketIssuer, base *logical.MountNaming, floor map[string][]string, reauth time.Duration) *logical.MountNaming {
+	e.t.Helper()
+	n := *base
+	n.MFA = &logical.MFARequirement{ReauthenticateAfter: reauth}
+	if floor != nil {
+		r, err := selector.Compile(floor)
+		require.NoError(e.t, err)
+		n.MFA.Rule = r
+	}
+	b.mf.Publish(&n)
+	return &n
+}
+
+// A ticket is checked against the issuing mount's mfa_options in force on
+// every request, cached or decoded: turning them on or tightening them refuses
+// tickets already issued, and the floor matches the facts as the ticket
+// carries them (a number, an array element, a nested claim).
+func TestTicket_MFARefusesLiveTickets(t *testing.T) {
+	e := newTicketEnv(t)
+	value, _ := e.login(e.ctx, e.issuer, e.mount, time.Hour)
+	base := e.issuer.mf.Load()
+
+	// Another mount's tickets answer to its own options only.
+	otherIssuer, otherMount := e.mountIssuer(e.ctx, "oidc-b/")
+	other, _ := e.login(e.ctx, otherIssuer, otherMount, time.Hour)
+
+	cases := []struct {
+		name   string
+		floor  map[string][]string
+		reauth time.Duration
+		ok     bool
+	}{
+		{"number", map[string][]string{"level": {"3"}}, 0, true},
+		{"array element", map[string][]string{"roles": {"Warden.Auditor"}}, 0, true},
+		{"nested claim", map[string][]string{"country": {"CM"}}, 0, true},
+		{"boolean", map[string][]string{"admin": {"true"}}, 0, true},
+		{"built-in fact", map[string][]string{"tid": {"tenant"}}, 0, true},
+		{"fresh enough", nil, 5 * time.Minute, true},
+		{"floor and freshness", map[string][]string{"level": {"2", "3"}}, 5 * time.Minute, true},
+		{"value not held", map[string][]string{"level": {"4"}}, 0, false},
+		{"one selector not met", map[string][]string{"level": {"3"}, "roles": {"Warden.Admin"}}, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e.publishMFA(e.issuer, base, tc.floor, tc.reauth)
+			for _, cold := range []bool{false, true} {
+				if cold {
+					e.flushCache()
+				}
+				_, err := e.c.LookupToken(e.ctx, value)
+				_, rerr := e.c.tokenStore.ResolveToken(e.ctx, value)
+				if tc.ok {
+					assert.NoError(t, err, "cold cache %v", cold)
+					assert.NoError(t, rerr, "resolve, cold cache %v", cold)
+				} else {
+					assert.ErrorIs(t, err, ErrTokenNotFound, "cold cache %v", cold)
+					assert.ErrorIs(t, rerr, ErrTokenNotFound, "resolve, cold cache %v", cold)
+				}
+				_, err = e.c.LookupToken(e.ctx, other)
+				assert.NoError(t, err, "another mount's ticket, cold cache %v", cold)
+			}
+		})
+	}
+
+	n := *base
+	n.MFA = &logical.MFARequirement{Invalid: errors.New("stored mfa_options do not compile")}
+	e.issuer.mf.Publish(&n)
+	_, err := e.c.LookupToken(e.ctx, value)
+	assert.ErrorIs(t, err, ErrTokenNotFound, "a requirement that does not compile admits nothing")
+
+	e.issuer.mf.Publish(base)
+	_, err = e.c.LookupToken(e.ctx, value)
+	assert.NoError(t, err, "turning MFA off admits the ticket again")
+}
+
+// reauthenticate_after bounds the sign-in a ticket carries, sealed at login:
+// a ticket without one is refused once a bound is set.
+func TestTicket_MFAReauthenticateAfter(t *testing.T) {
+	e := newTicketEnv(t)
+	now := time.Now()
+	withAuthTime := func(at int64) string {
+		p := e.payload()
+		p.AuthTime = at
+		return e.seal(p)
+	}
+	recent := withAuthTime(now.Add(-10 * time.Minute).Unix())
+	old := withAuthTime(now.Add(-2 * time.Hour).Unix())
+	none := withAuthTime(0)
+	for _, v := range []string{recent, old, none} {
+		_, err := e.c.LookupToken(e.ctx, v)
+		require.NoError(t, err, "no bound yet")
+	}
+
+	base := e.issuer.mf.Load()
+	e.publishMFA(e.issuer, base, nil, time.Hour)
+	_, err := e.c.LookupToken(e.ctx, recent)
+	assert.NoError(t, err)
+	_, err = e.c.LookupToken(e.ctx, old)
+	assert.ErrorIs(t, err, ErrTokenNotFound, "signed in longer ago than the bound")
+	_, err = e.c.LookupToken(e.ctx, none)
+	assert.ErrorIs(t, err, ErrTokenNotFound, "says nothing of when its holder signed in")
+
+	e.publishMFA(e.issuer, base, nil, 5*time.Minute)
+	_, err = e.c.LookupToken(e.ctx, recent)
+	assert.ErrorIs(t, err, ErrTokenNotFound, "a tightened bound applies to cached tickets")
+
+	// The bound is measured at the request: a held entry passes now and is
+	// refused once the sign-in is older than the bound.
+	e.publishMFA(e.issuer, base, nil, 15*time.Minute)
+	entry, err := e.c.ticketEntry(e.ctx, tokenID(ticketIDPrefix, recent), recent)
+	require.NoError(t, err)
+	require.NoError(t, e.c.checkTicket(entry, recent, e.ns, now))
+	err = e.c.checkTicket(entry, recent, e.ns, now.Add(5*time.Minute))
+	assert.ErrorIs(t, err, logical.ErrMFAStale)
+}
+
+// The MFA check adds no allocation to a ticket's per-request checks once the
+// floor's verdict is cached, and a cache hit stays within ticketHitAllocs.
+func TestTicket_MFAHitAllocations(t *testing.T) {
+	e := newTicketEnv(t)
+	value, _ := e.login(e.ctx, e.issuer, e.mount, time.Hour)
+	entry, err := e.c.ticketEntry(e.ctx, tokenID(ticketIDPrefix, value), value)
+	require.NoError(t, err)
+	now := time.Now()
+	check := func() {
+		if err := e.c.checkTicket(entry, value, e.ns, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	without := testing.AllocsPerRun(100, check)
+
+	e.publishMFA(e.issuer, e.issuer.mf.Load(), map[string][]string{"roles": {"Warden.Auditor"}, "level": {"3"}}, time.Hour)
+	check()
+	assert.Equal(t, without, testing.AllocsPerRun(100, check), "a cached verdict costs no allocation")
+
+	_, err = e.c.lookupTicket(e.ctx, value, nil)
+	require.NoError(t, err)
+	e.c.tokenStore.byID.Wait()
+	allocs := testing.AllocsPerRun(100, func() {
+		if _, err := e.c.lookupTicket(e.ctx, value, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	assert.LessOrEqual(t, allocs, float64(ticketHitAllocs))
+}
+
+// Config writes racing requests: every request sees one naming whole, and a
+// floor verdict cached under one naming never answers for another. Both
+// namings admit the ticket, so every request must pass.
+func TestTicket_MFAConfigWriteRace(t *testing.T) {
+	e := newTicketEnv(t)
+	value, _ := e.login(e.ctx, e.issuer, e.mount, time.Hour)
+	base := e.issuer.mf.Load()
+	a := e.publishMFA(e.issuer, base, map[string][]string{"level": {"3"}}, 0)
+	b := e.publishMFA(e.issuer, base, map[string][]string{"roles": {"Warden.Operator"}}, time.Hour)
+
+	stop := make(chan struct{})
+	var writer sync.WaitGroup
+	writer.Go(func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			switch i % 3 {
+			case 0:
+				e.issuer.mf.Publish(a)
+			case 1:
+				e.issuer.mf.Publish(b)
+			default:
+				e.issuer.mf.Publish(base)
+			}
+		}
+	})
+	const readers, rounds = 8, 500
+	errs := make(chan error, readers)
+	var wg sync.WaitGroup
+	for range readers {
+		wg.Go(func() {
+			for range rounds {
+				if _, err := e.c.lookupTicket(e.ctx, value, nil); err != nil {
+					errs <- err
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(stop)
+	writer.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
 }
 
 func TestTicket_Namespaces(t *testing.T) {

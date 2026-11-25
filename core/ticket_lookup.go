@@ -24,7 +24,10 @@ import (
 //  1. the ticket has not expired;
 //  2. the issuing mount still exists in the ticket's namespace (the accessor
 //     is looked up exactly) and publishes facts;
-//  3. that mount still admits the kind the ticket was issued for;
+//  3. that mount still admits the kind the ticket was issued for, and the
+//     ticket meets what the mount's mfa_options require now
+//     (Admission.CheckMFA), so turning MFA on or tightening it refuses tickets
+//     already issued;
 //  4. the request's namespace is the ticket's or one of its children;
 //  5. for a ticket bound to a key, proof proves the request holds it
 //     (checkTicketProof). It refuses with a *ticketProofError, or the coded
@@ -178,6 +181,9 @@ func (c *Core) checkTicket(entry *TokenEntry, value string, ns *namespace.Namesp
 	naming := fp.MountFacts().Load()
 	if naming == nil || naming.Kind != entry.Admission.Kind {
 		return fmt.Errorf("issuing mount %q no longer admits %q", entry.MountAccessor, entry.Admission.Kind)
+	}
+	if err := entry.Admission.CheckMFA(naming, now); err != nil {
+		return fmt.Errorf("issuing mount %q: %w", entry.MountAccessor, err)
 	}
 	tokenNs := me.Namespace()
 	if !namespace.Within(ns, tokenNs) {
