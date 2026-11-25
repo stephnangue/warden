@@ -213,6 +213,10 @@ An IAM trust policy for a custom OIDC issuer can condition on `sub` and `aud`, a
   `aws:PrincipalTag/<key>` for attribute-based access control.
 - No `warden_*` claim is emitted. An explicit `assertion_resource` is refused.
 - With no role and no metadata, no tags claim is emitted at all.
+- With trusted identity propagation turned on for the IAM provider, `sub` stays with the
+  session: CloudTrail records it on each call, and IAM policies, resource policies
+  included, read it as `aws:OriginIdentity/Subject`. See
+  [Name the agent in CloudTrail](/provider-backends/aws/#name-the-agent-in-cloudtrail).
 
 :::caution[The trust policy must allow `sts:TagSession`]
 AWS refuses a web identity token that carries session tags unless the role's trust policy
@@ -231,6 +235,10 @@ with a reason rather than by STS: at most 50 tags (one is the role, so at most 4
 keys); keys up to 128 characters and values up to 256; letters, numbers, spaces and
 `_ . : / = + - @` only; no `aws:` prefix; and keys unique ignoring case. Keys are checked
 when the spec is written, values at mint. The subject may be at most 255 characters.
+
+Trusted identity propagation tightens the subject's limit to 128 characters, drawn from the
+same characters as a tag value. Warden cannot see that setting on the IAM provider, so it
+does not check this limit. STS refuses such a token with `InvalidIdentityToken`.
 
 ## Audience
 

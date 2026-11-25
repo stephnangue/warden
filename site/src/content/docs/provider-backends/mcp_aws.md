@@ -109,7 +109,9 @@ For a single developer with a laptop and personal AWS creds, `mcp-proxy-for-aws`
 On the keyless path that role's trust policy allows `sts:AssumeRoleWithWebIdentity` **and
 `sts:TagSession`** from an **IAM OIDC identity provider** pointed at Warden's issuer — see
 [Keyless credentials](/federation/keyless-credentials/). There is **no IAM user and no
-access key** to create.
+access key** to create. Turn on trusted identity propagation on that provider, and
+CloudTrail names the agent behind each call; see
+[Name the agent in CloudTrail](/provider-backends/aws/#name-the-agent-in-cloudtrail).
 
 Falling back to stored keys adds one: permanent IAM credentials for an identity holding
 `sts:AssumeRole` on the target role, which stay inside Warden's credential source and never

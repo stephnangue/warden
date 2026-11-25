@@ -68,6 +68,23 @@ federates Warden's issuer. A new spec mints with `assertion_profile=aws`, so the
 policy must allow **`sts:TagSession`** beside `sts:AssumeRoleWithWebIdentity`. See
 [AWS driver](/credential-drivers/aws/).
 
+Register Warden's issuer once per AWS account, as an **IAM OIDC identity provider**. Its
+URL must match the `iss` of Warden's assertions, which is the issuer's `issuer_url`, and
+its audience is the source's `audience` (`sts.amazonaws.com` by default). The
+`--context-provider` flag turns on trusted identity propagation, so CloudTrail names the
+agent behind each call; see
+[Name the agent in CloudTrail](/provider-backends/aws/#name-the-agent-in-cloudtrail):
+
+```bash
+aws iam create-open-id-connect-provider \
+  --url "https://warden.example.com" \
+  --client-id-list "sts.amazonaws.com" \
+  --context-provider '{"SubjectSourceKey": "sub", "SubjectTypeValue": "workload"}'
+```
+
+The provider's ARN, `arn:aws:iam::<ACCOUNT_ID>:oidc-provider/warden.example.com`, is the
+`Federated` principal in each role's trust policy.
+
 ### Azure
 
 - **`bearer_token`** — Warden presents the assertion to Entra as a `client_assertion`

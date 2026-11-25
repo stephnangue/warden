@@ -29,6 +29,10 @@ and projected metadata travel as **session tags**, so the role's trust policy mu
 **`sts:TagSession`** as well as `sts:AssumeRoleWithWebIdentity`, or STS refuses the token.
 Set `assertion_profile=default` on the spec to mint without tags.
 
+Turn on trusted identity propagation on the IAM OIDC identity provider, and CloudTrail
+records the agent's subject on each call the session makes; see
+[Name the agent in CloudTrail](/provider-backends/aws/#name-the-agent-in-cloudtrail).
+
 ## Credential issued
 
 - `sts_assume_role` and `secrets_manager` issue **`aws_access_keys`**.
