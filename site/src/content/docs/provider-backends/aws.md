@@ -117,7 +117,9 @@ Warden's issuer, and target roles whose trust policy allows both
 `sts:AssumeRoleWithWebIdentity` and **`sts:TagSession`** from it — new specs carry the
 agent's role as a session tag, and STS refuses a tagged token without the second action.
 That setup lives in [Keyless credentials](/federation/keyless-credentials/), which covers
-the issuer and the trust policy together.
+the issuer and the trust policy together. Turn on trusted identity propagation on that
+provider as well, and CloudTrail names the agent behind each call; see
+[Name the agent in CloudTrail](#name-the-agent-in-cloudtrail).
 
 There is **no IAM user and no access key** to create. If you cannot federate and must fall
 back to stored keys, [Appendix: IAM setup for stored keys](#appendix-iam-setup-for-stored-keys)
@@ -624,6 +626,95 @@ The client certificate is presented during the TLS handshake (or forwarded by a 
 
 The AWS CLI does not support presenting client certificates for mTLS. Cert auth requires an HTTP client that supports mTLS, or a load balancer in front of Warden that forwards the client certificate via the `X-SSL-Client-Cert` or `X-Forwarded-Client-Cert` header. When Warden is behind such a load balancer, the AWS CLI works as normal:
 
+## Name the agent in CloudTrail
+
+Warden names each AWS session after its spec (`warden-<spec>`), so every agent that uses a
+spec appears in CloudTrail as the same role session. AWS **trusted identity propagation**
+tells them apart. Turn it on for the IAM OIDC identity provider that trusts Warden. AWS
+then attaches the assertion's `sub`, the agent's `wid:…` subject, to every session it
+issues. Each CloudTrail event from that session names the agent, and IAM policies can
+read it. Warden needs no change.
+
+### Turn it on
+
+Point the provider's subject at `sub`. Mark every session as a workload: on an AWS source,
+Warden's assertion always names the agent, never a user.
+
+```bash
+aws iam update-open-id-connect-provider \
+  --open-id-connect-provider-arn "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/warden.example.com" \
+  --context-provider '{"SubjectSourceKey": "sub", "SubjectTypeValue": "workload"}'
+```
+
+A provider you have not created yet takes the same `--context-provider` when you create
+it; see [Keyless credentials](/federation/keyless-credentials/#aws). This works only on
+the keyless path: `auth_method=oidc_federation` with
+`subject_token_source=warden_identity`. A session minted from stored IAM keys carries no
+agent. With `agent_identity`, AWS applies the settings of your identity provider's IAM
+provider, not Warden's.
+
+:::caution[Check your agents' subjects first]
+Once it is on, AWS refuses a token whose subject is longer than 128 characters or contains
+anything other than letters, numbers, spaces and `_ . : / = + - @`. STS answers
+`InvalidIdentityToken`, and the setting covers every Warden mint into that account.
+
+The subject is `wid:<namespaceID>:<mountAccessor>:<principalID>`, which leaves about 100
+characters for the agent's own ID. That ID is the JWT claim named by the jwt mount's
+`user_claim` (default `sub`), or the certificate field named by the cert mount's
+`principal_claim`.
+
+An Auth0 subject such as `auth0|64f1…` fails because of the `|`, and so does a long SPIFFE
+ID. Check the `auth.principal_id` values in the [audit log](/concepts/audit/#auth) before
+you turn it on. If one does not fit, point `user_claim` or `principal_claim` at a field
+that does.
+:::
+
+### What CloudTrail shows
+
+The `AssumeRoleWithWebIdentity` event carries the agent under `userIdentity.onBehalfOf`, and
+so does each later event the session produces:
+
+```json
+"onBehalfOf": {
+  "subject": "wid:ns-3f2a1b:auth_jwt_9c1e:agent-checkout-7",
+  "subjectType": "workload",
+  "issuer": "warden.example.com",
+  "federatedProviderArn": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/warden.example.com"
+}
+```
+
+Only the services on
+[AWS's list](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_tip_services.html)
+record it, so check that list for the services your agents call. For any other service,
+match the event's `accessKeyId` to the `response.credential.lease_id` that Warden's
+[audit log](/concepts/audit/#responsecredential) records for the issuance:
+`sts:<AccessKeyId>`. A session that assumes a role in another AWS organization loses the
+agent.
+
+### Write policies about agents
+
+IAM policies read the agent as `aws:OriginIdentity/Subject` and Warden's issuer as
+`aws:OriginIdentity/Issuer`, which is the `issuer_url` without `https://`. For example, a
+bucket owner can restrict a role that several teams share to one Warden namespace's
+agents:
+
+```json
+{
+  "Effect": "Deny",
+  "Principal": "*",
+  "Action": "s3:*",
+  "Resource": ["arn:aws:s3:::payments-data", "arn:aws:s3:::payments-data/*"],
+  "Condition": {
+    "ArnEquals": {"aws:PrincipalArn": "arn:aws:iam::<ACCOUNT_ID>:role/devops-readonly-role"},
+    "StringNotLike": {"aws:OriginIdentity/Subject": "wid:ns-3f2a1b:*"}
+  }
+}
+```
+
+A session that carries no agent also matches `StringNotLike`, so it is denied, which is the
+safe outcome for a Deny. In an **Allow**, do not use the `…IfExists` operators on these
+keys: a session without the key would match.
+
 ## Cleanup
 
 To stop Warden and the identity provider:
@@ -824,7 +915,19 @@ Read the error code: Warden answers in the service's own protocol (see
   `AccessDeniedException`: the request authenticated, and a Warden policy refused it.
 - **STS's own code**, with a message starting `Warden: could not obtain AWS credentials:`
   — STS refused the assume-role. With `assertion_profile=aws`, a missing
-  `sts:TagSession` in the trust policy is the usual cause.
+  `sts:TagSession` in the trust policy is the usual cause. If this started after you
+  turned on trusted identity propagation, see the next section.
+
+### STS refuses the token after trusted identity propagation is turned on
+
+The message starts `Warden: could not obtain AWS credentials:` and carries STS's code,
+with status `400`:
+
+- **`InvalidIdentityToken`**: the agent's subject is longer than 128 characters or
+  contains a character AWS does not accept. See
+  [Check your agents' subjects first](#name-the-agent-in-cloudtrail).
+- **`PackedPolicyTooLarge`**: the agent's identity and its session tags together exceed
+  the session's size limit. List fewer keys in `assertion_metadata_claims`.
 
 ### S3 Control API returns 403
 
