@@ -39,11 +39,14 @@ import (
 // on this host, so they reach it.
 type HumanIdP struct {
 	URL string
+	as  *playground.AuthServer
 }
 
 // StartHumanIdP serves an identity provider signing in people (subject to
-// extra ID token claims) until the test ends.
-func StartHumanIdP(t *testing.T, people map[string]map[string]any) *HumanIdP {
+// extra ID token claims) until the test ends. opts edit its configuration
+// (the acr values people reach, whether it ignores requests for a new
+// sign-in).
+func StartHumanIdP(t *testing.T, people map[string]map[string]any, opts ...func(*playground.AuthServerConfig)) *HumanIdP {
 	t.Helper()
 	var h atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -52,17 +55,28 @@ func StartHumanIdP(t *testing.T, people map[string]map[string]any) *HumanIdP {
 	t.Cleanup(srv.Close)
 	idp, err := playground.NewIdP(srv.URL)
 	require.NoError(t, err)
-	as, err := playground.NewAuthServer(playground.AuthServerConfig{
+	cfg := playground.AuthServerConfig{
 		IdP: idp,
 		// The token exchange is not used here; its keys are fetched lazily.
 		WardenIssuer:  "https://warden.invalid",
 		WardenJWKSURL: "https://warden.invalid/jwks",
 		Audiences:     []string{"unused"},
 		People:        people,
-	})
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	as, err := playground.NewAuthServer(cfg)
 	require.NoError(t, err)
 	h.Store(as.Handler())
-	return &HumanIdP{URL: srv.URL}
+	return &HumanIdP{URL: srv.URL, as: as}
+}
+
+// StartSession records that person signed in at the identity provider at at,
+// as an earlier sign-in would: the next login reuses that session unless it
+// asks for a new one.
+func (i *HumanIdP) StartSession(person string, at time.Time) {
+	i.as.StartSession(person, at)
 }
 
 // OIDCMountConfig is the config of an oidc auth mount signing people in at
@@ -221,6 +235,23 @@ func SessionTicket(t *testing.T, home string) string {
 		t.Fatalf("the session keeps its key in %q: e2e logins keep it in the file", s.KeyStore)
 	}
 	return s.Token
+}
+
+// SessionExpiry returns when the only session saved under home expires, as
+// the server said at login.
+func SessionExpiry(t *testing.T, home string) time.Time {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(home, ".warden", "sessions", "*.json"))
+	require.NoError(t, err)
+	require.Len(t, files, 1, "one session saved")
+	data, err := os.ReadFile(files[0])
+	require.NoError(t, err)
+	var s struct {
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	require.NoError(t, json.Unmarshal(data, &s))
+	require.False(t, s.ExpiresAt.IsZero(), "the session records its expiry")
+	return s.ExpiresAt
 }
 
 // boundKeys holds the key of every bound ticket SessionTicket read.

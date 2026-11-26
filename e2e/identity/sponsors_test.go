@@ -12,6 +12,7 @@ import (
 
 	"github.com/stephnangue/warden/audit"
 	h "github.com/stephnangue/warden/e2e/helpers"
+	"github.com/stephnangue/warden/internal/playground"
 )
 
 // People of the sponsors' identity provider: Ada administers agents and leads
@@ -62,7 +63,7 @@ type sponsorsEnv struct {
 	accessor string
 }
 
-func newSponsorsEnv(t *testing.T) *sponsorsEnv {
+func newSponsorsEnv(t *testing.T, idpOpts ...func(*playground.AuthServerConfig)) *sponsorsEnv {
 	t.Helper()
 	port := h.GetLeaderPort(t)
 	e := &sponsorsEnv{
@@ -84,8 +85,10 @@ func newSponsorsEnv(t *testing.T) *sponsorsEnv {
 		sponsorAda:   {"roles": []any{"Warden.Admin", "Billing.Lead"}},
 		sponsorBob:   {"roles": []any{"Finance.Oncall"}},
 		sponsorCarol: {"roles": []any{}},
-	})
-	h.EnableAuth(t, port, "", e.mount, "oidc", h.OIDCMountConfig(idp, nil))
+	}, idpOpts...)
+	h.EnableAuth(t, port, "", e.mount, "oidc", h.OIDCMountConfig(idp, map[string]any{
+		"facts": map[string]any{"roles": "roles", "groups": "groups", "acr": "acr"},
+	}))
 	e.accessor = mountAccessor(t, port, e.mount)
 	mount := h.AuthMountPath(e.mount)
 	for group, appRole := range map[string]string{e.leads: "Billing.Lead", e.oncall: "Finance.Oncall"} {
@@ -315,4 +318,50 @@ func TestSponsors_EndToEnd(t *testing.T) {
 	}
 	assert(proposed.Sponsor == nil && proposed.PendingSponsor != nil && proposed.GovernedBy == "",
 		"root's proposal: %+v, want pending only", proposed)
+}
+
+// TestSponsors_MFA: sponsor actions take no role, so MFA is required of
+// sponsors where membership is decided, in the sponsor team's rule, and by the
+// mount's mfa_options, which apply on the sponsor surface as everywhere.
+//
+// Finance on-call's rule requires a phishing-resistant sign-in (acr phr). Bob,
+// signed in with any MFA, is refused the agent offered to his team. Once the
+// mount asks every sign-in for phr, his old session is refused outright, and a
+// new one, signed in with phr, accepts the agent.
+func TestSponsors_MFA(t *testing.T) {
+	e := newSponsorsEnv(t, func(c *playground.AuthServerConfig) {
+		c.ACRs = map[string][]string{sponsorAda: {"phr"}, sponsorBob: {"mfa", "phr"}}
+	})
+	const agent = "payments-agent"
+	t.Cleanup(func() { h.NSRequestBestEffort(e.port, e.ns, "DELETE", "sys/identity/entity/"+agent+"?force=true") })
+	h.WriteGroupInNS(t, e.port, "", e.oncall, h.Group{Rules: []map[string][]string{
+		{"mount": {h.AuthMountPath(e.mount)}, "kind": {"human"}, "roles": {"Finance.Oncall"}, "acr": {"phr"}},
+	}})
+	if stdout, stderr, err := e.root("identity", "entity", "create", agent, "-description", "Pays approved invoices"); err != nil {
+		t.Fatalf("create: %v\n%s\n%s", err, stdout, stderr)
+	}
+	e.login(sponsorAda, "-role="+e.admin)
+	if _, stderr := e.mustAs(sponsorAda, "identity", "entity", "sponsor", "propose", agent,
+		"-group", e.oncall, "-group-namespace", "/"); !strings.Contains(stderr, "is pending") {
+		t.Fatalf("propose: stderr %q, want a pending handover", stderr)
+	}
+
+	// Nothing is asked of the sign-in yet: the identity provider gives Bob
+	// any MFA, which his team's rule does not take.
+	e.login(sponsorBob)
+	_, stderr, err := e.as(sponsorBob, "identity", "sponsor", "accept", agent)
+	refused(t, "Bob signed in with any MFA", stderr, err)
+	old := h.SessionTicket(t, e.homes[sponsorBob])
+
+	h.MustNS(t, e.port, "", "PUT", "auth/"+e.mount+"/config", h.JSON(t, map[string]any{
+		"mfa_options": map[string]any{"require": map[string]any{"acr": "phr"}},
+	}))
+	status, body := h.TicketRequest(t, "GET", "sys/identity/sponsor/"+agent, e.port, old, map[string]string{"X-Warden-Namespace": e.ns})
+	expectStatus(t, "Bob's old session under the floor", status, body, http.StatusUnauthorized)
+
+	e.login(sponsorBob)
+	ent, _ := e.mustAs(sponsorBob, "identity", "sponsor", "accept", agent)
+	if ent.Sponsor == nil || ent.Sponsor.Group != e.oncall || ent.PendingSponsor != nil {
+		t.Fatalf("after Bob's accept, signed in with phr: %+v, want %s the sponsor", ent, e.oncall)
+	}
 }
