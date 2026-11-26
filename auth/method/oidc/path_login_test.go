@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -77,11 +78,198 @@ func TestLogin_AuthTime(t *testing.T) {
 	require.NoError(t, resp.Err)
 	assert.True(t, at.Equal(resp.Auth.Admission.AuthTime), "the ID token's auth_time")
 
-	e.tp.SetOmitAuthTimeClaim(true)
-	resp = e.login(personClaims())
+	// Without auth_time the sign-in time is unknown: the ID token's iat is
+	// when it was issued, which a silent sign-in on an old session renews.
+	// The test provider always sets auth_time (its SetOmitAuthTimeClaim does
+	// nothing), so a null one stands in for none.
+	claims["auth_time"] = nil
+	resp = e.login(claims)
 	require.NoError(t, resp.Err)
-	got := resp.Auth.Admission.AuthTime
-	assert.WithinDuration(t, time.Now(), got, time.Minute, "without auth_time, the ID token's iat")
+	assert.True(t, resp.Auth.Admission.AuthTime.IsZero(), "without auth_time, none")
+
+	// An auth_time slightly ahead of this server's clock is taken as now, so
+	// the session's freshness is not stretched by the skew.
+	claims["auth_time"] = float64(time.Now().Add(40 * time.Second).Unix())
+	resp = e.login(claims)
+	require.NoError(t, resp.Err)
+	assert.False(t, resp.Auth.Admission.AuthTime.After(time.Now()), "clamped to now")
+}
+
+// mfaFacts is the base config's facts with the claims MFA reads mapped.
+func mfaFacts(e *env) map[string]any {
+	facts := maps.Clone(e.baseConfig()["facts"].(map[string]any))
+	facts["acr"] = "acr"
+	facts["acrs"] = "acrs"
+	facts["amr"] = "amr"
+	facts["/ext/loa"] = "loa"
+	return facts
+}
+
+// What a login asks of the identity provider follows mfa_options: the acr
+// floor as acr_values in the order listed, the other claims through the claims
+// parameter when the provider accepts it, and a fresh sign-in with
+// reauthenticate_after. Patterns and nested claims are checked, never asked.
+func TestAuthURL_MFA(t *testing.T) {
+	e := newEnv(t)
+	authURL := func() url.Values {
+		t.Helper()
+		binding, _ := secret()
+		resp := e.call(e.b, "auth_url", map[string]any{"redirect_uri": testRedirect, "login_binding": binding,
+			"dpop_jkt": e.dpopKey.Thumbprint()})
+		require.NoError(t, resp.Err)
+		u, err := url.Parse(resp.Data["auth_url"].(string))
+		require.NoError(t, err)
+		return u.Query()
+	}
+
+	e.mustConfigure(nil)
+	q := authURL()
+	for _, k := range []string{"acr_values", "claims", "max_age", "prompt"} {
+		assert.False(t, q.Has(k), "without mfa_options, no %s", k)
+	}
+
+	e.mustConfigure(map[string]any{"facts": mfaFacts(e), "mfa_options": map[string]any{
+		"require": map[string]any{
+			"acr":  []any{"phrh", "phr", "phrh", "two words"},
+			"acrs": []any{"c2", `c\*1`, "c*"},
+			"amr":  "mfa",
+			"loa":  "2",
+			"sub":  "0583-sub",
+		},
+		"reauthenticate_after": "15m",
+	}})
+	q = authURL()
+	assert.Equal(t, "phrh phr", q.Get("acr_values"), "listed order, each once; a value acr_values cannot carry is left out")
+	assert.Equal(t, "900", q.Get("max_age"))
+	assert.Equal(t, "login", q.Get("prompt"))
+	assert.JSONEq(t, `{"id_token": {
+		"acrs":      {"essential": true, "values": ["c2", "c*1"]},
+		"amr":       {"essential": true, "value": "mfa"},
+		"auth_time": {"essential": true}
+	}}`, q.Get("claims"), "sent though discovery does not advertise the claims parameter; an escaped literal "+
+		"is sent unescaped; the pattern, the nested claim and the built-in sub are not asked")
+
+	// A floor of patterns only asks for nothing; freshness alone asks for a
+	// new sign-in, and max_age makes auth_time required without the claims
+	// parameter.
+	e.mustConfigure(map[string]any{"facts": mfaFacts(e), "mfa_options": map[string]any{
+		"require": map[string]any{"acr": "urn:okta:loa:*"},
+	}})
+	q = authURL()
+	for _, k := range []string{"acr_values", "claims", "max_age", "prompt"} {
+		assert.False(t, q.Has(k), "a pattern asks for no %s", k)
+	}
+	e.mustConfigure(map[string]any{"mfa_options": map[string]any{"reauthenticate_after": "1h"}})
+	q = authURL()
+	assert.Equal(t, "3600", q.Get("max_age"))
+	assert.Equal(t, "login", q.Get("prompt"))
+	assert.False(t, q.Has("claims"))
+}
+
+// The callback holds the sign-in to mfa_options: the floor over the ID token's
+// claims, and a sign-in recent enough, whose session ends when it grows older
+// than reauthenticate_after.
+func TestLogin_MFA(t *testing.T) {
+	e := newEnv(t)
+	e.mustConfigure(map[string]any{"facts": mfaFacts(e), "mfa_options": map[string]any{
+		"require":              map[string]any{"acr": []any{"phr", "phrh"}, "acrs": "c1"},
+		"reauthenticate_after": "30m",
+	}})
+	login := func(edit func(map[string]any)) *logical.Response {
+		t.Helper()
+		claims := personClaims()
+		claims["acr"] = "phr"
+		claims["acrs"] = []any{"c0", "c1"}
+		claims["auth_time"] = float64(time.Now().Add(-10 * time.Minute).Unix())
+		if edit != nil {
+			edit(claims)
+		}
+		return e.login(claims)
+	}
+	refused := func(t *testing.T, resp *logical.Response, want string) {
+		t.Helper()
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+		assert.ErrorContains(t, resp.Err, want)
+		assert.Nil(t, resp.Auth)
+	}
+
+	resp := login(nil)
+	require.NoError(t, resp.Err)
+	assert.InDelta(t, (20 * time.Minute).Seconds(), resp.Auth.TokenTTL.Seconds(), 5,
+		"the session ends reauthenticate_after past the sign-in, before session_ttl")
+
+	resp = login(func(c map[string]any) { c["auth_time"] = float64(time.Now().Add(-28 * time.Minute).Unix()) })
+	require.NoError(t, resp.Err, "two minutes left")
+	assert.InDelta(t, (2 * time.Minute).Seconds(), resp.Auth.TokenTTL.Seconds(), 5)
+
+	t.Run("floor not met", func(t *testing.T) {
+		refused(t, login(func(c map[string]any) { c["acr"] = "urn:okta:loa:1fa:any" }),
+			`the sign-in does not meet mfa_options.require: fact "acr" (claim "acr") holds none of: phr, phrh`)
+	})
+	t.Run("array claim without the value", func(t *testing.T) {
+		refused(t, login(func(c map[string]any) { c["acrs"] = []any{"c0", "c2"} }), `fact "acrs" (claim "acrs")`)
+	})
+	t.Run("string claim holding the value", func(t *testing.T) {
+		require.NoError(t, login(func(c map[string]any) { c["acrs"] = "c1" }).Err)
+	})
+	t.Run("claim missing", func(t *testing.T) {
+		refused(t, login(func(c map[string]any) { delete(c, "acr") }), `fact "acr"`)
+	})
+	t.Run("sign-in too old", func(t *testing.T) {
+		refused(t, login(func(c map[string]any) { c["auth_time"] = float64(time.Now().Add(-2 * time.Hour).Unix()) }),
+			"older than mfa_options.reauthenticate_after (30m0s): it kept an earlier sign-in")
+	})
+	t.Run("under a minute left", func(t *testing.T) {
+		refused(t, login(func(c map[string]any) {
+			c["auth_time"] = float64(time.Now().Add(-30*time.Minute + 30*time.Second).Unix())
+		}), "within a minute of mfa_options.reauthenticate_after")
+	})
+	t.Run("auth_time not a number", func(t *testing.T) {
+		refused(t, login(func(c map[string]any) { c["auth_time"] = "yesterday" }), "carries no auth_time")
+	})
+	t.Run("auth_time far ahead", func(t *testing.T) {
+		refused(t, login(func(c map[string]any) { c["auth_time"] = float64(time.Now().Add(5 * time.Minute).Unix()) }),
+			"the identity provider's clock is off")
+	})
+	t.Run("auth_time slightly ahead", func(t *testing.T) {
+		resp := login(func(c map[string]any) { c["auth_time"] = float64(time.Now().Add(30 * time.Second).Unix()) })
+		require.NoError(t, resp.Err)
+		assert.False(t, resp.Auth.Admission.AuthTime.After(time.Now()), "taken as now")
+		assert.InDelta(t, (30 * time.Minute).Seconds(), resp.Auth.TokenTTL.Seconds(), 5)
+	})
+	t.Run("no auth_time", func(t *testing.T) {
+		// A null auth_time: the test provider always sets one.
+		refused(t, login(func(c map[string]any) { c["auth_time"] = nil }), "carries no auth_time")
+	})
+
+	// Without reauthenticate_after the session lasts session_ttl, and an
+	// auth_time far ahead is taken as now rather than refused.
+	e.mustConfigure(map[string]any{"facts": mfaFacts(e), "mfa_options": map[string]any{
+		"require": map[string]any{"acr": "phr"},
+	}})
+	resp = login(func(c map[string]any) { c["auth_time"] = float64(time.Now().Add(5 * time.Minute).Unix()) })
+	require.NoError(t, resp.Err)
+	assert.Equal(t, time.Hour, resp.Auth.TokenTTL)
+	assert.False(t, resp.Auth.Admission.AuthTime.After(time.Now()))
+
+	// A floor on a nested claim is matched as a number through its rendering.
+	e.mustConfigure(map[string]any{"facts": mfaFacts(e), "mfa_options": map[string]any{
+		"require": map[string]any{"loa": []any{"2", "3"}},
+	}})
+	require.NoError(t, login(func(c map[string]any) { c["ext"] = map[string]any{"loa": float64(3)} }).Err)
+	refused(t, login(func(c map[string]any) { c["ext"] = map[string]any{"loa": float64(1)} }),
+		`fact "loa" (claim "/ext/loa") holds none of: 2, 3`)
+
+	// A floor written between auth_url and callback holds the login to it.
+	e.mustConfigure(map[string]any{"facts": mfaFacts(e), "mfa_options": map[string]any{}})
+	claims := personClaims()
+	claims["acr"] = "phr"
+	e.tp.SetCustomClaims(claims)
+	state, proof := e.start(e.b)
+	e.mustConfigure(map[string]any{"facts": mfaFacts(e), "mfa_options": map[string]any{
+		"require": map[string]any{"acr": "phrh"},
+	}})
+	refused(t, e.finish(e.b, state, proof), `fact "acr" (claim "acr") holds none of: phrh`)
 }
 
 func TestLogin_Refusals(t *testing.T) {

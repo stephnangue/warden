@@ -27,7 +27,7 @@ type codeFixture struct {
 	as  *AuthServer
 }
 
-func newCodeFixture(t *testing.T, people map[string]map[string]any) *codeFixture {
+func newCodeFixture(t *testing.T, people map[string]map[string]any, edits ...func(*AuthServerConfig)) *codeFixture {
 	t.Helper()
 	var h atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -36,13 +36,17 @@ func newCodeFixture(t *testing.T, people map[string]map[string]any) *codeFixture
 	t.Cleanup(srv.Close)
 	idp, err := NewIdP(srv.URL)
 	require.NoError(t, err)
-	as, err := NewAuthServer(AuthServerConfig{
+	cfg := AuthServerConfig{
 		IdP:           idp,
 		WardenIssuer:  "https://warden.test",
 		WardenJWKSURL: "https://warden.test/jwks",
 		Audiences:     []string{"bank"},
 		People:        people,
-	})
+	}
+	for _, edit := range edits {
+		edit(&cfg)
+	}
+	as, err := NewAuthServer(cfg)
 	require.NoError(t, err)
 	h.Store(as.Handler())
 	return &codeFixture{srv: srv, as: as}
@@ -245,6 +249,84 @@ func TestCodeFlow_RedeemRefusals(t *testing.T) {
 	}, now)
 	_, e = redeem(good("stale"))
 	assert.Equal(t, "invalid_grant", e, "expired code")
+}
+
+// signIn runs one sign-in of the person hint names (none for DefaultPerson)
+// with opts on the request, and returns the verified ID token's claims.
+func (f *codeFixture) signIn(t *testing.T, hint string, opts ...capoidc.Option) map[string]any {
+	t.Helper()
+	p := f.provider(t)
+	v, err := capoidc.NewCodeVerifier()
+	require.NoError(t, err)
+	req, err := capoidc.NewRequest(time.Minute, testRedirect, append(opts, capoidc.WithPKCE(v))...)
+	require.NoError(t, err)
+	authURL, err := p.AuthURL(context.Background(), req)
+	require.NoError(t, err)
+	if hint != "" {
+		authURL += "&login_hint=" + url.QueryEscape(hint)
+	}
+	q := authorize(t, authURL)
+	require.Empty(t, q.Get("error"), q.Get("error_description"))
+	tk, err := p.Exchange(context.Background(), req, q.Get("state"), q.Get("code"))
+	require.NoError(t, err)
+	var claims map[string]any
+	require.NoError(t, tk.IDToken().Claims(&claims))
+	return claims
+}
+
+func authTimeOf(claims map[string]any) time.Time {
+	at, _ := claims["auth_time"].(float64)
+	return time.Unix(int64(at), 0)
+}
+
+// A sign-in reuses the person's session, and its auth_time, until a login asks
+// for a new authentication with prompt=login or a max_age the session has
+// outlived; IgnoreReauthentication keeps it whatever is asked.
+func TestCodeFlow_Sessions(t *testing.T) {
+	f := newCodeFixture(t, nil)
+	first := authTimeOf(f.signIn(t, ""))
+	assert.WithinDuration(t, time.Now(), first, 2*time.Second, "a first sign-in authenticates")
+
+	old := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	f.as.StartSession(DefaultPerson, old)
+	assert.Equal(t, old, authTimeOf(f.signIn(t, "")), "single sign-on keeps the session")
+	assert.Equal(t, old, authTimeOf(f.signIn(t, "", capoidc.WithMaxAge(3*3600))), "max_age the session meets")
+	assert.WithinDuration(t, time.Now(), authTimeOf(f.signIn(t, "", capoidc.WithMaxAge(3600))), 2*time.Second,
+		"max_age the session outlived")
+
+	f.as.StartSession(DefaultPerson, old)
+	fresh := authTimeOf(f.signIn(t, "", capoidc.WithPrompts(capoidc.Login)))
+	assert.WithinDuration(t, time.Now(), fresh, 2*time.Second, "prompt=login")
+	assert.Equal(t, fresh, authTimeOf(f.signIn(t, "")), "the new session is reused")
+
+	ignoring := newCodeFixture(t, nil, func(c *AuthServerConfig) { c.IgnoreReauthentication = true })
+	ignoring.as.StartSession(DefaultPerson, old)
+	assert.Equal(t, old, authTimeOf(ignoring.signIn(t, "", capoidc.WithPrompts(capoidc.Login))),
+		"a server ignoring the request keeps the session")
+
+	q := authorize(t, f.srv.URL+"/authorize?"+url.Values{
+		"response_type": {"code"}, "client_id": {HumanClientID}, "redirect_uri": {testRedirect},
+		"scope": {"openid"}, "code_challenge": {"c"}, "code_challenge_method": {"S256"}, "max_age": {"soon"},
+	}.Encode())
+	assert.Equal(t, "invalid_request", q.Get("error"), "a malformed max_age")
+}
+
+// acr_values pick the acr the ID token carries among those the person can
+// reach; a person who can reach none carries none.
+func TestCodeFlow_ACR(t *testing.T) {
+	f := newCodeFixture(t, map[string]map[string]any{
+		DefaultPerson: {"roles": []any{"Warden.Operator"}},
+		"bob":         {},
+	}, func(c *AuthServerConfig) {
+		c.ACRs = map[string][]string{DefaultPerson: {"urn:okta:loa:2fa:any", "phr"}}
+	})
+	acr := func(hint string, opts ...capoidc.Option) any {
+		return f.signIn(t, hint, opts...)["acr"]
+	}
+	assert.Equal(t, "phr", acr("", capoidc.WithACRValues("phrh", "phr", "urn:okta:loa:2fa:any")), "the first reachable, in the order asked")
+	assert.Equal(t, "urn:okta:loa:2fa:any", acr("", capoidc.WithACRValues("phrh")), "none reachable: the person's first")
+	assert.Equal(t, "urn:okta:loa:2fa:any", acr(""), "none asked: the person's first")
+	assert.Nil(t, acr("bob", capoidc.WithACRValues("phr")), "a person who can reach none")
 }
 
 func TestCodeFlow_Metadata(t *testing.T) {

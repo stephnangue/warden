@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -53,6 +54,17 @@ type AuthServerConfig struct {
 	// People are the persons the authorization endpoint signs in, by subject,
 	// each with the extra claims of their ID token. Nil is DefaultPeople.
 	People map[string]map[string]any
+	// ACRs are the authentication context classes each person can reach, by
+	// subject, in the order the server prefers them. A sign-in reaches the
+	// first one its acr_values lists that the person can reach, else the
+	// person's first, and its ID token says so as acr. A person with none
+	// gets the acr of their People claims, if any.
+	ACRs map[string][]string
+	// IgnoreReauthentication makes the server reuse a person's session even
+	// when a login asks for a new authentication (prompt=login, or max_age
+	// past), as an identity provider whose policy ignores those requests
+	// does. For tests of the client's own checks.
+	IgnoreReauthentication bool
 }
 
 // AuthServer is the bank's authorization server. Its one grant is the RFC 8693
@@ -71,8 +83,11 @@ type AuthServer struct {
 	ttl          time.Duration
 
 	// The authorization code flow (as_code.go).
-	people map[string]map[string]any
-	codes  *codeStore
+	people       map[string]map[string]any
+	acrs         map[string][]string
+	ignoreReauth bool
+	codes        *codeStore
+	sessions     *sessionStore
 }
 
 // NewAuthServer builds the authorization server. Warden's keys are fetched lazily,
@@ -112,7 +127,10 @@ func NewAuthServer(cfg AuthServerConfig) (*AuthServer, error) {
 		audiences:    slices.Clone(cfg.Audiences),
 		ttl:          ttl,
 		people:       people,
+		acrs:         maps.Clone(cfg.ACRs),
+		ignoreReauth: cfg.IgnoreReauthentication,
 		codes:        newCodeStore(),
+		sessions:     &sessionStore{started: map[string]time.Time{}},
 	}, nil
 }
 

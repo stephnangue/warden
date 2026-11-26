@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,12 @@ import (
 // server signs them in without asking anything. The person is the one the
 // request's login_hint names, or DefaultPerson. It is for a playground and
 // for end-to-end tests: anyone who can reach it is whoever they name.
+//
+// A person's first sign-in starts a session, which later ones reuse (single
+// sign-on): their ID tokens carry the session's auth_time, until a login asks
+// for a new authentication with prompt=login or a max_age the session has
+// outlived. A login's acr_values pick the acr its ID token carries, among the
+// ones the person can reach (AuthServerConfig.ACRs).
 
 const grantTypeAuthorizationCode = "authorization_code"
 
@@ -50,6 +57,7 @@ type pendingCode struct {
 	challenge   string
 	subject     string
 	authTime    time.Time
+	acr         string // "" for none
 	expires     time.Time
 }
 
@@ -84,6 +92,68 @@ func (s *codeStore) take(code string, now time.Time) (pendingCode, bool) {
 		return pendingCode{}, false
 	}
 	return p, true
+}
+
+// sessionStore holds when each person last authenticated: their session's
+// start. Only people the server signs in have one, so it stays as small as
+// People.
+type sessionStore struct {
+	mu      sync.Mutex
+	started map[string]time.Time
+}
+
+// signIn returns when subject authenticated, for a login at now: their
+// session's start, or now for a new authentication, which starts a new
+// session. One is made when there is no session, when fresh asks for it
+// (prompt=login), or when the session is older than maxAge (negative for no
+// bound); ignore keeps the session whatever is asked.
+func (s *sessionStore) signIn(subject string, now time.Time, fresh bool, maxAge time.Duration, ignore bool) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	start, ok := s.started[subject]
+	if ok && (ignore || (!fresh && (maxAge < 0 || now.Sub(start) <= maxAge))) {
+		return start
+	}
+	s.started[subject] = now
+	return now
+}
+
+// StartSession records that subject authenticated at at, as an earlier sign-in
+// would: the next login reuses that session unless it asks for a new
+// authentication. For tests of single sign-on.
+func (a *AuthServer) StartSession(subject string, at time.Time) {
+	a.sessions.mu.Lock()
+	defer a.sessions.mu.Unlock()
+	a.sessions.started[subject] = at
+}
+
+// acrFor returns the acr a sign-in of subject reaches: the first of requested
+// (acr_values, in order of preference) the person can reach, else the
+// person's first, else "".
+func (a *AuthServer) acrFor(subject string, requested []string) string {
+	reachable := a.acrs[subject]
+	for _, v := range requested {
+		if slices.Contains(reachable, v) {
+			return v
+		}
+	}
+	if len(reachable) > 0 {
+		return reachable[0]
+	}
+	return ""
+}
+
+// parseMaxAge reads a request's max_age: a non-negative number of seconds, or
+// -1 when it sends none. ok is false for a malformed value.
+func parseMaxAge(q url.Values) (d time.Duration, ok bool) {
+	if !q.Has("max_age") {
+		return -1, true
+	}
+	secs, err := strconv.ParseInt(q.Get("max_age"), 10, 32)
+	if err != nil || secs < 0 {
+		return 0, false
+	}
+	return time.Duration(secs) * time.Second, true
 }
 
 // handleAuthorize signs in the person login_hint names and sends the browser
@@ -134,19 +204,26 @@ func (a *AuthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		refuse("access_denied", "no such person: "+subject)
 		return
 	}
+	maxAge, ok := parseMaxAge(q)
+	if !ok {
+		refuse("invalid_request", "max_age must be a non-negative number of seconds")
+		return
+	}
 	code, err := randomHex(16)
 	if err != nil {
 		refuse("server_error", err.Error())
 		return
 	}
 	now := a.idp.now()
+	fresh := slices.Contains(strings.Fields(q.Get("prompt")), "login")
 	a.codes.put(code, pendingCode{
 		clientID:    HumanClientID,
 		redirectURI: redirectURI,
 		nonce:       q.Get("nonce"),
 		challenge:   q.Get("code_challenge"),
 		subject:     subject,
-		authTime:    now,
+		authTime:    a.sessions.signIn(subject, now, fresh, maxAge, a.ignoreReauth),
+		acr:         a.acrFor(subject, strings.Fields(q.Get("acr_values"))),
 		expires:     now.Add(codeTTL),
 	}, now)
 	back(url.Values{"code": {code}})
@@ -173,7 +250,8 @@ type codeResponse struct {
 // handleCodeGrant redeems a code: once, by the client and with the redirect
 // URI it was issued to, and with the PKCE verifier of its challenge. The ID
 // token carries the nonce of the authorization request, the time the person
-// signed in, at_hash of the access token, and the person's claims.
+// authenticated, the acr the sign-in reached, at_hash of the access token,
+// and the person's claims.
 func (a *AuthServer) handleCodeGrant(w http.ResponseWriter, r *http.Request) {
 	form := r.PostForm
 	// A public client names itself in the form, or as the user of an HTTP
@@ -211,6 +289,9 @@ func (a *AuthServer) handleCodeGrant(w http.ResponseWriter, r *http.Request) {
 	claims["sub"] = p.subject
 	claims["aud"] = p.clientID
 	claims["auth_time"] = p.authTime.Unix()
+	if p.acr != "" {
+		claims["acr"] = p.acr
+	}
 	claims["at_hash"] = halfHash(access)
 	if p.nonce != "" {
 		claims["nonce"] = p.nonce

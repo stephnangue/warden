@@ -338,7 +338,7 @@ func (a *Admission) CheckMFA(n *MountNaming, now time.Time) error {
 	}
 	v := a.mfa.Load()
 	if v == nil || v.naming != n {
-		next := &mfaVerdict{naming: n, ok: r.Rule.Match(&namingSource{a: a, n: n})}
+		next := &mfaVerdict{naming: n, ok: r.Rule.Match(a.Source(n))}
 		a.mfa.CompareAndSwap(v, next)
 		v = next
 	}
@@ -347,6 +347,11 @@ func (a *Admission) CheckMFA(n *MountNaming, now time.Time) error {
 	}
 	return nil
 }
+
+// Source returns the admission seen through naming n as a selector.Source: a
+// rule matched against it sees what Lookup answers under n. It allocates the
+// small value it returns.
+func (a *Admission) Source(n *MountNaming) selector.Source { return &namingSource{a: a, n: n} }
 
 // namingSource is an admission seen through one naming, as a selector.Source.
 type namingSource struct {

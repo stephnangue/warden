@@ -162,8 +162,12 @@ func (b *oidcAuthBackend) handleAuthURL(ctx context.Context, _ *logical.Request,
 	if err != nil {
 		return internalError(err), nil
 	}
-	oreq, err := capoidc.NewRequest(stateTTL, redirectURI,
-		capoidc.WithState(state), capoidc.WithNonce(nonce), capoidc.WithPKCE(verifier))
+	// What mfa_options ask of the sign-in is a request the identity provider
+	// may ignore; the callback checks the ID token against the configuration
+	// it then finds.
+	opts := append([]capoidc.Option{capoidc.WithState(state), capoidc.WithNonce(nonce), capoidc.WithPKCE(verifier)},
+		cfg.signIn.options()...)
+	oreq, err := capoidc.NewRequest(stateTTL, redirectURI, opts...)
 	if err != nil {
 		return internalError(err), nil
 	}
@@ -183,8 +187,10 @@ func (b *oidcAuthBackend) handleAuthURL(ctx context.Context, _ *logical.Request,
 // the caller holds the secret the login was bound to, exchanges the code, and
 // verifies the ID token: signature, iss, aud, azp, expiry, nonce, and the
 // access token and code hashes. The ID token's claims become the admission's
-// facts, kept to what the mount publishes; the alias must be derivable and the
-// session must fit in a ticket. The identity provider's tokens are discarded.
+// facts, kept to what the mount publishes; the sign-in must meet mfa_options
+// (checkSignIn), the alias must be derivable and the session must fit in a
+// ticket. With reauthenticate_after the session ends when the sign-in grows
+// older than it. The identity provider's tokens are discarded.
 func (b *oidcAuthBackend) handleCallback(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	cfg, p, release, err := b.live(ctx)
 	if err != nil {
@@ -238,7 +244,11 @@ func (b *oidcAuthBackend) handleCallback(ctx context.Context, req *logical.Reque
 		return &logical.Response{StatusCode: http.StatusUnauthorized, Err: errLoginRefused}, nil
 	}
 
-	naming := b.mountFacts.Load()
+	// One naming for the whole callback: the one cfg compiled to, so the
+	// claims kept, the alias and the mfa_options checks all follow the
+	// configuration in force now. A write since auth_url applies here; core
+	// checks every request against the naming in force then.
+	naming := cfg.Naming()
 	if naming == nil {
 		return b.unavailable(errConfigInvalid), nil
 	}
@@ -257,13 +267,22 @@ func (b *oidcAuthBackend) handleCallback(ctx context.Context, req *logical.Reque
 		AuthTime: authTime(claims),
 		Bytes:    int64(len(factsJSON)),
 	}
+	// The exchange took a round trip: freshness is measured from its end.
+	now = time.Now()
+	if err := checkSignIn(adm, naming, cfg.MFAOptions, now); err != nil {
+		if errors.Is(err, errConfigInvalid) {
+			return b.unavailable(err), nil
+		}
+		return &logical.Response{StatusCode: http.StatusForbidden, Err: err}, nil
+	}
+	ttl := sessionTTL(cfg.SessionTTL, adm, naming, now)
 	alias := adm.DeriveAlias(naming)
 	if alias == "" {
 		return badRequest(fmt.Errorf("alias_name_source %q yields no usable value on this ID token", naming.AliasSource)), nil
 	}
 	adm.PrincipalID = alias
 
-	if n := ticketLen(alias, naming.Kind, adm.AuthTime, ns.ID, req.MountAccessor, factsJSON, jkt, now, cfg.SessionTTL); n > logical.MaxTicketLen {
+	if n := ticketLen(alias, naming.Kind, adm.AuthTime, ns.ID, req.MountAccessor, factsJSON, jkt, now, ttl); n > logical.MaxTicketLen {
 		return badRequest(fmt.Errorf("the session would be %d bytes (limit %d): the mapped claims are too large; "+
 			"map fewer claims, or claims with fewer values", n, logical.MaxTicketLen)), nil
 	}
@@ -278,7 +297,7 @@ func (b *oidcAuthBackend) handleCallback(ctx context.Context, req *logical.Reque
 		Auth: &logical.Auth{
 			PrincipalID: alias,
 			TokenType:   logical.TokenTypeTicket,
-			TokenTTL:    cfg.SessionTTL,
+			TokenTTL:    ttl,
 			ClientIP:    req.ClientIP,
 			Admission:   adm,
 		},
@@ -427,13 +446,11 @@ func checkDistributedClaims(claims map[string]any, n *logical.MountNaming) error
 	return nil
 }
 
-// authTime returns when the person authenticated: the ID token's auth_time,
-// else its iat.
+// authTime returns when the person authenticated, the ID token's auth_time, or
+// zero when it carries none. It never falls back to iat: a silent sign-in on an
+// identity provider session issues a fresh iat for an old authentication.
 func authTime(claims map[string]any) time.Time {
-	if t := helper.IssuedAt(map[string]any{"iat": claims["auth_time"]}); !t.IsZero() {
-		return t
-	}
-	return helper.IssuedAt(claims)
+	return helper.IssuedAt(map[string]any{"iat": claims["auth_time"]})
 }
 
 // ticketLen is the length of the ticket core would issue for this login, bound

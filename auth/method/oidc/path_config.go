@@ -72,6 +72,14 @@ func (b *oidcAuthBackend) pathConfig() *framework.Path {
 			Description: "Bind every session to a key the warden CLI holds, proven on every request (default true). " +
 				"Off, sessions are bearer tokens other tools can present. A change applies from the next login.",
 		},
+		"mfa_options": {
+			Type: framework.TypeMap,
+			Description: "What every sign-in must meet. require: facts the ID token must hold, as a group rule's " +
+				"selectors (fact name to accepted values; every fact must match, by any one value), asked of the " +
+				"identity provider at login. reauthenticate_after: how long after the person signed in a session " +
+				"ends (5m to 8h); each login asks for a new sign-in. Checked at login and on every request, so a " +
+				"change applies to sessions already issued. A write replaces the whole object; an empty object clears it.",
+		},
 	}
 	maps.Copy(fields, helper.FactsFieldSchemas("an ID token claim name, or a JSON Pointer with a leading / into nested claims", aliasSources))
 
@@ -95,6 +103,8 @@ Discovery runs at oidc_discovery_url when the configuration is written, and the
 issuer the provider publishes must equal it. 'facts' maps ID token claims to
 the fact names virtual groups match, beyond the built-in sub, iss and aud;
 'alias_name_source' names the fact a person's identity is taken from.
+'mfa_options' holds every sign-in to a floor over those facts ('require') and
+ends sessions a set time after the person signed in ('reauthenticate_after').
 client_secret and private_key are never read back.`,
 	}
 }
@@ -121,7 +131,28 @@ func (b *oidcAuthBackend) handleConfigRead(_ context.Context, _ *logical.Request
 		"entity_kind":           c.EntityKind,
 		"facts":                 maps.Clone(c.Facts),
 		"alias_name_source":     c.AliasNameSource,
+		"mfa_options":           mfaOptionsData(c.MFAOptions),
 	}}, nil
+}
+
+// mfaOptionsData renders mfa_options as a read returns them: the keys set,
+// reauthenticate_after as a duration string; an empty object when unset.
+func mfaOptionsData(o *helper.MFAOptions) map[string]any {
+	out := map[string]any{}
+	if o == nil {
+		return out
+	}
+	if len(o.Require) > 0 {
+		require := make(map[string][]string, len(o.Require))
+		for name, values := range o.Require {
+			require[name] = slices.Clone(values)
+		}
+		out["require"] = require
+	}
+	if o.ReauthenticateAfter > 0 {
+		out["reauthenticate_after"] = o.ReauthenticateAfter.String()
+	}
+	return out
 }
 
 // handleConfigWrite merges the request onto the live configuration, validates
@@ -129,22 +160,28 @@ func (b *oidcAuthBackend) handleConfigRead(_ context.Context, _ *logical.Request
 // unstorable write leaves the mount as it was. Writes are serialized. A
 // secret not sent is kept; a change of client_auth drops the client secret,
 // private key and certificate unless the write sends them. A write over an
-// invalid stored config replaces it.
+// invalid stored config replaces it. A sent mfa_options replaces the stored
+// block whole, and an empty object clears it; a write that drops a stored part
+// (require, reauthenticate_after) succeeds with a warning saying so.
 func (b *oidcAuthBackend) handleConfigWrite(ctx context.Context, _ *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	b.configWriteMu.Lock()
 	defer b.configWriteMu.Unlock()
 
 	var next oidcConfig
 	wasBinding := false
+	var hadMFA *helper.MFAOptions
 	b.configMu.RLock()
 	if b.config != nil {
 		wasBinding = b.config.dpop()
+		hadMFA = b.config.MFAOptions
+		// The stored mfa_options are shared, not copied: a config never
+		// modifies them, and a write that sends the key replaces them whole.
 		next = *b.config
 		next.SupportedAlgs = slices.Clone(next.SupportedAlgs)
 		next.AllowedRedirectURIs = slices.Clone(next.AllowedRedirectURIs)
 		next.Scopes = slices.Clone(next.Scopes)
 		next.Facts = maps.Clone(next.Facts)
-		next.privateKey, next.x5tS256, next.invalid = nil, "", nil
+		next.privateKey, next.x5tS256, next.invalid, next.signIn = nil, "", nil, nil
 	}
 	b.configMu.RUnlock()
 
@@ -198,6 +235,16 @@ func (b *oidcAuthBackend) handleConfigWrite(ctx context.Context, _ *logical.Requ
 		}
 		next.AliasNameSource = source
 	}
+	// Parsed from the raw value: the field's decoding reads null and [] as an
+	// empty object, which would clear the block. Only {} clears it.
+	raw, mfaSent := d.Raw["mfa_options"]
+	if mfaSent {
+		o, err := helper.ParseMFAOptions(raw)
+		if err != nil {
+			return badRequest(err), nil
+		}
+		next.MFAOptions = o
+	}
 
 	if err := next.validate(); err != nil {
 		return badRequest(err), nil
@@ -222,15 +269,44 @@ func (b *oidcAuthBackend) handleConfigWrite(ctx context.Context, _ *logical.Requ
 	}
 	b.installConfig(&next, p)
 	resp := &logical.Response{StatusCode: http.StatusOK, Data: map[string]any{"message": "configuration updated"}}
+	var warnings []string
 	if wasBinding && !next.dpop() {
-		const warning = "sessions this mount already issued stay bound to their keys until they expire " +
-			"(at most session_ttl); sessions from the next login on are bearer tokens"
+		warnings = append(warnings, "sessions this mount already issued stay bound to their keys until they expire "+
+			"(at most session_ttl); sessions from the next login on are bearer tokens")
+	}
+	if mfaSent {
+		warnings = append(warnings, mfaDropWarnings(hadMFA, next.MFAOptions)...)
+		warnings = append(warnings, next.MFAOptions.Warnings()...)
+	}
+	if len(warnings) > 0 {
 		// In the data, where clients read warnings (the HTTP layer writes no
 		// other), and in Warnings, which the audit records.
-		resp.Data["warnings"] = []string{warning}
-		resp.AddWarning(warning)
+		resp.Data["warnings"] = warnings
+		for _, w := range warnings {
+			resp.AddWarning(w)
+		}
 	}
 	return resp, nil
+}
+
+// mfaDropWarnings returns the warnings of a write that replaces the stored
+// mfa_options prev with next: one for each part prev set and next drops, since
+// a write replaces the block whole and an edit of one part can drop the other
+// unseen.
+func mfaDropWarnings(prev, next *helper.MFAOptions) []string {
+	if prev == nil {
+		return nil
+	}
+	var out []string
+	if len(prev.Require) > 0 && (next == nil || len(next.Require) == 0) {
+		out = append(out, "mfa_options.require is removed: sign-ins are no longer held to a floor; "+
+			"send require in mfa_options to keep one")
+	}
+	if prev.ReauthenticateAfter > 0 && (next == nil || next.ReauthenticateAfter == 0) {
+		out = append(out, "mfa_options.reauthenticate_after is removed: sessions last session_ttl whenever "+
+			"the person signed in; send reauthenticate_after in mfa_options to keep it")
+	}
+	return out
 }
 
 func badRequest(err error) *logical.Response {

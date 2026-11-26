@@ -76,6 +76,15 @@ type oidcConfig struct {
 	// beyond its built-ins, and alias_name_source (default sub).
 	helper.FactsConfig
 
+	// MFAOptions is what every sign-in must meet (mfa_options): a floor over
+	// the published facts and how recent it must be. Nil when unset. validate
+	// attaches it to the naming the facts compile to.
+	MFAOptions *helper.MFAOptions `json:"mfa_options,omitempty"`
+
+	// signIn is what a login asks the identity provider for, derived from
+	// MFAOptions by validate; nil when MFAOptions is.
+	signIn *signInRequest
+
 	privateKey *rsa.PrivateKey
 	// x5tS256 is the client certificate's SHA-256 thumbprint, base64url,
 	// sent as the assertion's x5t#S256 header; "" without a certificate.
@@ -89,6 +98,12 @@ type oidcConfig struct {
 // validate fills the defaults, checks every key and compiles the facts. Facts
 // that do not compile are kept on the config (FactsConfig.Err), not returned,
 // as for every auth method: a write refuses them, a login fails closed.
+//
+// mfa_options are compiled onto the facts' naming before any other check can
+// return: a stored block that no longer compiles (a fact it names was dropped,
+// or a release narrowed what it accepts) is returned, and the naming still
+// published carries a requirement that admits nothing, so the mount's tickets
+// are refused rather than let through without it.
 //
 // Whether the issuer is one the provider vouches for is not decided here:
 // discovery (newProvider) requires the issuer the provider publishes to equal
@@ -114,6 +129,13 @@ func (c *oidcConfig) validate() error {
 		c.EntityKind = logical.EntityKindHuman
 	}
 	c.Compile(builtinFacts(), aliasPolicy)
+	c.signIn = nil
+	if err := c.MFAOptions.Attach(c.Naming()); err != nil {
+		return err
+	}
+	if n := c.Naming(); n != nil {
+		c.signIn = newSignInRequest(c.MFAOptions, n.Mapping)
+	}
 
 	switch {
 	case c.OIDCDiscoveryURL == "":
