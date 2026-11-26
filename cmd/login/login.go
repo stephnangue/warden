@@ -319,7 +319,15 @@ func signIn(ctx context.Context, client *api.Client, mount string, stderr io.Wri
 	res, err = client.Operator().Write(base+"callback", data)
 	client.SetRequestSigner(nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("finishing the sign-in: %w", err)
+		err = fmt.Errorf("finishing the sign-in: %w", err)
+		// The callback answers 403 only to a sign-in that does not meet the
+		// mount's mfa_options: a role or policy has nothing to do with it.
+		var re *api.ResponseError
+		if errors.As(err, &re) && re.StatusCode == http.StatusForbidden {
+			return nil, nil, helpers.WithHint(err, "Sign in again the way the message requires; if your identity "+
+				"provider does not offer it, ask an operator what this mount's mfa_options require")
+		}
+		return nil, nil, err
 	}
 	inner, _ := res.Data["data"].(map[string]any)
 	token, _ := inner["token"].(string)
