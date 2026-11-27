@@ -17,14 +17,16 @@ import (
 
 	"github.com/stephnangue/warden/audit"
 	h "github.com/stephnangue/warden/e2e/helpers"
+	"github.com/stephnangue/warden/internal/playground"
 )
 
-// People of the identity provider: Ada holds the operator app role, Bob holds
-// none, and Big is in 200 groups, too many to fit in a session.
+// People of the identity provider: Ada and Carol hold the operator app role,
+// Bob holds none, and Big is in 200 groups, too many to fit in a session.
 const (
-	personAda = "ada@e2e.example"
-	personBob = "bob@e2e.example"
-	personBig = "big@e2e.example"
+	personAda   = "ada@e2e.example"
+	personBob   = "bob@e2e.example"
+	personBig   = "big@e2e.example"
+	personCarol = "carol@e2e.example"
 )
 
 func oidcPeople() map[string]map[string]any {
@@ -33,9 +35,10 @@ func oidcPeople() map[string]map[string]any {
 		groups[i] = fmt.Sprintf("%08d-0000-0000-0000-000000000000", i)
 	}
 	return map[string]map[string]any{
-		personAda: {"roles": []any{"Warden.Operator"}},
-		personBob: {"roles": []any{}},
-		personBig: {"roles": []any{"Warden.Operator"}, "groups": groups},
+		personAda:   {"roles": []any{"Warden.Operator"}},
+		personBob:   {"roles": []any{}},
+		personBig:   {"roles": []any{"Warden.Operator"}, "groups": groups},
+		personCarol: {"roles": []any{"Warden.Operator"}},
 	}
 }
 
@@ -54,12 +57,12 @@ type humanEnv struct {
 	child string // a child namespace
 }
 
-func newHumanEnv(t *testing.T) *humanEnv {
+func newHumanEnv(t *testing.T, idpOpts ...func(*playground.AuthServerConfig)) *humanEnv {
 	t.Helper()
 	port := h.GetLeaderPort(t)
 	e := &humanEnv{
 		port:  port,
-		idp:   h.StartHumanIdP(t, oidcPeople()),
+		idp:   h.StartHumanIdP(t, oidcPeople(), idpOpts...),
 		mount: h.UniqueMount("oidc-e2e"),
 		role:  h.UniqueMount("e2e-human-operator"),
 		child: h.UniqueMount("e2e-oidc-child"),
@@ -575,4 +578,153 @@ func TestOIDCLogin_Refusals(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, status)
 		assert.Contains(t, string(body), "login_proof does not match")
 	})
+}
+
+// mfaACRs are the authentication context classes people reach at the identity
+// provider: Ada reaches phishing-resistant MFA (phr) and any MFA (mfa), Carol
+// any MFA only, Bob neither. A login that asks for none gets the first.
+func mfaACRs(c *playground.AuthServerConfig) {
+	c.ACRs = map[string][]string{personAda: {"mfa", "phr"}, personCarol: {"mfa"}}
+}
+
+// setMFA writes the mount's mfa_options, with the acr claim published as a
+// fact.
+func (e *humanEnv) setMFA(t *testing.T, mfa map[string]any) {
+	t.Helper()
+	h.MustNS(t, e.port, "", "PUT", "auth/"+e.mount+"/config", h.JSON(t, map[string]any{
+		"facts":       map[string]any{"roles": "roles", "groups": "groups", "acr": "acr"},
+		"mfa_options": mfa,
+	}))
+}
+
+func roleNames(roles []h.TicketRole) []string {
+	out := make([]string, len(roles))
+	for i, r := range roles {
+		out[i] = r.Name
+	}
+	return out
+}
+
+// mfa_options.require holds every sign-in to a floor, which the login asks the
+// identity provider for; a tier above it is granted only through a group whose
+// rule names it. reauthenticate_after asks for a new sign-in over an old
+// session, and ends the session that long after it.
+func TestOIDCLogin_MFAFloorAndTiers(t *testing.T) {
+	e := newHumanEnv(t, mfaACRs)
+	strong := h.UniqueMount("e2e-human-strong")
+	h.GrantRole(t, e.port, e.mount, strong, h.Role{Description: "Operators signed in phishing-resistant"},
+		h.Rule{"kind": {"human"}, "roles": {"Warden.Operator"}, "acr": {"phr"}})
+	t.Cleanup(func() { h.RevokeRoleBestEffort(e.port, e.mount, strong) })
+	e.setMFA(t, map[string]any{"require": map[string]any{"acr": []string{"phr", "mfa"}}})
+
+	run := e.login(t, t.TempDir(), personBob)
+	require.Error(t, run.Err, "Bob reaches neither")
+	// The CLI prints the error as JSON: the message's quotes are escaped.
+	assert.Contains(t, run.Stderr, `does not meet mfa_options.require: fact \"acr\" (claim \"acr\") holds none of: phr, mfa`)
+	assert.Contains(t, run.Stderr, "ask an operator what this mount's mfa_options require", "a hint that fits")
+
+	// The login asks for phr first, which Ada reaches: both roles.
+	adaHome := t.TempDir()
+	run = e.login(t, adaHome, personAda, "-role="+strong)
+	require.NoError(t, run.Err, run.Stderr)
+	names := roleNames(h.TicketListRoles(t, e.port, h.SessionTicket(t, adaHome)))
+	assert.Contains(t, names, e.role)
+	assert.Contains(t, names, strong)
+
+	// Carol meets the floor with any MFA, not the tier.
+	carolHome := t.TempDir()
+	run = e.login(t, carolHome, personCarol)
+	require.NoError(t, run.Err, run.Stderr)
+	carol := h.SessionTicket(t, carolHome)
+	names = roleNames(h.TicketListRoles(t, e.port, carol))
+	assert.Contains(t, names, e.role)
+	assert.NotContains(t, names, strong)
+	status, body := h.TicketRequest(t, "GET", "sys/providers?warden-list=true", e.port, carol, asRole(strong))
+	assert.Equal(t, http.StatusForbidden, status, string(body))
+
+	// Over a session two hours old, the login asks for a new sign-in, and the
+	// session ends reauthenticate_after past it rather than at session_ttl.
+	e.idp.StartSession(personAda, time.Now().Add(-2*time.Hour))
+	e.setMFA(t, map[string]any{"require": map[string]any{"acr": []string{"phr", "mfa"}}, "reauthenticate_after": "5m"})
+	home := t.TempDir()
+	before := time.Now()
+	run = e.login(t, home, personAda, "-role="+e.role)
+	require.NoError(t, run.Err, run.Stderr)
+	assert.WithinDuration(t, before.Add(5*time.Minute), h.SessionExpiry(t, home), 15*time.Second)
+}
+
+// Turning mfa_options on, or tightening them, refuses sessions already issued
+// from their next request, through every node and after a failover; warden
+// login then signs in anew, and turning them off admits the old sessions
+// again.
+func TestOIDCLogin_MFAAppliesToLiveSessions(t *testing.T) {
+	e := newHumanEnv(t, mfaACRs)
+	e.setMFA(t, map[string]any{})
+	adaHome, bobHome := t.TempDir(), t.TempDir()
+	run := e.login(t, adaHome, personAda, "-role="+e.role)
+	require.NoError(t, run.Err, run.Stderr)
+	run = e.login(t, bobHome, personBob)
+	require.NoError(t, run.Err, run.Stderr)
+	ada, bob := h.SessionTicket(t, adaHome), h.SessionTicket(t, bobHome)
+	expect := func(what, ticket string, want int) {
+		t.Helper()
+		for _, port := range h.NodePorts {
+			status, body := h.TicketRequest(t, "GET", "sys/introspect/roles", port, ticket, nil)
+			assert.Equal(t, want, status, "%s, node %d: %s", what, port, body)
+		}
+	}
+	expect("Ada", ada, http.StatusOK)
+	expect("Bob", bob, http.StatusOK)
+
+	// Ada signed in when nothing was asked: the identity provider gave her
+	// mfa. Bob carries no acr.
+	e.setMFA(t, map[string]any{"require": map[string]any{"acr": []string{"phr", "mfa"}}})
+	expect("Ada under a floor she meets", ada, http.StatusOK)
+	expect("Bob under a floor he does not meet", bob, http.StatusUnauthorized)
+	e.setMFA(t, map[string]any{"require": map[string]any{"acr": "phr"}})
+	expect("Ada under a tightened floor", ada, http.StatusUnauthorized)
+
+	// A facts write that would leave the floor naming nothing is refused.
+	status, body := h.APIRequest(t, "PUT", "auth/"+e.mount+"/config", e.port,
+		h.JSON(t, map[string]any{"facts": map[string]any{"roles": "roles"}}))
+	assert.Equal(t, http.StatusBadRequest, status, string(body))
+	assert.Contains(t, string(body), `\"acr\" is not a fact this mount publishes`)
+
+	// A new leader, which never saw the ticket, decodes it and refuses it too.
+	h.StepDown(t, e.port)
+	leader := h.WaitForLeader(t, 30, time.Second)
+	status, body = h.TicketRequest(t, "GET", "sys/introspect/roles", leader, ada, nil)
+	assert.Equal(t, http.StatusUnauthorized, status, "new leader: %s", body)
+
+	// warden login notices and signs in again, asked for phr now.
+	run = e.login(t, adaHome, personAda, "-role="+e.role)
+	require.NoError(t, run.Err, run.Stderr)
+	assert.Contains(t, run.Stderr, "no longer accepted; signing in again")
+	fresh := h.SessionTicket(t, adaHome)
+	assert.NotEqual(t, ada, fresh)
+	expect("Ada signed in again", fresh, http.StatusOK)
+
+	e.setMFA(t, map[string]any{})
+	expect("Bob once mfa_options are cleared", bob, http.StatusOK)
+	h.AssertClusterHealthy(t)
+}
+
+// An identity provider that keeps an old sign-in, whatever the login asks, is
+// caught at the callback; a sign-in it kept that is recent enough is issued a
+// session ending reauthenticate_after past it.
+func TestOIDCLogin_MFAKeptSignIn(t *testing.T) {
+	e := newHumanEnv(t, func(c *playground.AuthServerConfig) { c.IgnoreReauthentication = true })
+	e.setMFA(t, map[string]any{"reauthenticate_after": "1h"})
+
+	e.idp.StartSession(personAda, time.Now().Add(-2*time.Hour))
+	run := e.login(t, t.TempDir(), personAda)
+	require.Error(t, run.Err)
+	assert.Contains(t, run.Stderr, "older than mfa_options.reauthenticate_after (1h0m0s): it kept an earlier sign-in")
+
+	signedIn := time.Now().Add(-10 * time.Minute)
+	e.idp.StartSession(personAda, signedIn)
+	home := t.TempDir()
+	run = e.login(t, home, personAda, "-role="+e.role)
+	require.NoError(t, run.Err, run.Stderr)
+	assert.WithinDuration(t, signedIn.Add(time.Hour), h.SessionExpiry(t, home), 5*time.Second)
 }
