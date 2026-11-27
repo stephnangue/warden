@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -336,4 +337,30 @@ func TestProofRefusal(t *testing.T) {
 	// A bound ticket in WARDEN_TOKEN rides X-Warden-Token with no proof.
 	t.Setenv(api.EnvWardenToken, "wdt.bound")
 	assert.Contains(t, ProofRefusal(refusal(`DPoP error="invalid_dpop_proof", algs="ES256"`, now.Format(http.TimeFormat))), "unset WARDEN_TOKEN")
+}
+
+// A session the server refuses (its mount's mfa_options were tightened, or the
+// mount is gone) is answered with a hint to sign in again, on a sys path's 403
+// as on an identity path's 401; the command's own hint, or a proof's, wins.
+func TestSessionRefusal(t *testing.T) {
+	refused := func(status int) error {
+		return fmt.Errorf("failed to list from sys/providers: %w", &api.ResponseError{
+			StatusCode: status, Errors: []string{"the presented ticket is not valid here"}})
+	}
+	for _, status := range []int{http.StatusForbidden, http.StatusUnauthorized} {
+		assert.Contains(t, SessionRefusal(refused(status)), "sign in again with warden login", "status %d", status)
+	}
+	assert.Empty(t, SessionRefusal(&api.ResponseError{StatusCode: http.StatusForbidden, Errors: []string{"permission denied"}}))
+	assert.Empty(t, SessionRefusal(errors.New("the presented ticket is not valid here")), "only the server's answer")
+
+	_, stderr := setupCapture(t)
+	t.Cleanup(func() { SetOutputFormat("") })
+	SetOutputFormat("table")
+	RenderError(refused(http.StatusForbidden))
+	assert.Contains(t, stderr.String(), "(the server no longer accepts this session")
+
+	stderr.Reset()
+	RenderError(WithHint(refused(http.StatusForbidden), "the command's own"))
+	assert.Contains(t, stderr.String(), "(the command's own)")
+	assert.NotContains(t, stderr.String(), "warden login")
 }

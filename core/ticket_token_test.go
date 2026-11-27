@@ -487,6 +487,9 @@ func TestTicket_MFARefusesLiveTickets(t *testing.T) {
 				} else {
 					assert.ErrorIs(t, err, ErrTokenNotFound, "cold cache %v", cold)
 					assert.ErrorIs(t, rerr, ErrTokenNotFound, "resolve, cold cache %v", cold)
+					// The cause names the check, for the server's log.
+					assert.ErrorIs(t, err, logical.ErrMFARequireNotMet, "cold cache %v", cold)
+					assert.ErrorContains(t, err, e.mount.Accessor)
 				}
 				_, err = e.c.LookupToken(e.ctx, other)
 				assert.NoError(t, err, "another mount's ticket, cold cache %v", cold)

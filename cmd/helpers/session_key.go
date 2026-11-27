@@ -210,6 +210,29 @@ func ProofRefusal(err error) string {
 	return ""
 }
 
+// ticketRefusedMessage is the one message the server refuses a session's ticket
+// with, whatever check it failed.
+const ticketRefusedMessage = "the presented ticket is not valid here"
+
+// SessionRefusal returns a recovery hint for err when the server refused the
+// session a request presented, or "". The server does not say why: the
+// session's sign-in no longer meets what its mount requires (mfa_options were
+// turned on or tightened), or the mount or its namespace is gone. Signing in
+// again settles every case the session's holder can settle.
+func SessionRefusal(err error) string {
+	var re *api.ResponseError
+	if !errors.As(err, &re) {
+		return ""
+	}
+	for _, e := range re.Errors {
+		if strings.Contains(e, ticketRefusedMessage) {
+			return "the server no longer accepts this session (its mount's requirements changed, or the mount is gone): " +
+				"sign in again with warden login"
+		}
+	}
+	return ""
+}
+
 // ProofClockSkew returns how far this machine's clock is ahead of the server's
 // when err refuses a proof and the server's Date puts the two further apart
 // than a proof's window allows.
