@@ -124,7 +124,10 @@ jobs:
         run: npm run build
 
       # A broken internal link doesn't fail the build — it ships silently —
-      # so crawl the built site as well.
+      # so crawl the built site as well. The preview server sometimes leaves
+      # a request unanswered when hit with many at once (status 0 on files
+      # that exist), so fewer connections, and a request with no answer is
+      # retried; a missing page still answers 404 and fails.
       - name: Link check
         working-directory: site
         run: |
@@ -136,7 +139,10 @@ jobs:
           npx --yes linkinator http://localhost:4321 \
             --recurse \
             --skip '^https?://(?!localhost)' \
-            --timeout 20000
+            --timeout 20000 \
+            --concurrency 20 \
+            --retry-errors \
+            --retry-errors-count 3
 
   helm:
     name: helm-lint
