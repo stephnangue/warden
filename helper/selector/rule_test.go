@@ -114,6 +114,76 @@ func TestRuleMatch_NilAndEmpty(t *testing.T) {
 	if nilRule.Match(src) || (&Rule{}).Match(src) {
 		t.Fatal("a nil or empty rule matched")
 	}
+	if nilRule.Unmet(src) != "" || (&Rule{}).Unmet(src) != "" {
+		t.Fatal("a nil or empty rule named a selector")
+	}
+}
+
+// Unmet names the first selector, in name order, that a source fails, and
+// agrees with Match.
+func TestRuleUnmet(t *testing.T) {
+	src := jwtSource(t, `{"sub":"a","acr":"phr","amr":["pwd","mfa"]}`,
+		map[string]string{"acr": "acr", "amr": "amr"})
+	cases := []struct {
+		rule map[string][]string
+		want string
+	}{
+		{map[string][]string{"acr": {"phr", "phrh"}, "amr": {"mfa"}}, ""},
+		{map[string][]string{"acr": {"phrh"}, "amr": {"mfa"}}, "acr"},
+		{map[string][]string{"acr": {"phr"}, "amr": {"hwk"}}, "amr"},
+		{map[string][]string{"acr": {"x"}, "amr": {"hwk"}}, "acr"},
+		{map[string][]string{"acr": {"phr"}, "absent": {"x"}}, "absent"},
+	}
+	for _, tc := range cases {
+		r := mustRule(t, tc.rule)
+		if got := r.Unmet(src); got != tc.want {
+			t.Errorf("%v: Unmet = %q; want %q", tc.rule, got, tc.want)
+		}
+		if r.Match(src) != (tc.want == "") {
+			t.Errorf("%v: Match disagrees with Unmet", tc.rule)
+		}
+	}
+}
+
+func TestParseRule(t *testing.T) {
+	got, err := ParseRule(map[string]any{
+		"one":   "a",
+		"list":  []any{"b", "c"},
+		"typed": []string{"d"},
+		"empty": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{"one": {"a"}, "list": {"b", "c"}, "typed": {"d"}, "empty": {}}
+	if len(got) != len(want) {
+		t.Fatalf("ParseRule = %q; want %q", got, want)
+	}
+	for name, vs := range want {
+		if !slices.Equal(got[name], vs) {
+			t.Errorf("ParseRule[%q] = %q; want %q", name, got[name], vs)
+		}
+	}
+	if got, err := ParseRule(map[string]any{}); err != nil || len(got) != 0 {
+		t.Errorf("ParseRule({}) = %v, %v; want an empty rule", got, err)
+	}
+
+	refused := []struct {
+		raw  any
+		want string
+	}{
+		{"x", "must be an object of selectors (fact name to values), got string"},
+		{[]any{"x"}, "must be an object of selectors"},
+		{nil, "must be an object of selectors"},
+		{map[string]any{"n": 3.0}, `selector "n": must be a string or a list of strings, got float64`},
+		{map[string]any{"n": []any{"a", 1.0}}, `selector "n": values must be strings, got float64`},
+	}
+	for _, tc := range refused {
+		_, err := ParseRule(tc.raw)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("ParseRule(%v) = %v; want an error containing %q", tc.raw, err, tc.want)
+		}
+	}
 }
 
 func TestCompile_Values(t *testing.T) {
