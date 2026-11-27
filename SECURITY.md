@@ -58,6 +58,67 @@ versions get no fixes: upgrade to the latest release.
 | The latest minor release | Yes |
 | Older | No |
 
+## Verifying a release
+
+From v0.23.0, every release is signed by this repository's release workflow
+with Sigstore keyless signing, and carries GitHub build provenance. A valid
+signature shows the artifact was built by that workflow from the tag you
+expect. You need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+v3.1.6 or later (earlier versions can accept an image that carries an
+attestation but no signature), and the [GitHub CLI](https://cli.github.com/)
+for provenance.
+
+```bash
+TAG=v0.23.0
+ID="https://github.com/stephnangue/warden/.github/workflows/release.yml@refs/tags/$TAG"
+ISSUER=https://token.actions.githubusercontent.com
+```
+
+**Binaries.** `checksums.txt` lists every archive and its SBOM, and its
+signature covers them all.
+
+```bash
+cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+  --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER"
+sha256sum --check --ignore-missing checksums.txt   # macOS: shasum -a 256 --check --ignore-missing checksums.txt
+gh attestation verify "warden_${TAG#v}_linux_amd64.tar.gz" -R stephnangue/warden \
+  --signer-workflow stephnangue/warden/.github/workflows/release.yml \
+  --source-ref "refs/tags/$TAG"
+```
+
+**Container images.** The image also carries an SPDX SBOM.
+
+```bash
+cosign verify "ghcr.io/stephnangue/warden:$TAG" \
+  --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER"
+gh attestation verify "oci://ghcr.io/stephnangue/warden:$TAG" -R stephnangue/warden \
+  --signer-workflow stephnangue/warden/.github/workflows/release.yml \
+  --source-ref "refs/tags/$TAG"
+docker buildx imagetools inspect "ghcr.io/stephnangue/warden:$TAG" --format '{{ json .SBOM }}'
+```
+
+The `latest` and `debug` tags move with each release: verify them with
+`--certificate-identity-regexp`, as for the chart below.
+
+**Helm chart.** The chart version moves on its own, so a chart is signed by
+whichever release published it.
+
+```bash
+CHART=0.3.9
+RELEASES='^https://github\.com/stephnangue/warden/\.github/workflows/release\.yml@refs/tags/v'
+cosign verify "ghcr.io/stephnangue/charts/warden:$CHART" \
+  --certificate-identity-regexp "$RELEASES" --certificate-oidc-issuer "$ISSUER"
+gh attestation verify "oci://ghcr.io/stephnangue/charts/warden:$CHART" -R stephnangue/warden \
+  --signer-workflow stephnangue/warden/.github/workflows/release.yml
+cosign verify-blob "warden-$CHART.tgz" --bundle "warden-$CHART.tgz.sigstore.json" \
+  --certificate-identity-regexp "$RELEASES" --certificate-oidc-issuer "$ISSUER"
+```
+
+cosign fetches Sigstore's trust root and `gh` asks the GitHub API, so both need
+the internet. On an air-gapped site, verify on a connected machine before
+copying the artifacts in; `checksums.txt` alone still checks a download
+offline.
+
 ## Scope
 
 In scope: the `warden` server and command-line client, the container images at
