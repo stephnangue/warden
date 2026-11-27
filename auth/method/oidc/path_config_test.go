@@ -188,6 +188,105 @@ func TestConfigWrite_DPoPEnabled(t *testing.T) {
 	assert.Equal(t, true, read(e.newBackend(testAccessor)))
 }
 
+// mfa_options: a sent block replaces the stored one whole, an empty one clears
+// it, a write without it keeps it, and a read returns what was written. A
+// floor naming a fact the mount does not publish is refused, a facts write
+// that would drop one too, and a write that drops the floor is warned.
+func TestConfigWrite_MFAOptions(t *testing.T) {
+	e := newEnv(t)
+	readMFA := func() any {
+		t.Helper()
+		r, err := e.b.HandleRequest(e.ctx, &logical.Request{Operation: logical.ReadOperation, Path: "config"})
+		require.NoError(t, err)
+		return r.Data["mfa_options"]
+	}
+	warnings := func(resp *logical.Response) []string {
+		t.Helper()
+		require.NoError(t, resp.Err)
+		w, _ := resp.Data["warnings"].([]string)
+		assert.Equal(t, w, resp.Warnings, "in the data and in Warnings alike")
+		return w
+	}
+
+	resp := e.configure(nil)
+	assert.Empty(t, warnings(resp))
+	assert.Equal(t, map[string]any{}, readMFA(), "unset reads as an empty object")
+	assert.Nil(t, e.b.mountFacts.Load().MFA)
+
+	resp = e.configure(map[string]any{"facts": mfaFacts(e), "mfa_options": map[string]any{
+		"require":              map[string]any{"acr": []any{"phr", "phrh"}},
+		"reauthenticate_after": "15m",
+	}})
+	assert.Empty(t, warnings(resp))
+	assert.Equal(t, map[string]any{
+		"require":              map[string][]string{"acr": {"phr", "phrh"}},
+		"reauthenticate_after": "15m0s",
+	}, readMFA())
+	n := e.b.mountFacts.Load()
+	require.NotNil(t, n.MFA, "the published naming carries the requirement")
+	assert.Equal(t, []string{"acr"}, n.MFA.Rule.Names())
+	assert.Equal(t, 15*time.Minute, n.MFA.ReauthenticateAfter)
+
+	assert.Empty(t, warnings(e.call(e.b, "config", map[string]any{"session_ttl": "2h"})))
+	assert.NotEmpty(t, readMFA().(map[string]any)["require"], "a write without mfa_options keeps them")
+
+	// A facts write that would leave the floor naming a fact the mount no
+	// longer publishes is refused; the stored config is unchanged.
+	n = e.b.mountFacts.Load()
+	resp = e.call(e.b, "config", map[string]any{"facts": e.baseConfig()["facts"]})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.ErrorContains(t, resp.Err, `mfa_options.require: "acr" is not a fact this mount publishes`)
+	assert.Same(t, n, e.b.mountFacts.Load())
+
+	// A sent block replaces the stored one whole: require is dropped, with a
+	// warning.
+	w := warnings(e.call(e.b, "config", map[string]any{"mfa_options": map[string]any{"reauthenticate_after": "1h"}}))
+	require.Len(t, w, 1)
+	assert.Contains(t, w[0], "mfa_options.require is removed")
+	assert.Equal(t, map[string]any{"reauthenticate_after": "1h0m0s"}, readMFA())
+	assert.Nil(t, e.b.mountFacts.Load().MFA.Rule)
+
+	// Only an empty object clears them: null and a list are refused, so a
+	// client sending null for a field it leaves unset does not turn MFA off.
+	for name, v := range map[string]any{"null": nil, "a list": []any{}} {
+		resp := e.call(e.b, "config", map[string]any{"mfa_options": v})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, name)
+		assert.ErrorContains(t, resp.Err, "({} clears it)", name)
+	}
+	assert.NotNil(t, e.b.mountFacts.Load().MFA, "still set")
+
+	w = warnings(e.call(e.b, "config", map[string]any{"mfa_options": map[string]any{}}))
+	require.Len(t, w, 1, "clearing a bound warns that it is gone")
+	assert.Contains(t, w[0], "mfa_options.reauthenticate_after is removed")
+	assert.Equal(t, map[string]any{}, readMFA())
+	assert.Nil(t, e.b.mountFacts.Load().MFA, "an empty object clears them")
+	assert.Equal(t, map[string]any{}, mfaOptionsData(nil))
+	assert.Empty(t, warnings(e.call(e.b, "config", map[string]any{"mfa_options": map[string]any{}})),
+		"clearing nothing warns of nothing")
+
+	// A pattern is warned of by the write that sends it, not by every write.
+	w = warnings(e.call(e.b, "config", map[string]any{"mfa_options": map[string]any{
+		"require": map[string]any{"acr": "urn:okta:loa:*", "amr": "mfa"},
+	}}))
+	require.Len(t, w, 1)
+	assert.Contains(t, w[0], `"urn:okta:loa:*" (fact "acr") is a pattern`)
+	assert.Empty(t, warnings(e.call(e.b, "config", map[string]any{"session_ttl": "1h"})))
+
+	for name, mfa := range map[string]map[string]any{
+		"an unmapped fact":    {"require": map[string]any{"groups_mfa": "x"}},
+		"a bound too short":   {"reauthenticate_after": "1m"},
+		"a bound too long":    {"reauthenticate_after": "9h"},
+		"an unknown key":      {"max_age": "1h"},
+		"an empty floor":      {"require": map[string]any{}},
+		"a non-string value":  {"require": map[string]any{"acr": []any{2}}},
+		"a value that is bad": {"require": map[string]any{"acr": ""}},
+	} {
+		resp := e.call(e.b, "config", map[string]any{"mfa_options": mfa})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, name)
+		assert.ErrorContains(t, resp.Err, "mfa_options", name)
+	}
+}
+
 func manyFacts(n int) map[string]any {
 	f := make(map[string]any, n)
 	for i := range n {

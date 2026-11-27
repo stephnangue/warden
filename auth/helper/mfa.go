@@ -40,19 +40,19 @@ type MFAOptions struct {
 	ReauthenticateAfter time.Duration `json:"reauthenticate_after,omitempty"`
 }
 
-// ParseMFAOptions converts the mfa_options field of a config write: an object
-// with require, reauthenticate_after or both. nil or an empty object clears
-// the block, and returns nil. reauthenticate_after takes a duration string
-// ("15m") or a number of seconds, between MinReauthenticateAfter and
+// ParseMFAOptions converts the mfa_options field of a config write, as the
+// request carries it: an object with require, reauthenticate_after or both. An
+// empty object clears the block, and returns nil; anything else that is not an
+// object (null, a list) is refused, so a client that sends null for a field it
+// leaves unset does not turn MFA off. reauthenticate_after takes a duration
+// string ("15m") or a number of seconds, between MinReauthenticateAfter and
 // MaxReauthenticateAfter. Whether require names facts the mount publishes is
 // Attach's check, against the mapping the write installs.
 func ParseMFAOptions(raw any) (*MFAOptions, error) {
-	if raw == nil {
-		return nil, nil
-	}
 	m, ok := raw.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("mfa_options: must be an object with require, reauthenticate_after or both, got %T", raw)
+	if !ok || m == nil {
+		return nil, fmt.Errorf("mfa_options: must be an object with require, reauthenticate_after or both "+
+			"({} clears it), got %s", describe(raw))
 	}
 	if len(m) == 0 {
 		return nil, nil
@@ -83,6 +83,14 @@ func ParseMFAOptions(raw any) (*MFAOptions, error) {
 		}
 	}
 	return o, nil
+}
+
+// describe names what a request sent where an object was expected.
+func describe(raw any) string {
+	if m, ok := raw.(map[string]any); raw == nil || (ok && m == nil) {
+		return "null"
+	}
+	return fmt.Sprintf("%T", raw)
 }
 
 func checkReauthenticateAfter(d time.Duration) error {

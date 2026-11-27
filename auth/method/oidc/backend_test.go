@@ -348,6 +348,50 @@ func TestInitialize_InvalidStoredConfig(t *testing.T) {
 	assert.NoError(t, cfg.invalid, "a write replaces it")
 }
 
+// Stored mfa_options that no longer compile at load (here, a floor naming a
+// fact the stored mapping does not publish) fail closed: the published naming
+// carries a requirement that admits no ticket, and every login is refused,
+// until the config is rewritten.
+func TestInitialize_MFAOptionsDoNotCompile(t *testing.T) {
+	e := newEnv(t)
+	e.mustConfigure(map[string]any{"facts": mfaFacts(e), "mfa_options": map[string]any{
+		"require": map[string]any{"acr": "phr"}, "reauthenticate_after": "1h",
+	}})
+	entry, err := e.storage.Get(e.ctx, "config")
+	require.NoError(t, err)
+	var stored map[string]any
+	require.NoError(t, entry.DecodeJSON(&stored))
+	stored["facts"] = e.baseConfig()["facts"]
+	bad, err := sdklogical.StorageEntryJSON("config", stored)
+	require.NoError(t, err)
+	require.NoError(t, e.storage.Put(e.ctx, bad))
+
+	b := e.newBackend(testAccessor)
+	cfg, _ := e.liveConfig(b)
+	require.NotNil(t, cfg)
+	assert.ErrorContains(t, cfg.invalid, `mfa_options.require: "acr" is not a fact`)
+	n := b.mountFacts.Load()
+	require.NotNil(t, n, "the naming is still published")
+	require.NotNil(t, n.MFA)
+	adm := &logical.Admission{
+		Facts:    selector.NewClaims(map[string]any{"oid": "0583-oid", "acr": "phr"}),
+		AuthTime: time.Now(),
+	}
+	assert.ErrorIs(t, adm.CheckMFA(n, time.Now()), logical.ErrMFAInvalid, "no ticket of the mount is admitted")
+
+	binding, _ := secret()
+	resp := e.call(b, "auth_url", map[string]any{"redirect_uri": testRedirect, "login_binding": binding,
+		"dpop_jkt": e.dpopKey.Thumbprint()})
+	assert.ErrorIs(t, resp.Err, errConfigInvalid)
+
+	// A write must fix it: one leaving mfa_options as stored is refused.
+	e.b = b
+	resp = e.call(b, "config", map[string]any{"session_ttl": "2h"})
+	assert.ErrorContains(t, resp.Err, "mfa_options.require")
+	e.mustConfigure(map[string]any{"mfa_options": map[string]any{}})
+	assert.Nil(t, b.mountFacts.Load().MFA)
+}
+
 // A provider replaced by a config write is retired, and released only when
 // the last login using it finishes.
 func TestLive_ProviderLifecycle(t *testing.T) {

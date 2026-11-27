@@ -427,13 +427,20 @@ func TestAnchorFingerprints(t *testing.T) {
 }
 
 func TestParseMFAOptions(t *testing.T) {
-	for _, raw := range []any{nil, map[string]any{}} {
-		o, err := ParseMFAOptions(raw)
-		require.NoError(t, err)
-		assert.Nil(t, o, "%v clears the block", raw)
-	}
+	o, err := ParseMFAOptions(map[string]any{})
+	require.NoError(t, err)
+	assert.Nil(t, o, "an empty object clears the block")
 
-	o, err := ParseMFAOptions(map[string]any{
+	// Only an empty object clears it: null, as a client that sends every
+	// field it leaves unset would, is refused.
+	for _, raw := range []any{nil, map[string]any(nil), []any{}} {
+		_, err := ParseMFAOptions(raw)
+		assert.ErrorContains(t, err, "({} clears it)", "%#v", raw)
+	}
+	_, err = ParseMFAOptions(nil)
+	assert.ErrorContains(t, err, "got null")
+
+	o, err = ParseMFAOptions(map[string]any{
 		"require":              map[string]any{"acrs": []any{"c2", "c1"}, "amr": "mfa"},
 		"reauthenticate_after": "15m",
 	})
