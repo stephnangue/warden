@@ -81,7 +81,11 @@ func RenderError(err error) ExitCode {
 	code, exit := classify(err)
 	var he *hintedError
 	if !errors.As(err, &he) {
-		if hint := ProofRefusal(err); hint != "" {
+		hint := ProofRefusal(err)
+		if hint == "" {
+			hint = SessionRefusal(err)
+		}
+		if hint != "" {
 			err = WithHint(err, hint)
 		}
 	}
