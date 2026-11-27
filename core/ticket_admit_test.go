@@ -464,6 +464,22 @@ func TestTicketRequest_SysPath(t *testing.T) {
 		}
 	})
 
+	// The server's log names the check a ticket failed (ticketRefusal); the
+	// caller learns only that it is refused.
+	t.Run("a ticket refused for the mount's mfa_options names no check", func(t *testing.T) {
+		base := e.issuer.mf.Load()
+		e.publishMFA(e.issuer, base, map[string][]string{"level": {"4"}}, 0)
+		defer e.issuer.mf.Publish(base)
+		resp, req, err := e.do("sys/providers?role=operator", wardenToken(e.value))
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+		require.Error(t, resp.Err)
+		assert.Contains(t, resp.Err.Error(), errTicketRefused.Error())
+		assert.NotContains(t, resp.Err.Error(), "mfa_options")
+		assert.Nil(t, req.TokenEntry())
+	})
+
 	t.Run("a bearer ticket is never sent to the namespace's auto_auth_path", func(t *testing.T) {
 		ns := namespace.RootNamespace
 		ns.CustomMetadata = map[string]string{"auto_auth_path": "auth/agent-jwt/"}

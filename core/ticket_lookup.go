@@ -15,10 +15,12 @@ import (
 
 // lookupTicket returns this request's copy of the entry a ticket value
 // stands for: the cached one, or one rebuilt from the value and cached. Every
-// request, hit or miss, then passes the same checks. Each refuses with
-// ErrTokenNotFound, except an expired ticket (ErrTokenExpired) and a request
-// outside the ticket's namespaces (ErrTokenNamespaceMismatch), as for every
-// token; the request path answers all of them alike:
+// request, hit or miss, then passes the same checks. Each refuses with a
+// *ticketRefusal, which is ErrTokenNotFound to every caller and names the
+// failed check for the server's log, except an expired ticket
+// (ErrTokenExpired) and a request outside the ticket's namespaces
+// (ErrTokenNamespaceMismatch), as for every token; the request path answers
+// all of them alike:
 //
 //  0. the entry holds this very value (the cache key is a truncated hash);
 //  1. the ticket has not expired;
@@ -72,7 +74,7 @@ func (c *Core) lookupTicket(ctx context.Context, value string, proof *ticketProo
 		entry, err = c.ticketEntry(ctx, id, value)
 		if err != nil {
 			s.logger.Debug("ticket refused", logger.String("token_id", id), logger.Err(err))
-			return nil, ErrTokenNotFound
+			return nil, &ticketRefusal{err}
 		}
 		// An expired ticket is refused below and never cached: its cache TTL
 		// would be 0, which the cache reads as never expiring.
@@ -93,7 +95,7 @@ func (c *Core) lookupTicket(ctx context.Context, value string, proof *ticketProo
 				s.metrics.IncrementNamespaceMismatches()
 			}
 		default:
-			err = ErrTokenNotFound
+			err = &ticketRefusal{err}
 		}
 		return nil, err
 	}
@@ -109,6 +111,19 @@ func (c *Core) lookupTicket(ctx context.Context, value string, proof *ticketProo
 	}
 	return entry.Copy(), nil
 }
+
+// ticketRefusal refuses a ticket that does not open, or fails one of
+// lookupTicket's checks. It is ErrTokenNotFound to every caller, which answers
+// it as any token it cannot find, so the caller learns nothing more; its cause
+// names the check (the issuing mount gone, the mount's mfa_options not met, a
+// value that does not open) for the server's log, where an operator who
+// changed a mount's settings finds why its sessions are refused. As
+// ticketProofError, it is built only on a refusal.
+type ticketRefusal struct{ err error }
+
+func (e *ticketRefusal) Error() string        { return e.err.Error() }
+func (e *ticketRefusal) Unwrap() error        { return e.err }
+func (e *ticketRefusal) Is(target error) bool { return target == ErrTokenNotFound }
 
 // ticketEntry decodes value into the entry a login of it issued: the same
 // fields, and an admission that answers every fact as the issuing node's did.
