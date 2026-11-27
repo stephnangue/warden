@@ -11,6 +11,9 @@ covenant
 # component named "warden" anywhere in the tree.
 /warden
 
+# GoReleaser output: archives, SBOMs, checksums and signatures.
+/dist/
+
 # Test binary
 *.test
 

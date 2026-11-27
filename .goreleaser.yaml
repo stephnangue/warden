@@ -32,6 +32,24 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# One SPDX SBOM per archive, written by syft. SBOMs are made before the
+# checksums, so checksums.txt lists them and its signature covers them.
+sboms:
+  - artifacts: archive
+
+# Keyless: cosign signs with the release workflow's GitHub OIDC identity and
+# writes the certificate and signature into one bundle.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    output: true
+
 changelog:
   sort: asc
   filters:
@@ -47,15 +65,30 @@ dockers_v2:
       - "ghcr.io/stephnangue/warden"
     tags:
       - "v{{ .Version }}"
-      - latest
+      # Empty on a prerelease, and an empty tag is dropped: a release
+      # candidate never moves latest.
+      - "{{ if not .Prerelease }}latest{{ end }}"
     dockerfile: deploy/Dockerfile.goreleaser
+    # BuildKit attaches an SPDX SBOM to the image index.
+    sbom: true
   - id: warden-debug
     images:
       - "ghcr.io/stephnangue/warden"
     tags:
       - "v{{ .Version }}-debug"
-      - debug
+      - "{{ if not .Prerelease }}debug{{ end }}"
     dockerfile: deploy/Dockerfile.goreleaser.debug
+    sbom: true
+
+# Signs each image's index digest keyless; the index also holds the SBOM and
+# BuildKit provenance, so the signature covers them.
+docker_signs:
+  - cmd: cosign
+    args:
+      - sign
+      - "${artifact}@${digest}"
+      - "--yes"
+    output: true
 
 release:
   github:
